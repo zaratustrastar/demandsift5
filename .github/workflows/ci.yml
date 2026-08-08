@@ -8,6 +8,25 @@ on:
   pull_request:
 
 jobs:
+  source-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run source-level test suite
+        run: node --test tests/*.test.mjs
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20

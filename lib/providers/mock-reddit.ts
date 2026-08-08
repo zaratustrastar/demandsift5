@@ -1,9 +1,16 @@
 import type {
+  RedditDiscoveryResponse,
+  RedditEnrichmentRequest,
+  RedditEnrichmentResponse,
   RedditProvider,
   RedditSearchRequest,
   RedditSearchResponse,
 } from "@/lib/providers/contracts";
-import type { RedditConversation } from "@/lib/domain/types";
+import type {
+  EnrichedRedditConversation,
+  RedditContextMessage,
+  RedditDiscoveryCandidate,
+} from "@/lib/domain/types";
 import { contentFingerprint, normalizeSearchText } from "@/lib/intelligence/opportunity-ranking";
 
 interface MockFixture {
@@ -14,6 +21,7 @@ interface MockFixture {
   ageDays: number;
   score: number;
   comments: number;
+  lane: RedditDiscoveryCandidate["discoveryLanes"][number];
 }
 
 const FIXTURES: readonly MockFixture[] = [
@@ -26,6 +34,7 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 1,
     score: 19,
     comments: 11,
+    lane: "direct_buying_intent",
   },
   {
     id: "mock_problem_02",
@@ -36,6 +45,7 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 2,
     score: 34,
     comments: 16,
+    lane: "problem_pain",
   },
   {
     id: "mock_competitor_03",
@@ -46,6 +56,7 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 3,
     score: 12,
     comments: 9,
+    lane: "competitor_switching",
   },
   {
     id: "mock_question_04",
@@ -56,6 +67,7 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 5,
     score: 8,
     comments: 14,
+    lane: "category_recommendation",
   },
   {
     id: "mock_switch_05",
@@ -66,6 +78,7 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 6,
     score: 27,
     comments: 21,
+    lane: "brand_competitor_mentions",
   },
   {
     id: "mock_research_06",
@@ -76,6 +89,7 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 8,
     score: 41,
     comments: 25,
+    lane: "category_recommendation",
   },
   {
     id: "mock_noise_07",
@@ -86,15 +100,16 @@ const FIXTURES: readonly MockFixture[] = [
     ageDays: 1,
     score: 3,
     comments: 42,
+    lane: "brand_competitor_mentions",
   },
 ];
 
 function pickTopic(request: RedditSearchRequest): string {
   const candidates = [
-    ...request.queries.productTerms.slice(1),
+    ...(request.queries.productCategories ?? []),
     ...request.queries.customerProblems,
+    ...request.queries.productTerms.slice(1),
     ...request.queries.productTerms.slice(0, 1),
-    ...request.queries.buyerIntent,
   ];
   const selected = candidates.find((term) => normalizeSearchText(term).length >= 4) ?? "this workflow";
   const concise = selected.replace(/\s+/g, " ").trim();
@@ -111,15 +126,33 @@ function fixtureDate(ageDays: number): string {
   return new Date(reference - ageDays * 86_400_000).toISOString();
 }
 
-/**
- * Development fallback. Every record is marked mock and intentionally has no
- * Reddit permalink, so it cannot be mistaken for a real public conversation.
- */
+function enrichMock(candidate: RedditDiscoveryCandidate): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    ...candidate,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+  };
+}
+
+/** Development fallback. Records are marked mock and have no invented permalink. */
 export class MockRedditProvider implements RedditProvider {
   readonly name = "mock-reddit";
   readonly sourceMode = "mock" as const;
 
-  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
     const topic = pickTopic(request);
     const alternative = pickAlternative(request);
     const start = Number.parseInt(request.cursor ?? "0", 10);
@@ -127,11 +160,10 @@ export class MockRedditProvider implements RedditProvider {
     const limit = Math.max(1, Math.min(request.limit, 100));
     const slice = FIXTURES.slice(safeStart, safeStart + limit);
 
-    const conversations: RedditConversation[] = slice.map((fixture) => {
+    const candidates: RedditDiscoveryCandidate[] = slice.map((fixture) => {
       const title = fixture.title(topic);
       const body = fixture.body(topic, alternative);
       const contentHash = contentFingerprint(`${title}\n${body}`);
-
       return {
         provider: this.name,
         sourceMode: this.sourceMode,
@@ -140,9 +172,12 @@ export class MockRedditProvider implements RedditProvider {
         subreddit: fixture.subreddit,
         title,
         body,
+        author: `mock_user_${fixture.id}`,
         createdAt: fixtureDate(fixture.ageDays),
         metrics: { score: fixture.score, comments: fixture.comments },
         matchedQuery: topic,
+        matchedQueries: [topic],
+        discoveryLanes: [fixture.lane],
         provenance: {
           id: `mock-source-${fixture.id}`,
           kind: "mock_reddit",
@@ -158,10 +193,50 @@ export class MockRedditProvider implements RedditProvider {
       };
     });
 
-    const nextOffset = safeStart + conversations.length;
+    const nextOffset = safeStart + candidates.length;
+    return {
+      candidates,
+      nextCursor: nextOffset < FIXTURES.length ? String(nextOffset) : undefined,
+      searchPlan: [],
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        queryCount: 0,
+        fetchedCandidates: candidates.length,
+        normalizedCandidates: candidates.length,
+        verifiedRecentCandidates: candidates.length,
+        rejectedByReason: {
+          invalid_record: 0,
+          invalid_url: 0,
+          bot_author: 0,
+          deleted: 0,
+          nsfw: 0,
+          missing_timestamp: 0,
+          outside_window: 0,
+        },
+        laneQueryCounts: {},
+      },
+    };
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const conversations = request.candidates.map(enrichMock);
     return {
       conversations,
-      nextCursor: nextOffset < FIXTURES.length ? String(nextOffset) : undefined,
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        requested: request.candidates.length,
+        enriched: conversations.length,
+        failed: 0,
+        fallbackUsed: 0,
+      },
+    };
+  }
+
+  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+    const discovery = await this.discover(request);
+    return {
+      conversations: discovery.candidates.map(enrichMock),
+      nextCursor: discovery.nextCursor,
       sourceMode: this.sourceMode,
     };
   }

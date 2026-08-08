@@ -1,0 +1,268 @@
+# DigitalOcean App Platform template.
+# Before applying it, replace the GitHub repository, managed PostgreSQL cluster,
+# and every REPLACE_IN_DIGITALOCEAN value. App specs do not expand local shell
+# variables. See docs/DEPLOYMENT.md for the production-readiness boundary.
+
+name: threadline
+region: ams
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+
+ingress:
+  rules:
+    - component:
+        name: web
+      match:
+        path:
+          prefix: /
+
+services:
+  - name: web
+    github:
+      repo: your-org/threadline
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: deploy/Dockerfile.web
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /
+      initial_delay_seconds: 20
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 4
+    liveness_health_check:
+      http_path: /
+      initial_delay_seconds: 30
+      period_seconds: 30
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 5
+    termination:
+      drain_seconds: 15
+      grace_period_seconds: 60
+    envs:
+      - key: APP_URL
+        value: ${_self.PUBLIC_URL}
+        scope: RUN_TIME
+        type: GENERAL
+
+workers:
+  - name: worker
+    github:
+      repo: your-org/threadline
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: deploy/Dockerfile.worker
+    run_command: node scripts/background-worker.mjs work
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    termination:
+      grace_period_seconds: 60
+    envs:
+      - key: BACKGROUND_WORKER_MODE
+        value: queue
+        scope: RUN_TIME
+        type: GENERAL
+      - key: INTERNAL_WEB_URL
+        # Cross-component service bindings may use the service's private URL.
+        value: ${web.PRIVATE_URL}
+        scope: RUN_TIME
+        type: GENERAL
+      - key: BACKGROUND_JOB_POLL_MS
+        value: "2000"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: BACKGROUND_JOB_TIMEOUT_SECONDS
+        value: "900"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: BACKGROUND_JOB_STALE_SECONDS
+        value: "1200"
+        scope: RUN_TIME
+        type: GENERAL
+
+jobs:
+  - name: migrate
+    github:
+      repo: your-org/threadline
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: deploy/Dockerfile.worker
+    run_command: node scripts/background-worker.mjs migrate
+    kind: PRE_DEPLOY
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+
+databases:
+  - name: threadline-db
+    engine: PG
+    production: true
+    # Attach an existing DigitalOcean Managed PostgreSQL cluster in this region.
+    cluster_name: replace-with-managed-postgres-cluster
+    db_name: threadline
+    db_user: threadline_app
+
+envs:
+  - key: APP_RUNTIME_ENV
+    value: production
+    scope: RUN_TIME
+    type: GENERAL
+  - key: NODE_ENV
+    value: production
+    scope: RUN_TIME
+    type: GENERAL
+  - key: STATE_STORE
+    value: postgres
+    scope: RUN_TIME
+    type: GENERAL
+  - key: DATABASE_URL
+    value: ${threadline-db.DATABASE_PRIVATE_URL}
+    scope: RUN_TIME
+    # The value remains a bindable expression in the spec; DigitalOcean injects
+    # the private credential at runtime.
+    type: GENERAL
+  # Shared only by the web executor and queue worker. Replace this with at
+  # least 32 cryptographically random characters before submitting the spec.
+  - key: BACKGROUND_WORKER_SECRET
+    value: REPLACE_IN_DIGITALOCEAN_WITH_32_PLUS_RANDOM_CHARACTERS
+    scope: RUN_TIME
+    type: SECRET
+  # Shared by the verified-webhook schedule activator and queue worker.
+  - key: MONITOR_SCHEDULER_POLL_MS
+    value: "60000"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: MONITOR_PASS_INTERVAL_HOURS
+    value: "24"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: MONITOR_CORE_INTERVAL_MINUTES
+    value: "360"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: REDDIT_PROVIDER
+    value: mock
+    scope: RUN_TIME
+    type: GENERAL
+  # The Apify adapter is an internal test path, not an approved production
+  # Reddit integration. Keep this false unless deliberately validating it.
+  - key: APIFY_REDDIT_TEST_MODE
+    value: "false"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_REDDIT_ACTOR_ID
+    value: trudax/reddit-scraper
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_REDDIT_MAX_RESULTS
+    value: "40"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_REDDIT_ENRICHMENT_LIMIT
+    value: "8"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_REDDIT_ENRICHMENT_COMMENTS
+    value: "6"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_REDDIT_TIMEOUT_MS
+    value: "260000"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_REDDIT_TIME_RANGE
+    value: month
+    scope: RUN_TIME
+    type: GENERAL
+  - key: APIFY_TOKEN
+    value: REPLACE_IN_DIGITALOCEAN_ONLY_IF_APIFY_TEST_IS_ENABLED
+    scope: RUN_TIME
+    type: SECRET
+  - key: REDDIT_OAUTH_ENABLED
+    value: "false"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: REDDIT_CLIENT_ID
+    value: REPLACE_ONLY_IF_REDDIT_OAUTH_IS_ENABLED
+    scope: RUN_TIME
+    type: SECRET
+  - key: REDDIT_CLIENT_SECRET
+    value: REPLACE_ONLY_IF_REDDIT_OAUTH_IS_ENABLED
+    scope: RUN_TIME
+    type: SECRET
+  - key: REDDIT_REDIRECT_URI
+    value: REPLACE_WITH_EXACT_HTTPS_CALLBACK
+    scope: RUN_TIME
+    type: GENERAL
+  - key: REDDIT_USER_AGENT
+    value: "web:com.demandsift.mvp:v0.1.0 (by /u/your_reddit_username)"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: REDDIT_TOKEN_ENCRYPTION_KEY
+    value: REPLACE_WITH_64_HEX_CHARACTERS
+    scope: RUN_TIME
+    type: SECRET
+  - key: REDDIT_OAUTH_STATE_SECRET
+    value: REPLACE_WITH_DIFFERENT_64_HEX_CHARACTERS
+    scope: RUN_TIME
+    type: SECRET
+  - key: OPENAI_BASE_URL
+    value: https://api.openai.com/v1
+    scope: RUN_TIME
+    type: GENERAL
+  - key: OPENAI_API_STYLE
+    value: auto
+    scope: RUN_TIME
+    type: GENERAL
+  - key: OPENAI_ANALYSIS_MODEL
+    value: gpt-5.6-sol
+    scope: RUN_TIME
+    type: GENERAL
+  - key: OPENAI_REPLY_MODEL
+    value: gpt-5.6-sol
+    scope: RUN_TIME
+    type: GENERAL
+  - key: OPENAI_ECONOMY_MODEL
+    value: gpt-5.6-luna
+    scope: RUN_TIME
+    type: GENERAL
+  - key: OPENAI_EMBEDDING_MODEL
+    value: text-embedding-3-small
+    scope: RUN_TIME
+    type: GENERAL
+  - key: OPENAI_API_KEY
+    value: REPLACE_IN_DIGITALOCEAN
+    scope: RUN_TIME
+    type: SECRET
+  - key: STRIPE_SECRET_KEY
+    value: REPLACE_IN_DIGITALOCEAN
+    scope: RUN_TIME
+    type: SECRET
+  - key: STRIPE_WEBHOOK_SECRET
+    value: REPLACE_IN_DIGITALOCEAN
+    scope: RUN_TIME
+    type: SECRET
+  - key: STRIPE_PASS_AMOUNT_CENTS
+    value: "1200"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: STRIPE_CORE_AMOUNT_CENTS
+    value: "3000"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: STRIPE_WEBHOOK_TOLERANCE_SECONDS
+    value: "300"
+    scope: RUN_TIME
+    type: GENERAL
+  - key: ENABLE_DEMO_STRIPE
+    value: "false"
+    scope: RUN_TIME
+    type: GENERAL

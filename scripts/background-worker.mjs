@@ -1,0 +1,769 @@
+#!/usr/bin/env node
+
+import { createHash, randomUUID } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import { hostname } from "node:os";
+import { isAbsolute, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawn } from "node:child_process";
+import postgres from "postgres";
+
+const workerId = `${hostname()}:${process.pid}`;
+
+const MONITORING_STAGES = [
+  {
+    id: "website",
+    label: "Understanding your business",
+    status: "pending",
+    detail: "Reading safe public pages on the submitted domain.",
+  },
+  {
+    id: "understanding",
+    label: "Mapping the problems you solve",
+    status: "pending",
+    detail: "Building a source-backed product, audience and problem profile.",
+  },
+  {
+    id: "discovery",
+    label: "Searching recent Reddit conversations",
+    status: "pending",
+    detail: "Looking only inside the current seven-day scan window.",
+  },
+  {
+    id: "reading",
+    label: "Reading relevant posts and replies",
+    status: "pending",
+    detail: "Checking context, problem fit and source quality.",
+  },
+  {
+    id: "ranking",
+    label: "Identifying potential customers",
+    status: "pending",
+    detail: "Removing noise and deduplicating qualified people by Reddit author.",
+  },
+  {
+    id: "competitors",
+    label: "Checking competitor frustrations",
+    status: "pending",
+    detail: "Verifying complaints and alternative-seeking signals from their sources.",
+  },
+  {
+    id: "replies",
+    label: "Ranking the strongest opportunities",
+    status: "pending",
+    detail: "Ordering the best fits and preparing source-grounded replies.",
+  },
+];
+
+function boundedNumber(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.max(minimum, Math.min(parsed, maximum))
+    : fallback;
+}
+
+export function monitoringConfiguration(environment = process.env) {
+  const passIntervalHours = boundedNumber(
+    environment.MONITOR_PASS_INTERVAL_HOURS,
+    24,
+    1,
+    168,
+  );
+  const coreIntervalMinutes = boundedNumber(
+    environment.MONITOR_CORE_INTERVAL_MINUTES,
+    360,
+    5,
+    10_080,
+  );
+  const schedulerPollMs = boundedNumber(
+    environment.MONITOR_SCHEDULER_POLL_MS,
+    60_000,
+    1_000,
+    900_000,
+  );
+  return {
+    passIntervalHours,
+    coreIntervalMinutes,
+    passIntervalMs: passIntervalHours * 60 * 60 * 1_000,
+    coreIntervalMs: coreIntervalMinutes * 60 * 1_000,
+    schedulerPollMs,
+  };
+}
+
+function intervalForPlan(plan, configuration) {
+  if (plan === "pass") return configuration.passIntervalMs;
+  if (plan === "core") return configuration.coreIntervalMs;
+  return null;
+}
+
+function validTimestamp(value) {
+  const milliseconds = value instanceof Date ? value.getTime() : Date.parse(String(value ?? ""));
+  return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+export function isMonitoringCandidateDue(candidate, now, configuration) {
+  const nowMs = validTimestamp(now);
+  const nextRunAt = validTimestamp(candidate.nextRunAt);
+  const intervalMs = intervalForPlan(candidate.plan, configuration);
+  if (
+    nowMs === null ||
+    nextRunAt === null ||
+    intervalMs === null ||
+    candidate.status !== "active" ||
+    candidate.enabled !== true ||
+    candidate.hasPendingScan ||
+    nextRunAt > nowMs
+  ) {
+    return false;
+  }
+  if (candidate.plan === "pass") {
+    const accessUntil = validTimestamp(candidate.accessUntil);
+    const workspaceExpiresAt = validTimestamp(candidate.workspaceExpiresAt);
+    if (
+      accessUntil === null ||
+      accessUntil <= nowMs ||
+      workspaceExpiresAt === null ||
+      workspaceExpiresAt <= nowMs
+    ) return false;
+  }
+  return true;
+}
+
+export function monitoringDedupeKey(workspaceId, plan, now, configuration) {
+  const nowMs = validTimestamp(now);
+  const intervalMs = intervalForPlan(plan, configuration);
+  if (nowMs === null || intervalMs === null) {
+    throw new Error("A valid monitoring plan, timestamp, and interval are required.");
+  }
+  const bucket = Math.floor(nowMs / intervalMs);
+  return `monitor:${workspaceId}:${plan}:${intervalMs}:${bucket}`;
+}
+
+export function createMonitoringScanRecord({ scanId, workspaceId, websiteUrl, now }) {
+  const nowMs = validTimestamp(now);
+  if (!scanId || !workspaceId || !websiteUrl || nowMs === null) {
+    throw new Error("A scan ID, workspace ID, website URL, and timestamp are required.");
+  }
+  const timestamp = new Date(nowMs).toISOString();
+  return {
+    id: scanId,
+    workspaceId,
+    websiteUrl,
+    status: "queued",
+    progress: MONITORING_STAGES.map((stage) => ({ ...stage })),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    error: null,
+    result: null,
+  };
+}
+
+function log(level, event, details = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    component: "background-worker",
+    event,
+    workerId,
+    ...details,
+  };
+  const line = JSON.stringify(entry);
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+}
+
+function requiredEnvironment(name) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required.`);
+  return value;
+}
+
+function sqlLiteral(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function psqlIncludePath(value) {
+  if (value.includes("'") || /[\r\n]/u.test(value)) {
+    throw new Error("Migration paths may not contain quotes or newlines.");
+  }
+  return `'${value}'`;
+}
+
+function runPsql(databaseUrl, input, label) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(
+      "psql",
+      ["--dbname", databaseUrl, "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--quiet"],
+      {
+        env: process.env,
+        stdio: ["pipe", "inherit", "inherit"],
+      },
+    );
+
+    child.once("error", (error) => {
+      rejectPromise(new Error(`Could not start psql for ${label}: ${error.message}`));
+    });
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolvePromise();
+      else {
+        rejectPromise(
+          new Error(
+            `psql failed during ${label} (${signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`}).`,
+          ),
+        );
+      }
+    });
+    child.stdin.on("error", (error) => {
+      if (error.code !== "EPIPE") rejectPromise(error);
+    });
+    child.stdin.end(input);
+  });
+}
+
+async function verifyDatabase(databaseUrl) {
+  await runPsql(databaseUrl, "SELECT 1;\n", "database connectivity check");
+  log("info", "database_ready");
+}
+
+async function runMigrations() {
+  const databaseUrl = requiredEnvironment("DATABASE_URL");
+  const configuredDirectory = process.env.MIGRATIONS_DIR?.trim() || "db/migrations";
+  const migrationsDirectory = isAbsolute(configuredDirectory)
+    ? configuredDirectory
+    : resolve(process.cwd(), configuredDirectory);
+  const migrationNames = (await readdir(migrationsDirectory))
+    .filter((name) => /^\d[^/]*\.sql$/u.test(name))
+    .sort((left, right) => left.localeCompare(right, "en"));
+
+  if (migrationNames.length === 0) {
+    throw new Error(`No SQL migrations were found in ${migrationsDirectory}.`);
+  }
+
+  const statements = [
+    "\\set ON_ERROR_STOP on",
+    "SELECT pg_advisory_lock(hashtextextended('threadline:schema-migrations', 0));",
+    "CREATE TABLE IF NOT EXISTS threadline_schema_migrations (",
+    "  migration_name text PRIMARY KEY,",
+    "  checksum_sha256 char(64) NOT NULL,",
+    "  applied_at timestamptz NOT NULL DEFAULT now()",
+    ");",
+  ];
+
+  for (const migrationName of migrationNames) {
+    const migrationPath = resolve(migrationsDirectory, migrationName);
+    const contents = await readFile(migrationPath);
+    const checksum = createHash("sha256").update(contents).digest("hex");
+    const nameLiteral = sqlLiteral(migrationName);
+    const checksumLiteral = sqlLiteral(checksum);
+
+    statements.push(
+      `SELECT EXISTS (SELECT 1 FROM threadline_schema_migrations WHERE migration_name = ${nameLiteral}) AS migration_known,`,
+      `       EXISTS (SELECT 1 FROM threadline_schema_migrations WHERE migration_name = ${nameLiteral} AND checksum_sha256 = ${checksumLiteral}) AS migration_exact \\gset`,
+      "\\if :migration_known",
+      "  \\if :migration_exact",
+      `    \\echo 'Already applied: ${migrationName}'`,
+      "  \\else",
+      `    \\echo 'ERROR: checksum changed for applied migration ${migrationName}'`,
+      "    \\quit 3",
+      "  \\endif",
+      "\\else",
+      `  \\echo 'Applying: ${migrationName}'`,
+      `  \\i ${psqlIncludePath(migrationPath)}`,
+      `  INSERT INTO threadline_schema_migrations (migration_name, checksum_sha256) VALUES (${nameLiteral}, ${checksumLiteral});`,
+      "\\endif",
+    );
+  }
+
+  statements.push(
+    "SELECT pg_advisory_unlock(hashtextextended('threadline:schema-migrations', 0));",
+  );
+
+  log("info", "migrations_started", { count: migrationNames.length });
+  await runPsql(databaseUrl, `${statements.join("\n")}\n`, "schema migrations");
+  log("info", "migrations_completed", { count: migrationNames.length });
+}
+
+function createShutdownController() {
+  const controller = new AbortController();
+  const requestShutdown = (signal) => {
+    if (!controller.signal.aborted) {
+      log("info", "shutdown_requested", { signal });
+      controller.abort(signal);
+    }
+  };
+  process.once("SIGTERM", () => requestShutdown("SIGTERM"));
+  process.once("SIGINT", () => requestShutdown("SIGINT"));
+  return controller;
+}
+
+async function waitInStandby(signal) {
+  if (signal.aborted) return;
+  const configuredInterval = Number(process.env.WORKER_HEARTBEAT_SECONDS ?? 60);
+  const heartbeatSeconds = Number.isFinite(configuredInterval)
+    ? Math.max(15, Math.min(configuredInterval, 900))
+    : 60;
+  const interval = setInterval(
+    () => log("info", "standby_heartbeat", { processingJobs: false }),
+    heartbeatSeconds * 1_000,
+  );
+
+  await new Promise((resolvePromise) => {
+    signal.addEventListener("abort", resolvePromise, { once: true });
+  });
+  clearInterval(interval);
+}
+
+async function runModuleWorker(signal) {
+  const configuredModule = requiredEnvironment("BACKGROUND_WORKER_MODULE");
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(configuredModule) && !configuredModule.startsWith("file:")) {
+    throw new Error("BACKGROUND_WORKER_MODULE must reference a local file, not a remote URL.");
+  }
+  const moduleUrl = configuredModule.startsWith("file:")
+    ? configuredModule
+    : pathToFileURL(resolve(process.cwd(), configuredModule)).href;
+  const loaded = await import(moduleUrl);
+  const start = loaded.startBackgroundWorker ?? loaded.default;
+  if (typeof start !== "function") {
+    throw new Error(
+      "The worker module must export `startBackgroundWorker` or a default async function.",
+    );
+  }
+
+  log("info", "module_worker_started", { module: configuredModule });
+  await start({ signal, workerId, log });
+  if (!signal.aborted) {
+    throw new Error("The background worker module exited before shutdown was requested.");
+  }
+}
+
+function waitForNextPoll(signal, delayMs) {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolvePromise) => {
+    const timeout = setTimeout(resolvePromise, delayMs);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        resolvePromise();
+      },
+      { once: true },
+    );
+  });
+}
+
+function internalWorkerUrl() {
+  const configured = requiredEnvironment("INTERNAL_WEB_URL");
+  let url;
+  try {
+    url = new URL(configured);
+  } catch {
+    throw new Error("INTERNAL_WEB_URL must be a valid HTTP or HTTPS URL.");
+  }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+    throw new Error("INTERNAL_WEB_URL must be an HTTP(S) origin without credentials.");
+  }
+  return url.origin;
+}
+
+function configuredMaxAttempts() {
+  const value = Number(process.env.BACKGROUND_JOB_MAX_ATTEMPTS ?? 5);
+  return Number.isInteger(value) ? Math.max(1, Math.min(value, 20)) : 5;
+}
+
+/**
+ * Atomically reserves a bucketed queue job and creates its matching scan.
+ * The job is inserted first so a dedupe conflict never leaves an orphan scan;
+ * both writes remain invisible until the enclosing transaction commits, and a
+ * scan insert failure rolls the reserved job back.
+ */
+export async function scheduleMonitoringScans(
+  sql,
+  {
+    now = new Date(),
+    configuration = monitoringConfiguration(),
+    createScanId = () => `scan_${randomUUID().replaceAll("-", "")}`,
+    maxAttempts = configuredMaxAttempts(),
+  } = {},
+) {
+  const nowMs = validTimestamp(now);
+  if (nowMs === null) throw new Error("The monitoring scheduler timestamp is invalid.");
+  const scheduledAt = new Date(nowMs);
+
+  return sql.begin(async (transactionSql) => {
+    const candidates = await transactionSql`
+      SELECT schedule.workspace_id,
+             entitlement.plan,
+             entitlement.status AS entitlement_status,
+             entitlement.record ->> 'accessUntil' AS access_until,
+             workspace.expires_at AS workspace_expires_at,
+             schedule.enabled,
+             schedule.next_run_at,
+             seed_scan.website_url
+      FROM runtime_monitoring_schedules AS schedule
+      JOIN runtime_entitlements AS entitlement
+        ON entitlement.workspace_id = schedule.workspace_id
+      JOIN runtime_workspaces AS workspace
+        ON workspace.id = schedule.workspace_id
+      JOIN stripe_events AS verified_event
+        ON verified_event.stripe_event_id = entitlement.record ->> 'verifiedByEventId'
+       AND verified_event.signature_verified = true
+       AND verified_event.processed_at IS NOT NULL
+      JOIN runtime_scans AS seed_scan
+        ON seed_scan.id = schedule.seed_scan_id
+       AND seed_scan.workspace_id = schedule.workspace_id
+       AND seed_scan.status = 'complete'
+      WHERE schedule.enabled = true
+        AND schedule.plan = entitlement.plan
+        AND schedule.next_run_at <= ${scheduledAt}
+        AND entitlement.status = 'active'
+        AND entitlement.plan IN ('pass', 'core')
+        AND entitlement.record ->> 'workspaceId' = entitlement.workspace_id
+        AND entitlement.record ->> 'plan' = entitlement.plan
+        AND entitlement.record ->> 'status' = entitlement.status
+        AND entitlement.record ->> 'seedScanId' = schedule.seed_scan_id
+        AND entitlement.record ->> 'websiteUrl' = schedule.website_url
+        AND schedule.website_url = seed_scan.website_url
+        AND length(trim(seed_scan.website_url)) > 0
+        AND (
+          (
+            entitlement.plan = 'pass'
+            AND workspace.expires_at > ${scheduledAt}
+            AND jsonb_typeof(entitlement.record -> 'accessUntil') = 'string'
+            AND NULLIF(entitlement.record ->> 'accessUntil', '')::timestamptz > ${scheduledAt}
+          )
+          OR entitlement.plan = 'core'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM runtime_scans AS pending_scan
+          WHERE pending_scan.workspace_id = entitlement.workspace_id
+            AND pending_scan.status IN ('queued', 'running')
+        )
+      ORDER BY schedule.next_run_at, schedule.workspace_id
+      LIMIT 100
+      FOR UPDATE OF schedule SKIP LOCKED
+    `;
+
+    const scheduled = [];
+    let deduplicated = 0;
+    for (const row of candidates) {
+      const candidate = {
+        workspaceId: row.workspace_id,
+        plan: row.plan,
+        status: row.entitlement_status,
+        accessUntil: row.access_until,
+        workspaceExpiresAt: row.workspace_expires_at,
+        enabled: row.enabled,
+        nextRunAt: row.next_run_at,
+        hasPendingScan: false,
+      };
+      if (!isMonitoringCandidateDue(candidate, scheduledAt, configuration)) continue;
+
+      const scanId = createScanId();
+      const dedupeKey = monitoringDedupeKey(
+        candidate.workspaceId,
+        candidate.plan,
+        scheduledAt,
+        configuration,
+      );
+      const payload = { scanId, workspaceId: candidate.workspaceId };
+      const insertedJobs = await transactionSql`
+        INSERT INTO background_jobs (
+          type,
+          status,
+          payload,
+          dedupe_key,
+          attempts,
+          max_attempts,
+          run_at,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          'scan.run',
+          'queued',
+          ${transactionSql.json(payload)},
+          ${dedupeKey},
+          0,
+          ${maxAttempts},
+          ${scheduledAt},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (insertedJobs.length === 0) {
+        deduplicated += 1;
+        continue;
+      }
+
+      const record = createMonitoringScanRecord({
+        scanId,
+        workspaceId: candidate.workspaceId,
+        websiteUrl: row.website_url,
+        now: scheduledAt,
+      });
+      await transactionSql`
+        INSERT INTO runtime_scans (
+          id,
+          workspace_id,
+          website_url,
+          status,
+          record,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${record.id},
+          ${record.workspaceId},
+          ${record.websiteUrl},
+          ${record.status},
+          ${transactionSql.json(record)},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+      `;
+      const intervalMs = intervalForPlan(candidate.plan, configuration);
+      const nextRunAt = new Date(nowMs + intervalMs);
+      await transactionSql`
+        UPDATE runtime_monitoring_schedules
+        SET last_scan_id = ${record.id},
+            cadence_seconds = ${Math.round(intervalMs / 1_000)},
+            next_run_at = ${nextRunAt},
+            updated_at = ${scheduledAt}
+        WHERE workspace_id = ${record.workspaceId}
+      `;
+      scheduled.push({
+        scanId: record.id,
+        workspaceId: record.workspaceId,
+        plan: candidate.plan,
+        dedupeKey,
+      });
+    }
+
+    return { candidateCount: candidates.length, deduplicated, scheduled };
+  });
+}
+
+async function runMonitoringScheduler(sql, signal) {
+  const configuration = monitoringConfiguration();
+  log("info", "monitor_scheduler_started", {
+    pollMs: configuration.schedulerPollMs,
+    passIntervalHours: configuration.passIntervalHours,
+    coreIntervalMinutes: configuration.coreIntervalMinutes,
+  });
+  while (!signal.aborted) {
+    try {
+      const result = await scheduleMonitoringScans(sql, { configuration });
+      if (result.scheduled.length > 0 || result.deduplicated > 0) {
+        log("info", "monitor_scheduler_poll_completed", {
+          candidates: result.candidateCount,
+          deduplicated: result.deduplicated,
+          scheduled: result.scheduled.length,
+          scanIds: result.scheduled.map((entry) => entry.scanId),
+        });
+      }
+    } catch (error) {
+      log("error", "monitor_scheduler_poll_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "monitor_scheduler_stopped");
+}
+
+export async function claimJob(sql, workerIdValue) {
+  const staleSeconds = Number(process.env.BACKGROUND_JOB_STALE_SECONDS ?? 1200);
+  const boundedStaleSeconds = Number.isFinite(staleSeconds)
+    ? Math.max(60, Math.min(staleSeconds, 3_600))
+    : 1200;
+  const staleBefore = new Date(Date.now() - boundedStaleSeconds * 1_000);
+  const rows = await sql`
+    WITH candidate AS (
+      SELECT id
+      FROM background_jobs
+      WHERE (
+        (status IN ('queued', 'retrying') AND run_at <= now())
+        OR (status = 'running' AND locked_at <= ${staleBefore})
+      )
+      AND type = 'scan.run'
+      AND attempts < max_attempts
+      ORDER BY run_at ASC, created_at ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    UPDATE background_jobs AS job
+    SET status = 'running',
+        attempts = job.attempts + 1,
+        locked_at = now(),
+        locked_by = ${workerIdValue},
+        updated_at = now()
+    FROM candidate
+    WHERE job.id = candidate.id
+    RETURNING job.*
+  `;
+  return rows[0] ?? null;
+}
+
+async function completeJob(sql, job) {
+  await sql`
+    UPDATE background_jobs
+    SET status = 'succeeded',
+        locked_at = NULL,
+        locked_by = NULL,
+        finished_at = now(),
+        updated_at = now()
+    WHERE id = ${job.id} AND locked_by = ${workerId}
+  `;
+}
+
+async function failJob(sql, job, error) {
+  const exhausted = job.attempts >= job.max_attempts;
+  const delaySeconds = Math.min(300, 2 ** job.attempts * 5);
+  const retryAt = new Date(Date.now() + delaySeconds * 1_000);
+  await sql`
+    UPDATE background_jobs
+    SET status = ${exhausted ? "failed" : "retrying"}::job_status,
+        run_at = ${retryAt},
+        locked_at = NULL,
+        locked_by = NULL,
+        last_error = ${String(error).slice(0, 4_000)},
+        finished_at = ${exhausted ? new Date() : null},
+        updated_at = now()
+    WHERE id = ${job.id} AND locked_by = ${workerId}
+  `;
+}
+
+async function executeScanJob(job, signal) {
+  const workerSecret = requiredEnvironment("BACKGROUND_WORKER_SECRET");
+  if (workerSecret.length < 32) {
+    throw new Error("BACKGROUND_WORKER_SECRET must contain at least 32 characters.");
+  }
+  const timeoutSeconds = Number(process.env.BACKGROUND_JOB_TIMEOUT_SECONDS ?? 900);
+  const boundedTimeoutSeconds = Number.isFinite(timeoutSeconds)
+    ? Math.max(30, Math.min(timeoutSeconds, 900))
+    : 900;
+  const timeout = AbortSignal.timeout(boundedTimeoutSeconds * 1_000);
+  const combinedSignal = AbortSignal.any([signal, timeout]);
+  const response = await fetch(`${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${workerSecret}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ workerId }),
+    signal: combinedSignal,
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 1_000);
+    throw new Error(`Web executor returned HTTP ${response.status}: ${detail}`);
+  }
+  return response.json();
+}
+
+async function runQueueWorker(databaseUrl, signal) {
+  const sql = postgres(databaseUrl, {
+    max: 2,
+    idle_timeout: 20,
+    connect_timeout: 10,
+    prepare: false,
+  });
+  const pollMs = Number(process.env.BACKGROUND_JOB_POLL_MS ?? 2_000);
+  const boundedPollMs = Number.isFinite(pollMs) ? Math.max(250, Math.min(pollMs, 30_000)) : 2_000;
+  const queueController = new AbortController();
+  const queueSignal = AbortSignal.any([signal, queueController.signal]);
+  const scheduler = runMonitoringScheduler(sql, queueSignal);
+  log("info", "queue_worker_started", { pollMs: boundedPollMs });
+  try {
+    while (!queueSignal.aborted) {
+      const job = await claimJob(sql, workerId);
+      if (!job) {
+        await waitForNextPoll(queueSignal, boundedPollMs);
+        continue;
+      }
+      log("info", "job_claimed", {
+        jobId: job.id,
+        type: job.type,
+        attempt: job.attempts,
+        maxAttempts: job.max_attempts,
+      });
+      try {
+        const result = await executeScanJob(job, queueSignal);
+        await completeJob(sql, job);
+        log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
+      } catch (error) {
+        await failJob(sql, job, error instanceof Error ? error.message : String(error));
+        log("error", "job_failed", {
+          jobId: job.id,
+          attempt: job.attempts,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  } finally {
+    queueController.abort("queue worker stopping");
+    await scheduler;
+    await sql.end({ timeout: 5 });
+    log("info", "queue_worker_stopped");
+  }
+}
+
+async function runWorker() {
+  const databaseUrl = requiredEnvironment("DATABASE_URL");
+  await verifyDatabase(databaseUrl);
+
+  const mode = process.env.BACKGROUND_WORKER_MODE?.trim().toLowerCase() || "queue";
+  const shutdown = createShutdownController();
+
+  if (mode === "standby") {
+    if (process.env.BACKGROUND_WORKER_ALLOW_STANDBY !== "true") {
+      throw new Error(
+        "Standby mode requires BACKGROUND_WORKER_ALLOW_STANDBY=true so a no-op worker is never enabled accidentally.",
+      );
+    }
+    log("warn", "standby_not_processing_jobs", {
+      message:
+        "PostgreSQL is reachable, but no persistent job handler is configured. Replace the demo in-memory store before production launch.",
+    });
+    await waitInStandby(shutdown.signal);
+    log("info", "standby_stopped");
+    return;
+  }
+
+  if (mode === "queue") {
+    await runQueueWorker(databaseUrl, shutdown.signal);
+    return;
+  }
+  if (mode !== "module") {
+    throw new Error("BACKGROUND_WORKER_MODE must be `queue`, `module`, or `standby`.");
+  }
+  await runModuleWorker(shutdown.signal);
+}
+
+async function main() {
+  const command = process.argv[2] ?? "work";
+  if (command === "migrate") {
+    await runMigrations();
+    return;
+  }
+  if (command === "work") {
+    await runWorker();
+    return;
+  }
+  throw new Error("Usage: node scripts/background-worker.mjs <work|migrate>");
+}
+
+const entrypointUrl = process.argv[1]
+  ? pathToFileURL(resolve(process.argv[1])).href
+  : null;
+if (entrypointUrl === import.meta.url) {
+  main().catch((error) => {
+    log("error", "fatal", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    process.exitCode = 1;
+  });
+}

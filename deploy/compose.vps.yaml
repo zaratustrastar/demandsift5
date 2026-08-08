@@ -1,0 +1,107 @@
+name: demandsift
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-demandsift}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/vps.env}@database:5432/${POSTGRES_DB:-demandsift}
+
+services:
+  database:
+    image: pgvector/pgvector:0.8.6-pg16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-demandsift}
+      POSTGRES_USER: ${POSTGRES_USER:-demandsift}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/vps.env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    shm_size: 256mb
+    logging: *default-logging
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    command: ["node", "scripts/background-worker.mjs", "migrate"]
+    environment: *app-environment
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    init: true
+    env_file:
+      - vps.env
+    environment:
+      <<: *app-environment
+      PORT: "8080"
+      INTERNAL_WEB_URL: http://web:8080
+    expose:
+      - "8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    command: ["node", "scripts/background-worker.mjs", "work"]
+    restart: unless-stopped
+    init: true
+    environment:
+      <<: *app-environment
+      INTERNAL_WEB_URL: http://web:8080
+      BACKGROUND_WORKER_MODE: ${BACKGROUND_WORKER_MODE:-queue}
+      BACKGROUND_WORKER_SECRET: ${BACKGROUND_WORKER_SECRET:?Set BACKGROUND_WORKER_SECRET in deploy/vps.env}
+      BACKGROUND_JOB_POLL_MS: ${BACKGROUND_JOB_POLL_MS:-2000}
+      BACKGROUND_JOB_TIMEOUT_SECONDS: ${BACKGROUND_JOB_TIMEOUT_SECONDS:-900}
+      BACKGROUND_JOB_STALE_SECONDS: ${BACKGROUND_JOB_STALE_SECONDS:-1200}
+      MONITOR_SCHEDULER_POLL_MS: ${MONITOR_SCHEDULER_POLL_MS:-60000}
+      MONITOR_PASS_INTERVAL_HOURS: ${MONITOR_PASS_INTERVAL_HOURS:-24}
+      MONITOR_CORE_INTERVAL_MINUTES: ${MONITOR_CORE_INTERVAL_MINUTES:-360}
+    depends_on:
+      web:
+        condition: service_healthy
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in deploy/vps.env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in deploy/vps.env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

@@ -238,6 +238,12 @@ export interface DeepQualification {
   disclosureRequired: boolean;
 }
 
+export interface DeepQualifiedConversation {
+  externalId: string;
+  conversation: EnrichedRedditConversation;
+  qualification: DeepQualification;
+}
+
 /** Legacy classification retained for compatibility with older stored reports. */
 export type RecommendedAction =
   | "reply_helpfully"

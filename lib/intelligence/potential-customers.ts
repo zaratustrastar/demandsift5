@@ -29,6 +29,7 @@ export function normalizedRedditAuthor(value: string | null | undefined): string
   return normalized;
 }
 
+/** Legacy score-to-intent helper retained for stored/old fixtures only. */
 export function potentialCustomerIntent(input: {
   buyerIntent: number;
   customerProblem: number;
@@ -58,6 +59,14 @@ function previousFirstSeen(
   return timestamps.length > 0 ? new Date(Math.min(...timestamps)).toISOString() : null;
 }
 
+function isCategoricallyPotentialCustomer(row: OpportunityRecord): boolean {
+  // New scans always set leadStatus. The fallback keeps old stored reports and
+  // fixtures readable during migration without reintroducing score gating.
+  return row.leadStatus === undefined
+    ? Boolean(row.potentialCustomerIntent)
+    : row.leadStatus === "potential_customer";
+}
+
 export function aggregatePotentialCustomers(input: {
   opportunities: readonly OpportunityRecord[];
   previousOpportunities?: readonly OpportunityRecord[];
@@ -79,10 +88,10 @@ export function aggregatePotentialCustomers(input: {
       !authorIdentifier ||
       !row.permalink ||
       !row.sourceId ||
+      !isCategoricallyPotentialCustomer(row) ||
       !row.potentialCustomerIntent ||
-      row.communityRisk === "high" ||
+      row.communityRisk === "high" && row.shouldReply === true ||
       row.recommendedAction === "learn" ||
-      row.qualificationScore < 60 ||
       sourceCreatedAt === null ||
       sourceCreatedAt < windowStart ||
       sourceCreatedAt > windowEnd + 5 * 60_000 ||
@@ -99,7 +108,7 @@ export function aggregatePotentialCustomers(input: {
       const intentDifference =
         INTENT_PRIORITY[right.potentialCustomerIntent!] -
         INTENT_PRIORITY[left.potentialCustomerIntent!];
-      return intentDifference || right.qualificationScore - left.qualificationScore;
+      return intentDifference || right.score - left.score;
     });
     const primary = ordered[0];
     const supportingSourceIds = [...new Set(ordered.flatMap((row) => [
@@ -116,7 +125,7 @@ export function aggregatePotentialCustomers(input: {
       supportingSignalCount: supportingSourceIds.length,
       appearedInPreviousDemandDrop: Boolean(priorFirstSeen),
     };
-  }).sort((left, right) => right.qualificationScore - left.qualificationScore);
+  }).sort((left, right) => right.score - left.score);
 
   const breakdown = {
     highIntent: opportunities.filter((row) => row.potentialCustomerIntent === "high_intent").length,

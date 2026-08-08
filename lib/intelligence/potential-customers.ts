@@ -67,6 +67,15 @@ function isCategoricallyPotentialCustomer(row: OpportunityRecord): boolean {
     : row.leadStatus === "potential_customer";
 }
 
+function legacyParticipationGateFails(row: OpportunityRecord): boolean {
+  // Old stored records had no independent lead-status decision, so retain the
+  // historical safety gate only for those compatibility records. In the new
+  // pipeline community/reply risk never changes whether someone is a lead.
+  return row.leadStatus === undefined && (
+    row.communityRisk === "high" || row.recommendedAction === "learn"
+  );
+}
+
 export function aggregatePotentialCustomers(input: {
   opportunities: readonly OpportunityRecord[];
   previousOpportunities?: readonly OpportunityRecord[];
@@ -90,8 +99,7 @@ export function aggregatePotentialCustomers(input: {
       !row.sourceId ||
       !isCategoricallyPotentialCustomer(row) ||
       !row.potentialCustomerIntent ||
-      row.communityRisk === "high" && row.shouldReply === true ||
-      row.recommendedAction === "learn" ||
+      legacyParticipationGateFails(row) ||
       sourceCreatedAt === null ||
       sourceCreatedAt < windowStart ||
       sourceCreatedAt > windowEnd + 5 * 60_000 ||

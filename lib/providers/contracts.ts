@@ -2,12 +2,17 @@ import type { AiOperation, TokenUsage } from "@/lib/ai/usage";
 import type {
   BusinessUnderstanding,
   CompetitorSignal,
+  ConversationTriage,
+  DeepQualification,
   DemandInsight,
+  EnrichedRedditConversation,
   EntityId,
   ModelConfiguration,
   OpportunityClassification,
   QualifiedOpportunity,
   RedditConversation,
+  RedditDiscoveryCandidate,
+  RedditSearchLane,
 } from "@/lib/domain/types";
 
 export interface WebsiteEvidencePage {
@@ -38,6 +43,32 @@ export interface AnalyzeBusinessRequest {
   models: ModelConfiguration;
 }
 
+export interface TriageConversationsRequest {
+  business: BusinessUnderstanding;
+  candidates: RedditDiscoveryCandidate[];
+  models: ModelConfiguration;
+  coverageRetries?: number;
+}
+
+export interface TriagedConversation {
+  externalId: string;
+  triage: ConversationTriage;
+}
+
+export interface QualifyConversationsRequest {
+  business: BusinessUnderstanding;
+  conversations: EnrichedRedditConversation[];
+  models: ModelConfiguration;
+  coverageRetries?: number;
+}
+
+export interface DeepQualifiedConversation {
+  externalId: string;
+  conversation: EnrichedRedditConversation;
+  qualification: DeepQualification;
+}
+
+/** Legacy request retained for older callers; the active scan uses triage/qualify. */
 export interface ClassifyConversationsRequest {
   business: BusinessUnderstanding;
   conversations: RedditConversation[];
@@ -52,6 +83,7 @@ export interface ClassifiedConversation {
 export interface GenerateInsightsRequest {
   business: BusinessUnderstanding;
   opportunities: QualifiedOpportunity[];
+  evidenceConversations?: DeepQualifiedConversation[];
   models: ModelConfiguration;
 }
 
@@ -85,6 +117,13 @@ export interface AiProvider {
   analyzeBusiness(
     request: AnalyzeBusinessRequest,
   ): Promise<AiProviderResult<BusinessUnderstanding>>;
+  triageConversations(
+    request: TriageConversationsRequest,
+  ): Promise<AiProviderResult<TriagedConversation[]>>;
+  qualifyConversations(
+    request: QualifyConversationsRequest,
+  ): Promise<AiProviderResult<DeepQualifiedConversation[]>>;
+  /** Deprecated compatibility method. */
   classifyConversations(
     request: ClassifyConversationsRequest,
   ): Promise<AiProviderResult<ClassifiedConversation[]>>;
@@ -94,17 +133,20 @@ export interface AiProvider {
   generateReply(
     request: GenerateReplyRequest,
   ): Promise<AiProviderResult<GeneratedReplyDraft>>;
+  /** Available for future high-volume retrieval, not used by the MVP scan. */
   embed(request: EmbeddingRequest): Promise<AiProviderResult<number[][]>>;
 }
 
 export interface RedditSearchQueries {
   productTerms: string[];
+  brandTerms?: string[];
   /** Short generic categories buyers use, such as "project management software". */
   productCategories?: string[];
   customerProblems: string[];
   buyerIntent: string[];
   competitors: string[];
   excludedTerms: string[];
+  ambiguityRisks?: string[];
 }
 
 export interface RedditSearchRequest {
@@ -115,6 +157,55 @@ export interface RedditSearchRequest {
   since?: string;
 }
 
+export interface RedditSearchPlanEntry {
+  lane: RedditSearchLane;
+  query: string;
+  seed?: string;
+}
+
+export type ProviderRejectionReason =
+  | "invalid_record"
+  | "invalid_url"
+  | "bot_author"
+  | "deleted"
+  | "nsfw"
+  | "missing_timestamp"
+  | "outside_window";
+
+export interface RedditDiscoveryDiagnostics {
+  queryCount: number;
+  fetchedCandidates: number;
+  normalizedCandidates: number;
+  verifiedRecentCandidates: number;
+  rejectedByReason: Record<ProviderRejectionReason, number>;
+  laneQueryCounts: Partial<Record<RedditSearchLane, number>>;
+}
+
+export interface RedditDiscoveryResponse {
+  candidates: RedditDiscoveryCandidate[];
+  searchPlan: RedditSearchPlanEntry[];
+  nextCursor?: string;
+  sourceMode: RedditConversation["sourceMode"];
+  diagnostics: RedditDiscoveryDiagnostics;
+}
+
+export interface RedditEnrichmentRequest {
+  candidates: RedditDiscoveryCandidate[];
+  maxComments?: number;
+}
+
+export interface RedditEnrichmentResponse {
+  conversations: EnrichedRedditConversation[];
+  sourceMode: RedditConversation["sourceMode"];
+  diagnostics: {
+    requested: number;
+    enriched: number;
+    failed: number;
+    fallbackUsed: number;
+  };
+}
+
+/** Legacy response retained for compatibility with older provider callers. */
 export interface RedditSearchResponse {
   conversations: RedditConversation[];
   nextCursor?: string;
@@ -140,7 +231,10 @@ export interface RedditSearchResponse {
 export interface RedditProvider {
   readonly name: string;
   readonly sourceMode: RedditConversation["sourceMode"];
-  search(request: RedditSearchRequest): Promise<RedditSearchResponse>;
+  discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse>;
+  enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse>;
+  /** Deprecated compatibility path. The active scan never calls it. */
+  search?(request: RedditSearchRequest): Promise<RedditSearchResponse>;
 }
 
 export interface EmailMessage {

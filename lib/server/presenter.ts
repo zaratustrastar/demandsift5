@@ -97,13 +97,14 @@ function freeVisibleOpportunities(
   opportunities: OpportunityRecord[],
   generatedReplies: ReplyRecord[],
 ): OpportunityRecord[] {
-  const selected = opportunities.slice(0, 3);
   const previewReply = generatedReplies[0];
-  if (!previewReply) return selected;
+  if (!previewReply) return opportunities.slice(0, 3);
   const replyOpportunity = opportunities.find((row) => row.id === previewReply.opportunityId);
-  if (!replyOpportunity || selected.some((row) => row.id === replyOpportunity.id)) return selected;
-  if (selected.length < 3) return [...selected, replyOpportunity];
-  return [selected[0], selected[1], replyOpportunity];
+  if (!replyOpportunity) return opportunities.slice(0, 3);
+  return [
+    replyOpportunity,
+    ...opportunities.filter((row) => row.id !== replyOpportunity.id),
+  ].slice(0, 3);
 }
 
 export async function presentScan(scan: ScanRecord) {

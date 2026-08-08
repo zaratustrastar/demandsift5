@@ -56,6 +56,7 @@ export interface CompetitorReference {
   verification: "website_claim" | "external_provider" | "unverified_hypothesis";
 }
 
+/** Source-backed company context used by both retrieval and AI interpretation. */
 export interface BusinessUnderstanding {
   businessId: EntityId;
   workspaceId: EntityId;
@@ -69,8 +70,13 @@ export interface BusinessUnderstanding {
   features: CitedValue<ProductFeature[]>;
   competitors: CitedValue<CompetitorReference[]>;
   irrelevantTopics: CitedValue<string[]>;
+  /** Product/category search seeds retained for backward compatibility. */
   productTerms: CitedValue<string[]>;
+  /** Brand/product names that can be used in brand-monitoring search lanes. */
+  brandTerms: CitedValue<string[]>;
   customerProblemLanguage: CitedValue<string[]>;
+  /** Known ambiguity/homonym concepts such as travel meanings of "basecamp". */
+  ambiguityRisks: CitedValue<string[]>;
   version: number;
   generatedAt: IsoDateTime;
 }
@@ -83,9 +89,57 @@ export type RedditConversationKind = "post" | "comment";
  */
 export type RedditSourceMode = "live" | "mock" | "apify-test";
 
+export type RedditSearchLane =
+  | "direct_buying_intent"
+  | "problem_pain"
+  | "competitor_switching"
+  | "category_recommendation"
+  | "brand_competitor_mentions";
+
 export interface RedditConversationMetrics {
   score: number;
   comments: number;
+}
+
+export interface RedditContextMessage {
+  externalId: string;
+  kind: RedditConversationKind;
+  author?: string;
+  body: string;
+  parentExternalId?: string;
+  createdAt?: IsoDateTime;
+}
+
+/**
+ * Structured thread context keeps the matched author's words separate from
+ * parent/reply/surrounding text so deep qualification cannot confuse speakers.
+ */
+export interface RedditStructuredContext {
+  originalPost?: RedditContextMessage;
+  matched: RedditContextMessage;
+  parentChain: RedditContextMessage[];
+  replies: RedditContextMessage[];
+  surroundingComments: RedditContextMessage[];
+}
+
+/** Lightweight, timestamp-verified record returned by discovery before enrichment. */
+export interface RedditDiscoveryCandidate {
+  provider: string;
+  sourceMode: RedditSourceMode;
+  externalId: string;
+  kind: RedditConversationKind;
+  parentExternalId?: string;
+  subreddit: string;
+  title?: string;
+  body: string;
+  author?: string;
+  permalink?: string;
+  createdAt: IsoDateTime;
+  metrics: RedditConversationMetrics;
+  matchedQuery?: string;
+  matchedQueries: string[];
+  discoveryLanes: RedditSearchLane[];
+  provenance: SourceProvenance;
 }
 
 /** Normalized record returned by a configured Reddit data provider. */
@@ -98,27 +152,98 @@ export interface RedditConversation {
   subreddit: string;
   title?: string;
   body: string;
-  /**
-   * Selected surrounding thread text fetched from the same Reddit permalink.
-   * This is source material for classification and reply drafting, not a
-   * business claim and never replaces the conversation's own body.
-   */
+  /** Legacy flattened context retained for UI/reply compatibility. */
   threadContext?: string;
+  structuredContext?: RedditStructuredContext;
   author?: string;
   /** Absent for mock fixtures: mock records must never link to invented URLs. */
   permalink?: string;
   createdAt: IsoDateTime;
   metrics: RedditConversationMetrics;
   matchedQuery?: string;
+  matchedQueries?: string[];
+  discoveryLanes?: RedditSearchLane[];
   provenance: SourceProvenance;
 }
 
+export interface EnrichedRedditConversation extends RedditConversation {
+  structuredContext: RedditStructuredContext;
+}
+
+export type TriageIntent =
+  | "actively_looking"
+  | "evaluating"
+  | "switching"
+  | "problem_aware"
+  | "informational"
+  | "promotional"
+  | "irrelevant";
+
+export type DemandSignal =
+  | "explicit_demand"
+  | "pain"
+  | "workaround"
+  | "switching"
+  | "timing"
+  | "none";
+
+export type FitLevel = "low" | "medium" | "high" | "unknown";
+export type TimingSignal = "current" | "near_term" | "historical" | "hypothetical" | "unknown";
+
+export interface ConversationTriage {
+  externalId: string;
+  relevant: boolean;
+  intent: TriageIntent;
+  demandSignal: DemandSignal;
+  problem?: string;
+  productFit: FitLevel;
+  timing: TimingSignal;
+  replyability: FitLevel;
+  worthEnriching: boolean;
+  reason: string;
+}
+
+export type LeadStatus = "potential_customer" | "not_customer" | "uncertain";
+
+export type IntelligenceTag =
+  | "problem_signal"
+  | "product_feedback"
+  | "competitor_intelligence"
+  | "market_insight"
+  | "objection"
+  | "workaround";
+
+export type CommunityRisk = "low" | "medium" | "high" | "unknown";
+
+export interface DeepQualification {
+  externalId: string;
+  leadStatus: LeadStatus;
+  demandSignals: DemandSignal[];
+  intelligenceTags: IntelligenceTag[];
+  productFit: FitLevel;
+  painSeverity: FitLevel;
+  intent: TriageIntent;
+  timing: TimingSignal;
+  evidenceQuality: FitLevel;
+  replyability: FitLevel;
+  communityRisk: CommunityRisk;
+  problemSummary?: string;
+  competitorMentioned?: string;
+  whyItMatters: string;
+  shouldReply: boolean;
+  autoReplyAllowed: boolean;
+  requiresHumanReview: boolean;
+  replyAngle?: string;
+  mentionProduct: boolean;
+  disclosureRequired: boolean;
+}
+
+/** Legacy classification retained for compatibility with older stored reports. */
 export type RecommendedAction =
   | "reply_helpfully"
   | "monitor"
   | "learn"
   | "avoid";
-export type CommunityRisk = "low" | "medium" | "high" | "unknown";
 
 export interface OpportunityClassification {
   relevance: number;
@@ -138,7 +263,11 @@ export interface QualifiedOpportunity {
   workspaceId: EntityId;
   businessId: EntityId;
   conversation: RedditConversation;
+  /** New categorical qualification used by the active MVP pipeline. */
+  qualification: DeepQualification;
+  /** Compatibility projection only; never used to decide lead status. */
   classification: OpportunityClassification;
+  /** Ranking only. Qualification is determined by `qualification.leadStatus`. */
   rankScore: number;
   status: "new" | "saved" | "dismissed" | "replied";
   provenanceIds: EntityId[];

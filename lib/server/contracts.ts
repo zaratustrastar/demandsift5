@@ -1,3 +1,12 @@
+import type {
+  ConversationTriage,
+  DeepQualification,
+  DemandSignal,
+  IntelligenceTag,
+  LeadStatus,
+  RedditSearchLane,
+} from "@/lib/domain/types";
+
 export type AccessPlan = "free" | "pass" | "core";
 
 export type PotentialCustomerIntent =
@@ -9,9 +18,9 @@ export type ScanStageId =
   | "website"
   | "understanding"
   | "discovery"
-  | "reading"
-  | "ranking"
-  | "competitors"
+  | "triage"
+  | "enrichment"
+  | "qualification"
   | "replies";
 
 export type ScanStage = {
@@ -37,11 +46,14 @@ export type ScanBusinessProfile = {
   name: string;
   websiteUrl: string;
   summary: string;
+  productCategory?: string;
   targetAudience: string[];
   problemsSolved: string[];
   features: string[];
   competitors: string[];
   irrelevantTopics: string[];
+  brandTerms?: string[];
+  ambiguityRisks?: string[];
   sourceIds: string[];
 };
 
@@ -52,6 +64,21 @@ export type DemandInsightRecord = {
   evidence: string;
   signal: "rising" | "steady" | "emerging";
   opportunityIds: string[];
+  sourceIds: string[];
+};
+
+export type MarketIntelligenceRecord = {
+  id: string;
+  sourceId: string;
+  externalId: string;
+  title: string;
+  summary: string;
+  subreddit: string;
+  author: string | null;
+  tags: IntelligenceTag[];
+  demandSignals: DemandSignal[];
+  competitor: string | null;
+  sourceCreatedAt: string;
   sourceIds: string[];
 };
 
@@ -76,6 +103,7 @@ export type OpportunityRecord = {
   author: string;
   permalink: string;
   postedAt: string;
+  /** Post-qualification ranking score. It must never decide leadStatus. */
   score: number;
   commentCount: number;
   whyItMatters: string;
@@ -92,6 +120,7 @@ export type OpportunityRecord = {
   /** Normalized public Reddit author identifier; absent authors never count as people. */
   authorIdentifier: string | null;
   potentialCustomerIntent: PotentialCustomerIntent | null;
+  /** Compatibility ranking alias; no longer a qualification threshold. */
   qualificationScore: number;
   firstSeenAt: string;
   scanId: string;
@@ -101,6 +130,21 @@ export type OpportunityRecord = {
   appearedInPreviousDemandDrop: boolean;
   /** Reddit fullname (`t3_…` post or `t1_…` comment) used for direct replies. */
   redditThingId?: string | null;
+  discoveryLanes?: RedditSearchLane[];
+  leadStatus?: LeadStatus;
+  demandSignals?: DemandSignal[];
+  intelligenceTags?: IntelligenceTag[];
+  productFit?: DeepQualification["productFit"];
+  painSeverity?: DeepQualification["painSeverity"];
+  timing?: DeepQualification["timing"];
+  evidenceQuality?: DeepQualification["evidenceQuality"];
+  replyability?: DeepQualification["replyability"];
+  shouldReply?: boolean;
+  autoReplyAllowed?: boolean;
+  requiresHumanReview?: boolean;
+  replyAngle?: string | null;
+  mentionProduct?: boolean;
+  disclosureRequired?: boolean;
 };
 
 export type PotentialCustomerSummary = {
@@ -122,6 +166,7 @@ export type ReplyRecord = {
   opportunityId: string;
   workspaceId: string;
   scanId: string;
+  /** Empty means not generated yet; paid results may generate lazily. */
   content: string;
   status: "draft" | "published";
   generation: number;
@@ -164,6 +209,8 @@ export type UsageRecord = {
   provider: "openai" | "local";
   purpose:
     | "website-analysis"
+    | "triage"
+    | "deep-qualification"
     | "insight-generation"
     | "reply-generation"
     | "classification"
@@ -174,9 +221,58 @@ export type UsageRecord = {
   estimatedCostUsd: number;
 };
 
+export type ProcessedRedditState = {
+  provider: string;
+  externalId: string;
+  conversationId: string;
+  author: string | null;
+  canonicalPermalink: string | null;
+  contentHash: string;
+  contextHash: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastAnalyzedAt: string;
+  commentCount: number;
+  triage: ConversationTriage;
+  deepQualification: DeepQualification | null;
+  replyStatus: "not_applicable" | "eligible" | "generated" | "published";
+  lastReplyAt: string | null;
+};
+
+export type ScanDiagnostics = {
+  provider: string;
+  retrieved: number;
+  normalized: number;
+  providerRejectedByReason: Record<string, number>;
+  deterministicRejectedByReason: Record<string, number>;
+  deterministicSurvivors: number;
+  reusedUnchanged: number;
+  reusedTriageOnly: number;
+  submittedForTriage: number;
+  triageReturned: number;
+  triageMissing: number;
+  triageDuplicateIds: number;
+  triageUnknownIds: number;
+  worthEnriching: number;
+  requestedForEnrichment: number;
+  enrichedSuccessfully: number;
+  enrichmentFailures: number;
+  submittedForDeepQualification: number;
+  deepQualificationsReturned: number;
+  deepQualificationMissing: number;
+  potentialCustomerConversations: number;
+  notCustomerConversations: number;
+  uncertainConversations: number;
+  marketIntelligenceSignals: number;
+  uniquePotentialCustomers: number;
+  replyEligible: number;
+  repliesGenerated: number;
+};
+
 export type ScanResult = {
   profile: ScanBusinessProfile;
   insights: DemandInsightRecord[];
+  marketIntelligence: MarketIntelligenceRecord[];
   competitorWeakness: CompetitorWeaknessRecord;
   opportunities: OpportunityRecord[];
   potentialCustomers: PotentialCustomerSummary;
@@ -186,7 +282,9 @@ export type ScanResult = {
   analysisMode: "openai" | "local-fallback";
   dataMode: "live" | "mock" | "apify-test";
   dataNotice: string;
-  /** Internal provider health counters; intentionally omitted from ordinary UI. */
+  processedRedditState: ProcessedRedditState[];
+  diagnostics: ScanDiagnostics;
+  /** Legacy provider counters retained for existing admin/debug consumers. */
   retrievalDiagnostics?: {
     provider: string;
     queryCount: number;
@@ -282,5 +380,16 @@ export type BackgroundJobRecord = {
   lastError: string | null;
   finishedAt: string | null;
   createdAt: string;
+  updatedAt: string;
+};
+
+export type MonitoringScheduleRecord = {
+  workspaceId: string;
+  websiteUrl: string;
+  seedScanId: string;
+  plan: Exclude<AccessPlan, "free">;
+  nextRunAt: string;
+  lastRunAt: string | null;
+  enabled: boolean;
   updatedAt: string;
 };

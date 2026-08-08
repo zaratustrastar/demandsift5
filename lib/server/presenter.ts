@@ -30,7 +30,12 @@ function publicOpportunity(opportunity: OpportunityRecord) {
     replyId: opportunity.replyId,
     sourceIds: [opportunity.sourceId],
     dataMode: opportunity.sourceMode ?? (opportunity.synthetic ? "mock" : "live"),
-    canReplyOnReddit: Boolean(opportunity.redditThingId && opportunity.permalink && !opportunity.synthetic),
+    canReplyOnReddit: Boolean(
+      opportunity.shouldReply !== false &&
+      opportunity.redditThingId &&
+      opportunity.permalink &&
+      !opportunity.synthetic
+    ),
     conversationType: opportunity.conversationType ?? "post",
     potentialCustomerIntent: opportunity.potentialCustomerIntent ?? null,
     qualificationScore: opportunity.qualificationScore ?? opportunity.score,
@@ -88,6 +93,19 @@ export async function presentAccess(workspaceId: string, websiteUrl?: string) {
   };
 }
 
+function freeVisibleOpportunities(
+  opportunities: OpportunityRecord[],
+  generatedReplies: ReplyRecord[],
+): OpportunityRecord[] {
+  const selected = opportunities.slice(0, 3);
+  const previewReply = generatedReplies[0];
+  if (!previewReply) return selected;
+  const replyOpportunity = opportunities.find((row) => row.id === previewReply.opportunityId);
+  if (!replyOpportunity || selected.some((row) => row.id === replyOpportunity.id)) return selected;
+  if (selected.length < 3) return [...selected, replyOpportunity];
+  return [selected[0], selected[1], replyOpportunity];
+}
+
 export async function presentScan(scan: ScanRecord) {
   const access = await presentAccess(scan.workspaceId, scan.websiteUrl);
   const result = scan.result;
@@ -125,16 +143,27 @@ export async function presentScan(scan: ScanRecord) {
           normalizedBusinessHostname(scan.websiteUrl),
       ))
     .map(({ row }) => row);
-  const competitorSignalCount = result.competitorWeakness.verified ? 1 : 0;
-  const visibleOpportunities = fullAccess ? result.opportunities : result.opportunities.slice(0, 3);
-  const lockedOpportunities = fullAccess ? [] : result.opportunities.slice(visibleOpportunities.length);
-  const visibleOpportunityIds = new Set(visibleOpportunities.map((opportunity) => opportunity.id));
-  const persistedReplies = await getStateRepository().listRepliesForScan(scan.id);
+
+  const persistedReplies = await repository.listRepliesForScan(scan.id);
   const persistedById = new Map(persistedReplies.map((reply) => [reply.id, reply]));
   const latestReplies = result.replies.map((reply) => persistedById.get(reply.id) ?? reply);
+  const generatedReplies = latestReplies.filter((reply) => reply.content.trim().length > 0);
+  const generatedByOpportunity = new Map(generatedReplies.map((reply) => [reply.opportunityId, reply]));
+
+  const competitorSignalCount = result.competitorWeakness.verified ? 1 : 0;
+  const visibleOpportunities = fullAccess
+    ? result.opportunities
+    : freeVisibleOpportunities(result.opportunities, generatedReplies);
+  const visibleOpportunityIds = new Set(visibleOpportunities.map((opportunity) => opportunity.id));
+  const lockedOpportunities = fullAccess
+    ? []
+    : result.opportunities.filter((opportunity) => !visibleOpportunityIds.has(opportunity.id));
   const visibleReplies = fullAccess
     ? latestReplies
-    : latestReplies.filter((reply) => reply.opportunityId === visibleOpportunities[0]?.id).slice(0, 1);
+    : generatedReplies.filter((reply) => visibleOpportunityIds.has(reply.opportunityId)).slice(0, 1);
+  const visibleGeneratedReplyIds = new Set(
+    visibleReplies.filter((reply) => reply.content.trim()).map((reply) => reply.id),
+  );
   const visibleInsights = fullAccess ? result.insights : result.insights.slice(0, 2);
   const visibleSourceIds = new Set([
     ...result.profile.sourceIds,
@@ -185,7 +214,7 @@ export async function presentScan(scan: ScanRecord) {
         conversationType: opportunity.conversationType ?? "post",
         potentialCustomerIntent: opportunity.potentialCustomerIntent ?? null,
         supportingSignalCount: opportunity.supportingSignalCount ?? 1,
-        hasSuggestedReply: Boolean(opportunity.replyId),
+        hasSuggestedReply: Boolean(generatedByOpportunity.get(opportunity.id)?.content.trim()),
         dataMode: opportunity.sourceMode ?? (opportunity.synthetic ? "mock" : "live"),
       })),
       replies: visibleReplies.map(publicReply),
@@ -197,7 +226,7 @@ export async function presentScan(scan: ScanRecord) {
         opportunities: result.opportunities.length,
         insights: result.insights.length,
         competitorSignals: competitorSignalCount,
-        replies: result.replies.length,
+        replies: generatedReplies.length,
       },
       additionalLockedCounts: fullAccess
         ? { opportunities: 0, insights: 0, competitorSignals: 0, replies: 0 }
@@ -205,7 +234,7 @@ export async function presentScan(scan: ScanRecord) {
             opportunities: Math.max(0, result.opportunities.length - visibleOpportunityIds.size),
             insights: Math.max(0, result.insights.length - visibleInsights.length),
             competitorSignals: 0,
-            replies: Math.max(0, result.replies.length - visibleReplies.length),
+            replies: Math.max(0, generatedReplies.length - visibleGeneratedReplyIds.size),
           },
       resultTotals: {
         clicks: trackedResults.filter((row) => row.kind === "click").length,
@@ -254,7 +283,7 @@ export async function requireAccessibleReply(workspaceId: string, replyId: strin
   if (!opportunity || !scan.result) {
     throw new ApiError("Reply source was not found.", 404, "opportunity_not_found");
   }
-  const previewReplyId = scan.result.opportunities[0]?.replyId;
+  const previewReplyId = scan.result.replies.find((row) => row.content.trim())?.id;
   if (!(await isUnlocked(workspaceId, scan.websiteUrl)) && reply.id !== previewReplyId) {
     throw new ApiError(
       "This reply is included with the Full Access Pass or Core plan.",

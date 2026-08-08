@@ -5,12 +5,25 @@ import {
   normalizeSearchText,
 } from "@/lib/intelligence/opportunity-ranking";
 import type {
+  ProviderRejectionReason,
+  RedditDiscoveryDiagnostics,
+  RedditDiscoveryResponse,
+  RedditEnrichmentRequest,
+  RedditEnrichmentResponse,
   RedditProvider,
+  RedditSearchPlanEntry,
   RedditSearchRequest,
   RedditSearchResponse,
 } from "@/lib/providers/contracts";
 import { isProductionRuntime } from "@/lib/server/runtime-env";
-import type { RedditConversation } from "@/lib/domain/types";
+import type {
+  EnrichedRedditConversation,
+  RedditContextMessage,
+  RedditConversation,
+  RedditDiscoveryCandidate,
+  RedditSearchLane,
+  RedditStructuredContext,
+} from "@/lib/domain/types";
 
 type ApprovedProviderConversation = {
   externalId?: unknown;
@@ -107,18 +120,11 @@ type ApifyEnrichmentActorInput = {
 
 export type ApifyRedditActorInput = ApifySearchActorInput | ApifyEnrichmentActorInput;
 
-type ApifyCandidate = {
-  item: ApifyRedditItem;
-  externalId: string;
-  kind: "post" | "comment";
-  permalink: string;
-  subreddit: string;
-  title?: string;
-  body: string;
-  author?: string;
-  createdAt?: string;
-  matchedQuery?: string;
-};
+type ApifyCandidate = RedditDiscoveryCandidate & { item: ApifyRedditItem };
+
+type CandidateParseResult =
+  | { candidate: ApifyCandidate; reason?: never }
+  | { candidate?: never; reason: ProviderRejectionReason };
 
 function required(value: string | undefined, name: string): string {
   const normalized = value?.trim();
@@ -166,10 +172,7 @@ function cleanSearchTerm(value: string): string {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint <= 31 || codePoint === 127 ? " " : character;
   }).join("");
-  return withoutControls
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
+  return withoutControls.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -210,7 +213,7 @@ function wordCount(value: string): number {
   return cleanSearchTerm(value).split(/\s+/).filter(Boolean).length;
 }
 
-function usefulShortPhrase(value: string, maximumWords = 7): boolean {
+function usefulShortPhrase(value: string, maximumWords = 8): boolean {
   return wordCount(value) <= maximumWords && isUsefulSearchPhrase(value);
 }
 
@@ -224,23 +227,22 @@ function redditSearchAtom(value: string): string {
   return normalized.includes(" ") ? `"${normalized}"` : normalized;
 }
 
-function redditExclusions(values: readonly string[]): string {
-  const atoms = [...new Set(values.map(redditSearchAtom).filter(Boolean))].slice(0, 5);
-  return atoms.length > 0 ? ` NOT (${atoms.join(" OR ")})` : "";
-}
-
 const PROBLEM_TOKEN_STOP_WORDS = new Set([
-  "about", "across", "and", "are", "for", "from", "have", "into", "our", "that",
+  "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",
   "the", "their", "this", "too", "using", "with", "without", "your",
 ]);
 
-function problemSearchExpression(value: string): string {
-  const tokens = normalizeSearchText(value)
+function problemTokens(value: string): string[] {
+  return normalizeSearchText(value)
     .split(" ")
     .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token))
     .slice(0, 4);
+}
+
+function problemPainExpression(value: string): string {
+  const tokens = problemTokens(value);
   if (tokens.length < 2) return "";
-  return `(${tokens.join(" AND ")}) AND (tool OR software OR solution OR help)`;
+  return `(${tokens.join(" AND ")}) AND (problem OR struggling OR manual OR spreadsheet OR nightmare OR difficult OR help OR solution)`;
 }
 
 function automatedAuthor(value: string): boolean {
@@ -254,123 +256,147 @@ function automatedAuthor(value: string): boolean {
   );
 }
 
-/** Build precise Reddit-native Boolean searches for the actor's discovery run. */
-export function buildApifyRedditSearches(request: RedditSearchRequest): string[] {
+function boundedPlanEntry(
+  lane: RedditSearchLane,
+  query: string,
+  seed?: string,
+): RedditSearchPlanEntry | null {
+  const cleaned = query.replace(/\s+/g, " ").trim().slice(0, 300);
+  return cleaned.length >= 2 ? { lane, query: cleaned, ...(seed ? { seed } : {}) } : null;
+}
+
+/**
+ * Build explicit retrieval lanes. AI supplies semantic seeds in the company
+ * context pack; Reddit/Apify syntax remains deterministic and bounded.
+ */
+export function buildApifyRedditSearchPlan(request: RedditSearchRequest): RedditSearchPlanEntry[] {
   const productTerms = request.queries.productTerms
     .map(cleanSearchTerm)
     .filter(isUsefulSearchPhrase);
-  const productCategories = (request.queries.productCategories ?? [])
+  const brandTerms = (request.queries.brandTerms?.length
+    ? request.queries.brandTerms
+    : productTerms.slice(0, 1))
+    .map(cleanSearchTerm)
+    .filter(isUsefulSearchPhrase);
+  const categories = (request.queries.productCategories ?? [])
     .map(cleanSearchTerm)
     .filter((term) => usefulShortPhrase(term, 6));
   const problems = request.queries.customerProblems
     .map(cleanSearchTerm)
-    .filter((term) => usefulShortPhrase(term, 7));
+    .filter((term) => usefulShortPhrase(term, 8));
   const competitors = request.queries.competitors
     .map(cleanSearchTerm)
     .filter(isUsefulSearchPhrase);
-  const primaryProduct = productTerms[0] ?? "";
-  const primaryCategory = productCategories[0] ?? productTerms[1] ?? "";
-  const brand = redditSearchAtom(primaryProduct);
-  const category = redditSearchAtom(primaryCategory);
-  const exclusions = redditExclusions(request.queries.excludedTerms);
-  const candidates = [
-    category && `${category} AND (recommendations OR recommend OR alternative OR options)${exclusions}`,
-    category && `${category} AND ("looking for" OR "need a" OR "what are you using" OR "which tool")${exclusions}`,
-    brand && `${brand} AND (alternative OR switching OR frustrated OR problem OR issue OR notifications)${exclusions}`,
-    brand && category && `${brand} AND ${category}${exclusions}`,
-    ...problems.slice(0, 3).map((problem) => {
-      const expression = problemSearchExpression(problem);
-      return expression ? `${expression}${exclusions}` : "";
-    }),
-    ...competitors.slice(0, 2).map((name) => {
-      const competitor = redditSearchAtom(name);
-      if (!competitor) return "";
-      return `${competitor} AND (alternative OR switching OR frustrated OR problem)${category ? ` AND ${category}` : ""}${exclusions}`;
-    }),
-  ];
+
+  const category = redditSearchAtom(categories[0] ?? productTerms[1] ?? "");
+  const brand = redditSearchAtom(brandTerms[0] ?? productTerms[0] ?? "");
+  const entries: Array<RedditSearchPlanEntry | null> = [];
+
+  if (category) {
+    entries.push(
+      boundedPlanEntry(
+        "direct_buying_intent",
+        `${category} AND ("looking for" OR "need a" OR "which tool" OR "what are you using" OR "recommend a")`,
+        categories[0],
+      ),
+      boundedPlanEntry(
+        "category_recommendation",
+        `${category} AND (recommendations OR recommend OR alternatives OR options OR compare)`,
+        categories[0],
+      ),
+    );
+  }
+
+  for (const problem of problems.slice(0, 4)) {
+    const expression = problemPainExpression(problem);
+    if (expression) {
+      entries.push(boundedPlanEntry("problem_pain", expression, problem));
+    }
+  }
+
+  for (const competitorName of competitors.slice(0, 3)) {
+    const competitor = redditSearchAtom(competitorName);
+    if (!competitor) continue;
+    entries.push(
+      boundedPlanEntry(
+        "competitor_switching",
+        `${competitor} AND (alternative OR switching OR replace OR frustrated OR expensive OR overkill OR problem OR issue)`,
+        competitorName,
+      ),
+      boundedPlanEntry(
+        "brand_competitor_mentions",
+        `${competitor} AND (problem OR issue OR pricing OR missing OR difficult OR comparison)`,
+        competitorName,
+      ),
+    );
+  }
+
+  if (brand) {
+    entries.push(
+      boundedPlanEntry(
+        "brand_competitor_mentions",
+        `${brand} AND (alternative OR switching OR frustrated OR problem OR issue OR pricing OR recommend)`,
+        brandTerms[0] ?? productTerms[0],
+      ),
+    );
+  }
+
   const seen = new Set<string>();
-  return candidates.flatMap((candidate) => {
-    const cleaned = candidate.replace(/\s+/g, " ").trim().slice(0, 280);
-    const key = cleaned.toLowerCase();
-    if (
-      cleaned.length < 2 ||
-      seen.has(key)
-    ) return [];
+  const deduped = entries.flatMap((entry) => {
+    if (!entry) return [];
+    const key = `${entry.lane}:${entry.query.toLocaleLowerCase("en-US")}`;
+    if (seen.has(key)) return [];
     seen.add(key);
-    return [cleaned];
-  }).slice(0, 8);
-}
-
-function phraseEvidence(text: string, phrases: readonly string[]): boolean {
-  return phrases.some((value) => {
-    const phrase = normalizeSearchText(value);
-    if (!phrase) return false;
-    if (text.includes(phrase)) return true;
-    const tokens = phrase
-      .split(" ")
-      .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
-    if (tokens.length < 2) return false;
-    const matches = tokens.filter((token) => text.includes(token)).length;
-    return matches >= Math.min(3, tokens.length) && matches / tokens.length >= 0.6;
+    return [entry];
   });
+
+  const lanes = new Set(deduped.map((entry) => entry.lane));
+  if (!lanes.has("problem_pain") && category) {
+    const fallback = boundedPlanEntry(
+      "problem_pain",
+      `${category} AND (struggling OR manual OR spreadsheet OR nightmare OR problem OR issue OR help)`,
+      categories[0],
+    );
+    if (fallback) deduped.push(fallback);
+  }
+  if (!lanes.has("direct_buying_intent") && brand) {
+    const fallback = boundedPlanEntry(
+      "direct_buying_intent",
+      `${brand} AND ("looking for" OR "need a" OR recommend OR alternative)`,
+      brandTerms[0],
+    );
+    if (fallback) deduped.push(fallback);
+  }
+
+  return deduped.slice(0, 12);
 }
 
-const DEMAND_SIGNAL_PATTERN = /\b(alternatives?|compare|comparing|frustrated|help|issues?|looking for|need|notifications?|problems?|recommend(?:ation)?s?|replace|switching|tools?|workarounds?)\b/i;
-
-const STRONG_DEMAND_SIGNAL_PATTERN = /\b(alternatives?|any recommendations|compare|comparing|frustrated|looking for|need a|recommend(?:ation)?s?|replace|switching|what are you using|which tool)\b/i;
-
-/**
- * Cheap deterministic gate before enrichment and AI calls. It intentionally
- * requires business context in addition to a brand token, which removes
- * homonyms such as a mountain "basecamp".
- */
-export function isApifyCandidateRelevant(
-  candidate: Pick<ApifyCandidate, "title" | "body">,
-  request: RedditSearchRequest,
-): boolean {
-  const text = normalizeSearchText(`${candidate.title ?? ""}\n${candidate.body}`);
-  if (!text) return false;
-  const excluded = request.queries.excludedTerms
-    .map(normalizeSearchText)
-    .filter((term) => term.length >= 3);
-  if (excluded.some((term) => text.includes(term))) return false;
-
-  const productTerms = request.queries.productTerms.filter(isUsefulSearchPhrase);
-  const categories = (request.queries.productCategories ?? []).filter(isUsefulSearchPhrase);
-  const problems = request.queries.customerProblems.filter(isUsefulSearchPhrase);
-  const competitors = request.queries.competitors.filter(isUsefulSearchPhrase);
-  const brandMatch = phraseEvidence(text, productTerms.slice(0, 1));
-  const productContext = phraseEvidence(text, productTerms.slice(1));
-  const categoryMatch = phraseEvidence(text, categories);
-  const problemMatch = phraseEvidence(text, problems);
-  const competitorMatch = phraseEvidence(text, competitors);
-  const demandSignal = DEMAND_SIGNAL_PATTERN.test(text);
-
-  return (
-    categoryMatch ||
-    problemMatch ||
-    productContext ||
-    (brandMatch && demandSignal) ||
-    (competitorMatch && (demandSignal || categoryMatch))
-  );
+/** Compatibility helper for tests/callers that only need query strings. */
+export function buildApifyRedditSearches(request: RedditSearchRequest): string[] {
+  return buildApifyRedditSearchPlan(request).map((entry) => entry.query);
 }
 
-function candidateDiscoveryScore(candidate: ApifyCandidate, request: RedditSearchRequest): number {
-  const text = `${candidate.title ?? ""}\n${candidate.body}`;
-  const normalized = normalizeSearchText(text);
-  const title = normalizeSearchText(candidate.title ?? "");
-  const brand = request.queries.productTerms[0] ?? "";
-  const problems = request.queries.customerProblems.filter(isUsefulSearchPhrase);
-  const competitors = request.queries.competitors.filter(isUsefulSearchPhrase);
-  let score = 0;
-  if (STRONG_DEMAND_SIGNAL_PATTERN.test(title)) score += 5;
-  else if (STRONG_DEMAND_SIGNAL_PATTERN.test(normalized)) score += 3;
-  if (phraseEvidence(normalized, problems)) score += 3;
-  if (phraseEvidence(normalized, competitors)) score += 2;
-  if (phraseEvidence(normalized, [brand]) && DEMAND_SIGNAL_PATTERN.test(normalized)) score += 2;
-  if (candidate.kind === "post") score += 1;
-  if (candidate.body.length >= 120) score += 1;
-  return score;
+function searchPlanMatches(
+  title: string | undefined,
+  body: string,
+  plan: readonly RedditSearchPlanEntry[],
+): RedditSearchPlanEntry[] {
+  const text = normalizeSearchText(`${title ?? ""}\n${body}`);
+  const scored = plan.flatMap((entry) => {
+    const quoted = [...entry.query.matchAll(/"([^"]+)"/g)]
+      .map((match) => normalizeSearchText(match[1] ?? ""))
+      .filter(Boolean);
+    const terms = normalizeSearchText(entry.query.replace(/\b(?:AND|OR|NOT)\b/gi, " "))
+      .split(" ")
+      .filter((term) => term.length >= 4 && !PROBLEM_TOKEN_STOP_WORDS.has(term));
+    const quotedMatches = quoted.filter((phrase) => text.includes(phrase)).length;
+    const tokenMatches = terms.filter((term) => text.includes(term)).length;
+    const score = quotedMatches * 3 + tokenMatches;
+    return score >= 2 ? [{ entry, score }] : [];
+  });
+  if (scored.length === 0) return [];
+  const best = Math.max(...scored.map((row) => row.score));
+  return scored.filter((row) => row.score >= Math.max(2, best - 2)).map((row) => row.entry);
 }
 
 function subredditFromItem(item: ApifyRedditItem, permalink: string | undefined): string {
@@ -383,119 +409,82 @@ function subredditFromItem(item: ApifyRedditItem, permalink: string | undefined)
   return /^[A-Za-z0-9_]{1,32}$/.test(candidate) ? candidate : "";
 }
 
-function matchedSearchQuery(
-  title: string | undefined,
-  body: string,
-  searches: readonly string[],
-): string | undefined {
-  const text = normalizeSearchText(`${title ?? ""}\n${body}`);
-  return searches.find((query) => {
-    const quoted = [...query.matchAll(/"([^"]+)"/g)]
-      .map((match) => normalizeSearchText(match[1] ?? ""))
-      .filter(Boolean);
-    if (quoted.some((phrase) => text.includes(phrase))) return true;
-    const terms = normalizeSearchText(query.replace(/\b(?:AND|OR|NOT)\b/g, " "))
-      .split(" ")
-      .filter((term) => term.length >= 4 && !PROBLEM_TOKEN_STOP_WORDS.has(term));
-    return terms.filter((term) => text.includes(term)).length >= Math.min(2, terms.length);
-  });
-}
-
-function apifyCandidate(
+function candidateFromApify(
   value: unknown,
-  searches: readonly string[] = [],
-): ApifyCandidate | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  plan: readonly RedditSearchPlanEntry[] = [],
+): CandidateParseResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { reason: "invalid_record" };
+  }
   const item = value as ApifyRedditItem;
   const dataType = stringValue(item.dataType, 20).toLowerCase();
-  if (dataType !== "post" && dataType !== "comment") return null;
-  if (item.isAd === true || item.over18 === true) return null;
+  if (dataType !== "post" && dataType !== "comment") return { reason: "invalid_record" };
+  if (item.isAd === true) return { reason: "invalid_record" };
+  if (item.over18 === true) return { reason: "nsfw" };
 
   const title = cleanRedditText(item.title, 500) || undefined;
   const body = cleanRedditText(item.body) || title || "";
   const permalink = safeRedditPermalink(item.url);
+  if (!permalink) return { reason: "invalid_url" };
   const subreddit = subredditFromItem(item, permalink);
-  if (!body || !permalink || !subreddit) return null;
+  if (!body || !subreddit) return { reason: "invalid_record" };
 
   const author = cleanRedditText(item.username, 100) || undefined;
-  if (author && automatedAuthor(author)) return null;
-  if (/^\[(?:deleted|removed)\]$/i.test(body)) return null;
+  if (author && automatedAuthor(author)) return { reason: "bot_author" };
+  if (/^\[(?:deleted|removed)\]$/i.test(body)) return { reason: "deleted" };
+
+  const rawCreatedAt = stringValue(item.createdAt, 80);
+  const parsedCreatedAt = Date.parse(rawCreatedAt);
+  if (!Number.isFinite(parsedCreatedAt)) return { reason: "missing_timestamp" };
+
   const externalId =
     stringValue(item.parsedId, 200) ||
     stringValue(item.id, 200).replace(/^t[13]_/i, "") ||
     `derived_${contentFingerprint(`${permalink}\n${body}`)}`;
-  const rawCreatedAt = stringValue(item.createdAt, 80);
-  const parsedCreatedAt = Date.parse(rawCreatedAt);
-  return {
-    item,
-    externalId,
-    kind: dataType,
-    permalink,
-    subreddit,
-    title,
-    body,
-    author,
-    createdAt: Number.isFinite(parsedCreatedAt)
-      ? new Date(parsedCreatedAt).toISOString()
-      : undefined,
-    matchedQuery: matchedSearchQuery(title, body, searches),
-  };
-}
-
-/** Normalize one documented Trudax Reddit Scraper dataset item. */
-export function normalizeApifyRedditItem(
-  value: unknown,
-  actorId: string,
-  searches: readonly string[] = [],
-  options: { fallback?: ApifyCandidate; threadContext?: string } = {},
-): RedditConversation | null {
-  const candidate = apifyCandidate(value, searches) ?? options.fallback;
-  if (!candidate) return null;
-  const item = candidate.item;
-  const createdAt = candidate.createdAt ?? options.fallback?.createdAt;
-  if (!createdAt) return null;
-  const parentExternalId =
-    stringValue(item.parentId, 200) || stringValue(item.postId, 200) || undefined;
+  const matches = searchPlanMatches(title, body, plan);
+  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];
+  const discoveryLanes = [...new Set(matches.map((entry) => entry.lane))];
+  const provider = "apify-test";
   const observedAt = new Date().toISOString();
-  const provider = `apify:${actorId}`;
+
   return {
-    provider,
-    sourceMode: "apify-test",
-    externalId: candidate.externalId,
-    kind: candidate.kind,
-    parentExternalId,
-    subreddit: candidate.subreddit,
-    title: candidate.title,
-    body: candidate.body,
-    threadContext: options.threadContext?.trim().slice(0, 6_000) || undefined,
-    author: candidate.author,
-    permalink: candidate.permalink,
-    createdAt,
-    metrics: {
-      score: nonNegativeInteger(item.upVotes),
-      comments:
-        candidate.kind === "comment"
+    candidate: {
+      item,
+      provider,
+      sourceMode: "apify-test",
+      externalId,
+      kind: dataType,
+      parentExternalId: stringValue(item.parentId, 200) || stringValue(item.postId, 200) || undefined,
+      subreddit,
+      title,
+      body,
+      author,
+      permalink,
+      createdAt: new Date(parsedCreatedAt).toISOString(),
+      metrics: {
+        score: nonNegativeInteger(item.upVotes),
+        comments: dataType === "comment"
           ? nonNegativeInteger(item.numberOfReplies)
           : nonNegativeInteger(item.numberOfComments),
-    },
-    matchedQuery: candidate.matchedQuery ?? options.fallback?.matchedQuery,
-    provenance: {
-      id: `reddit_apify_${contentFingerprint(candidate.externalId)}`,
-      kind: "reddit",
-      provider,
-      providerExternalId: candidate.externalId,
-      url: candidate.permalink,
-      title: candidate.title,
-      excerpt: candidate.body.slice(0, 280),
-      contentHash: contentFingerprint(
-        `${candidate.title ?? ""}\n${candidate.body}\n${options.threadContext ?? ""}`,
-      ),
-      observedAt,
-      isMock: false,
-      metadata: {
-        actorId,
-        testOnly: true,
-        acquisitionMethod: "web-scraping",
+      },
+      matchedQuery: matchedQueries[0],
+      matchedQueries,
+      discoveryLanes,
+      provenance: {
+        id: `reddit_apify_${contentFingerprint(externalId)}`,
+        kind: "reddit",
+        provider,
+        providerExternalId: externalId,
+        url: permalink,
+        title,
+        excerpt: body.slice(0, 280),
+        contentHash: contentFingerprint(`${title ?? ""}\n${body}`),
+        observedAt,
+        isMock: false,
+        metadata: {
+          testOnly: true,
+          acquisitionMethod: "web-scraping",
+        },
       },
     },
   };
@@ -513,36 +502,175 @@ function redditPostIdFromPermalink(value: string): string | undefined {
   }
 }
 
-function threadContextForCandidate(candidate: ApifyCandidate, payload: readonly unknown[]): string {
-  const postId = redditPostIdFromPermalink(candidate.permalink);
-  if (!postId) return "";
-  const comments = payload.flatMap((value) => {
-    const item = apifyCandidate(value);
-    if (
-      !item ||
-      item.kind !== "comment" ||
-      item.externalId === candidate.externalId ||
-      redditPostIdFromPermalink(item.permalink) !== postId
-    ) return [];
-    return [`${item.author ? `${item.author}: ` : ""}${item.body}`];
+function rawExternalId(item: ApifyRedditItem): string {
+  return stringValue(item.parsedId, 200) || stringValue(item.id, 200).replace(/^t[13]_/i, "");
+}
+
+function contextMessage(value: unknown): RedditContextMessage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as ApifyRedditItem;
+  const dataType = stringValue(item.dataType, 20).toLowerCase();
+  if (dataType !== "post" && dataType !== "comment") return null;
+  if (item.isAd === true || item.over18 === true) return null;
+  const body = cleanRedditText(item.body) || cleanRedditText(item.title, 500);
+  const externalId = rawExternalId(item);
+  if (!body || !externalId || /^\[(?:deleted|removed)\]$/i.test(body)) return null;
+  const createdAtRaw = stringValue(item.createdAt, 80);
+  const createdAtMs = Date.parse(createdAtRaw);
+  return {
+    externalId,
+    kind: dataType,
+    author: cleanRedditText(item.username, 100) || undefined,
+    body,
+    parentExternalId: stringValue(item.parentId, 200) || stringValue(item.postId, 200) || undefined,
+    createdAt: Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : undefined,
+  };
+}
+
+function postIdForItem(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as ApifyRedditItem;
+  const direct = stringValue(item.postId, 200).replace(/^t3_/i, "");
+  if (direct) return direct.toLowerCase();
+  const permalink = safeRedditPermalink(item.url);
+  return permalink ? redditPostIdFromPermalink(permalink) : undefined;
+}
+
+function structuredContextForCandidate(
+  candidate: RedditDiscoveryCandidate,
+  payload: readonly unknown[],
+): RedditStructuredContext {
+  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;
+  const messages = payload.flatMap((value) => {
+    const message = contextMessage(value);
+    if (!message || (postId && postIdForItem(value) !== postId)) return [];
+    return [{ value, message }];
   });
-  return [...new Set(comments)].slice(0, 8).join("\n\n").slice(0, 6_000);
+  const byId = new Map(messages.map((row) => [row.message.externalId.replace(/^t[13]_/i, ""), row.message]));
+  const matched = byId.get(candidate.externalId.replace(/^t[13]_/i, "")) ?? {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  const originalPost = messages.find((row) => row.message.kind === "post")?.message ??
+    (candidate.kind === "post" ? matched : undefined);
+
+  const parentChain: RedditContextMessage[] = [];
+  let parentId = matched.parentExternalId?.replace(/^t[13]_/i, "");
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId) && parentChain.length < 6) {
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    parentChain.unshift(parent);
+    parentId = parent.parentExternalId?.replace(/^t[13]_/i, "");
+  }
+
+  const replies = messages
+    .map((row) => row.message)
+    .filter((message) =>
+      message.kind === "comment" &&
+      message.parentExternalId?.replace(/^t[13]_/i, "") === candidate.externalId.replace(/^t[13]_/i, ""),
+    )
+    .slice(0, 6);
+  const used = new Set([
+    matched.externalId,
+    ...parentChain.map((message) => message.externalId),
+    ...replies.map((message) => message.externalId),
+    ...(originalPost ? [originalPost.externalId] : []),
+  ]);
+  const surroundingComments = messages
+    .map((row) => row.message)
+    .filter((message) => message.kind === "comment" && !used.has(message.externalId))
+    .slice(0, 6);
+
+  return { originalPost, matched, parentChain, replies, surroundingComments };
+}
+
+function flattenStructuredContext(context: RedditStructuredContext): string {
+  const sections: string[] = [];
+  if (context.originalPost && context.originalPost.externalId !== context.matched.externalId) {
+    sections.push(`Original post${context.originalPost.author ? ` by ${context.originalPost.author}` : ""}: ${context.originalPost.body}`);
+  }
+  if (context.parentChain.length > 0) {
+    sections.push(`Parent chain:\n${context.parentChain.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  if (context.replies.length > 0) {
+    sections.push(`Replies:\n${context.replies.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  if (context.surroundingComments.length > 0) {
+    sections.push(`Other comments:\n${context.surroundingComments.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  return sections.join("\n\n").slice(0, 8_000);
 }
 
 function enrichedItemForCandidate(
-  candidate: ApifyCandidate,
+  candidate: RedditDiscoveryCandidate,
   payload: readonly unknown[],
 ): unknown | undefined {
-  const postId = redditPostIdFromPermalink(candidate.permalink);
+  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;
   return payload.find((value) => {
-    const item = apifyCandidate(value);
-    if (!item || item.kind !== candidate.kind) return false;
-    if (item.externalId.replace(/^t[13]_/i, "") === candidate.externalId.replace(/^t[13]_/i, "")) {
-      return true;
-    }
-    return candidate.kind === "post" && postId !== undefined &&
-      redditPostIdFromPermalink(item.permalink) === postId;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const item = value as ApifyRedditItem;
+    const dataType = stringValue(item.dataType, 20).toLowerCase();
+    if (dataType !== candidate.kind) return false;
+    const itemId = rawExternalId(item).replace(/^t[13]_/i, "");
+    if (itemId && itemId === candidate.externalId.replace(/^t[13]_/i, "")) return true;
+    const permalink = safeRedditPermalink(item.url);
+    return candidate.kind === "post" && Boolean(postId && permalink && redditPostIdFromPermalink(permalink) === postId);
   });
+}
+
+function enrichedConversation(
+  candidate: RedditDiscoveryCandidate,
+  enrichedValue: unknown,
+  payload: readonly unknown[],
+  provider: string,
+): EnrichedRedditConversation | null {
+  if (!enrichedValue || typeof enrichedValue !== "object" || Array.isArray(enrichedValue)) return null;
+  const item = enrichedValue as ApifyRedditItem;
+  const context = structuredContextForCandidate(candidate, payload);
+  const threadContext = flattenStructuredContext(context);
+  const contentHash = contentFingerprint(
+    `${candidate.title ?? ""}\n${candidate.body}\n${JSON.stringify(context)}`,
+  );
+  return {
+    provider,
+    sourceMode: candidate.sourceMode,
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    parentExternalId: stringValue(item.parentId, 200) || candidate.parentExternalId,
+    subreddit: candidate.subreddit,
+    title: cleanRedditText(item.title, 500) || candidate.title,
+    body: cleanRedditText(item.body) || candidate.body,
+    threadContext: threadContext || undefined,
+    structuredContext: context,
+    author: cleanRedditText(item.username, 100) || candidate.author,
+    permalink: candidate.permalink,
+    createdAt: candidate.createdAt,
+    metrics: {
+      score: nonNegativeInteger(item.upVotes) || candidate.metrics.score,
+      comments: candidate.kind === "comment"
+        ? nonNegativeInteger(item.numberOfReplies) || candidate.metrics.comments
+        : nonNegativeInteger(item.numberOfComments) || candidate.metrics.comments,
+    },
+    matchedQuery: candidate.matchedQuery,
+    matchedQueries: candidate.matchedQueries,
+    discoveryLanes: candidate.discoveryLanes,
+    provenance: {
+      ...candidate.provenance,
+      provider,
+      contentHash,
+      observedAt: new Date().toISOString(),
+      metadata: {
+        ...(candidate.provenance.metadata ?? {}),
+        enriched: true,
+      },
+    },
+  };
 }
 
 function positiveInteger(
@@ -565,9 +693,21 @@ function apifyActorId(value: string): string {
   return normalized;
 }
 
+function emptyProviderRejections(): Record<ProviderRejectionReason, number> {
+  return {
+    invalid_record: 0,
+    invalid_url: 0,
+    bot_author: 0,
+    deleted: 0,
+    nsfw: 0,
+    missing_timestamp: 0,
+    outside_window: 0,
+  };
+}
+
 /**
- * Real-data MVP test adapter for Trudax's Reddit Scraper family. It is opt-in,
- * source-labeled, and intentionally not a production Reddit API provider.
+ * Real-data MVP test adapter for Trudax's Reddit Scraper family. Discovery and
+ * enrichment are intentionally separate; the scan workflow owns the budget.
  */
 export class ApifyRedditTestProvider implements RedditProvider {
   readonly name = "apify-reddit-test";
@@ -594,7 +734,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
     this.actorId = apifyActorId(input.actorId);
     this.token = input.token.trim();
     if (!this.token) throw new Error("APIFY_TOKEN is required for the Apify Reddit test provider.");
-    this.maximumItems = Math.max(1, Math.min(100, Math.trunc(input.maximumItems ?? 40)));
+    this.maximumItems = Math.max(1, Math.min(100, Math.trunc(input.maximumItems ?? 50)));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(0, Math.min(20, Math.trunc(input.enrichmentComments ?? 6)));
     this.timeoutMs = Math.max(20_000, Math.min(290_000, Math.trunc(input.timeoutMs ?? 260_000)));
@@ -625,9 +765,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
         signal: controller.signal,
       });
     } catch (error) {
-      if (controller.signal.aborted) {
-        throw new Error("The Apify Reddit test run timed out.");
-      }
+      if (controller.signal.aborted) throw new Error("The Apify Reddit test run timed out.");
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -656,19 +794,19 @@ export class ApifyRedditTestProvider implements RedditProvider {
     return payload;
   }
 
-  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
-    const searches = buildApifyRedditSearches(request);
-    if (searches.length === 0) {
-      throw new Error("The business profile did not produce any usable Reddit search terms.");
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    const searchPlan = buildApifyRedditSearchPlan(request);
+    if (searchPlan.length === 0) {
+      throw new Error("The company context did not produce any usable Reddit search lanes.");
     }
+    const searches = searchPlan.map((entry) => entry.query);
     const maxItems = Math.min(
       this.maximumItems,
-      Math.max(8, Math.min(100, request.limit * 2)),
+      Math.max(30, Math.min(100, request.limit * 2)),
     );
-    const subreddit =
-      request.subreddits?.length === 1
-        ? request.subreddits[0]?.replace(/^r\//i, "").trim()
-        : undefined;
+    const subreddit = request.subreddits?.length === 1
+      ? request.subreddits[0]?.replace(/^r\//i, "").trim()
+      : undefined;
     const postsPerSearch = Math.max(2, Math.ceil(maxItems / searches.length));
     const discoveryInput: ApifySearchActorInput = {
       searches,
@@ -701,117 +839,155 @@ export class ApifyRedditTestProvider implements RedditProvider {
         ? { searchCommunityName: subreddit }
         : {}),
       ...(request.since && Number.isFinite(Date.parse(request.since))
-        ? {
-            postDateLimit: request.since,
-            commentDateLimit: request.since,
-          }
+        ? { postDateLimit: request.since, commentDateLimit: request.since }
         : {}),
     };
-    const discoveryPayload = await this.runActor(discoveryInput);
-    const discovered = discoveryPayload.flatMap((item) => {
-      const candidate = apifyCandidate(item, searches);
-      return candidate ? [candidate] : [];
-    });
-    const relevant = discovered
-      .filter((candidate) => isApifyCandidateRelevant(candidate, request))
-      .sort(
-        (left, right) =>
-          candidateDiscoveryScore(right, request) - candidateDiscoveryScore(left, request),
-      );
-    const uniqueCandidates: ApifyCandidate[] = [];
-    const seenCandidateKeys = new Set<string>();
-    for (const candidate of relevant) {
-      const key = `${candidate.kind}:${candidate.externalId}:${candidate.permalink}`;
-      if (seenCandidateKeys.has(key)) continue;
-      seenCandidateKeys.add(key);
-      uniqueCandidates.push(candidate);
+
+    const payload = await this.runActor(discoveryInput);
+    const rejectedByReason = emptyProviderRejections();
+    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
+      ? Date.parse(request.since)
+      : null;
+    const parsed: ApifyCandidate[] = [];
+    for (const value of payload) {
+      const result = candidateFromApify(value, searchPlan);
+      if (!result.candidate) {
+        rejectedByReason[result.reason] += 1;
+        continue;
+      }
+      if (sinceMs !== null && Date.parse(result.candidate.createdAt) < sinceMs) {
+        rejectedByReason.outside_window += 1;
+        continue;
+      }
+      parsed.push(result.candidate);
     }
 
-    const selectedCandidates = uniqueCandidates.slice(
+    const byKey = new Map<string, ApifyCandidate>();
+    for (const candidate of parsed) {
+      const key = `${candidate.kind}:${candidate.externalId}`;
+      const current = byKey.get(key);
+      if (!current) {
+        byKey.set(key, candidate);
+        continue;
+      }
+      byKey.set(key, {
+        ...current,
+        matchedQuery: current.matchedQuery ?? candidate.matchedQuery,
+        matchedQueries: [...new Set([...current.matchedQueries, ...candidate.matchedQueries])],
+        discoveryLanes: [...new Set([...current.discoveryLanes, ...candidate.discoveryLanes])],
+      });
+    }
+
+    const candidates = [...byKey.values()].slice(0, maxItems).map(({ item: _item, ...candidate }) => candidate);
+    const laneQueryCounts: Partial<Record<RedditSearchLane, number>> = {};
+    for (const entry of searchPlan) laneQueryCounts[entry.lane] = (laneQueryCounts[entry.lane] ?? 0) + 1;
+    const diagnostics: RedditDiscoveryDiagnostics = {
+      queryCount: searchPlan.length,
+      fetchedCandidates: payload.length,
+      normalizedCandidates: parsed.length,
+      verifiedRecentCandidates: candidates.length,
+      rejectedByReason,
+      laneQueryCounts,
+    };
+    return { candidates, searchPlan, sourceMode: this.sourceMode, diagnostics };
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const candidates = request.candidates.slice(0, this.enrichmentLimit);
+    if (candidates.length === 0) {
+      return {
+        conversations: [],
+        sourceMode: this.sourceMode,
+        diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 },
+      };
+    }
+    const maxComments = Math.max(
       0,
-      Math.min(this.enrichmentLimit, request.limit),
+      Math.min(request.maxComments ?? this.enrichmentComments, 20),
     );
-    let enrichmentPayload: unknown[] = [];
-    let enrichmentFailed = false;
-    if (selectedCandidates.length > 0) {
-      const enrichmentInput: ApifyEnrichmentActorInput = {
-        startUrls: selectedCandidates.map((candidate) => ({ url: candidate.permalink })),
-        skipComments: false,
-        skipUserPosts: true,
-        skipCommunity: true,
-        includeMediaLinks: true,
-        includeNSFW: false,
-        maxItems: Math.min(
-          100,
-          selectedCandidates.length * (this.enrichmentComments + 1),
-        ),
-        maxPostCount: selectedCandidates.length,
-        maxComments: this.enrichmentComments,
-        maxCommunitiesCount: 0,
-        maxUserCount: 0,
-        scrollTimeout: 20,
-        navigationTimeout: 30,
-        debugMode: false,
-        proxy: {
-          useApifyProxy: true,
-          apifyProxyGroups: ["RESIDENTIAL"],
+    const input: ApifyEnrichmentActorInput = {
+      startUrls: candidates.flatMap((candidate) => candidate.permalink ? [{ url: candidate.permalink }] : []),
+      skipComments: false,
+      skipUserPosts: true,
+      skipCommunity: true,
+      includeMediaLinks: true,
+      includeNSFW: false,
+      maxItems: Math.min(100, candidates.length * (maxComments + 1)),
+      maxPostCount: candidates.length,
+      maxComments,
+      maxCommunitiesCount: 0,
+      maxUserCount: 0,
+      scrollTimeout: 20,
+      navigationTimeout: 30,
+      debugMode: false,
+      proxy: {
+        useApifyProxy: true,
+        apifyProxyGroups: ["RESIDENTIAL"],
+      },
+    };
+
+    let payload: unknown[];
+    try {
+      payload = await this.runActor(input);
+    } catch (error) {
+      console.error("Apify Reddit thread enrichment failed", error);
+      return {
+        conversations: [],
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: 0,
         },
       };
-      try {
-        enrichmentPayload = await this.runActor(enrichmentInput);
-      } catch (error) {
-        enrichmentFailed = true;
-        console.error("Apify Reddit thread enrichment failed; using complete discovery records", error);
-      }
     }
 
-    const validSince = request.since && Number.isFinite(Date.parse(request.since))
-      ? Date.parse(request.since)
-      : undefined;
-    let enrichmentFallbacks = 0;
-    let enrichedConversations = 0;
-    let missingVerifiedTimestamps = 0;
-    const seen = new Set<string>();
-    const conversations = selectedCandidates.flatMap((candidate) => {
-      const enriched = enrichmentFailed
-        ? undefined
-        : enrichedItemForCandidate(candidate, enrichmentPayload);
-      if (!enriched) enrichmentFallbacks += 1;
-      const normalized = normalizeApifyRedditItem(
-        enriched ?? candidate.item,
-        this.actorId,
-        searches,
-        {
-          fallback: candidate,
-          threadContext: enrichmentFailed
-            ? ""
-            : threadContextForCandidate(candidate, enrichmentPayload),
-        },
-      );
-      if (enriched && normalized) enrichedConversations += 1;
-      if (!normalized && !candidate.createdAt) missingVerifiedTimestamps += 1;
-      if (
-        !normalized ||
-        (validSince !== undefined && Date.parse(normalized.createdAt) < validSince) ||
-        seen.has(normalized.externalId)
-      ) return [];
-      seen.add(normalized.externalId);
-      return [normalized];
+    let failed = 0;
+    const conversations = candidates.flatMap((candidate) => {
+      const enriched = enrichedItemForCandidate(candidate, payload);
+      if (!enriched) {
+        failed += 1;
+        return [];
+      }
+      const conversation = enrichedConversation(candidate, enriched, payload, `apify:${this.actorId}`);
+      if (!conversation) {
+        failed += 1;
+        return [];
+      }
+      return [conversation];
     });
     return {
       conversations,
-      sourceMode: "apify-test",
+      sourceMode: this.sourceMode,
       diagnostics: {
-        queryCount: searches.length,
-        fetchedCandidates: discoveryPayload.length,
-        normalizedCandidates: discovered.length,
-        locallyMatchedCandidates: uniqueCandidates.length,
-        enrichmentAttempts: selectedCandidates.length,
-        enrichedConversations,
-        verifiedRecentConversations: conversations.length,
-        missingVerifiedTimestamps,
-        rejectedCandidates: Math.max(0, discoveryPayload.length - uniqueCandidates.length),
-        enrichmentFallbacks,
+        requested: candidates.length,
+        enriched: conversations.length,
+        failed,
+        fallbackUsed: 0,
+      },
+    };
+  }
+
+  /** Deprecated compatibility path. The active scan uses discover -> AI -> enrich. */
+  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+    const discovery = await this.discover(request);
+    const selected = discovery.candidates.slice(0, Math.min(this.enrichmentLimit, request.limit));
+    const enrichment = await this.enrich({ candidates: selected });
+    return {
+      conversations: enrichment.conversations,
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        queryCount: discovery.diagnostics.queryCount,
+        fetchedCandidates: discovery.diagnostics.fetchedCandidates,
+        normalizedCandidates: discovery.diagnostics.normalizedCandidates,
+        locallyMatchedCandidates: discovery.candidates.length,
+        enrichmentAttempts: enrichment.diagnostics.requested,
+        enrichedConversations: enrichment.diagnostics.enriched,
+        verifiedRecentConversations: enrichment.conversations.length,
+        missingVerifiedTimestamps: discovery.diagnostics.rejectedByReason.missing_timestamp,
+        rejectedCandidates: Object.values(discovery.diagnostics.rejectedByReason).reduce((sum, count) => sum + count, 0),
+        enrichmentFallbacks: enrichment.diagnostics.fallbackUsed,
       },
     };
   }
@@ -851,6 +1027,8 @@ function normalizedConversation(
       score: Number.isFinite(score) ? Math.max(0, Math.trunc(score)) : 0,
       comments: Number.isFinite(comments) ? Math.max(0, Math.trunc(comments)) : 0,
     },
+    matchedQueries: [],
+    discoveryLanes: [],
     provenance: {
       id: `reddit_${providerName}_${contentFingerprint(externalId)}`,
       kind: "reddit",
@@ -866,10 +1044,53 @@ function normalizedConversation(
   };
 }
 
+function discoveryCandidateFromConversation(conversation: RedditConversation): RedditDiscoveryCandidate {
+  return {
+    provider: conversation.provider,
+    sourceMode: conversation.sourceMode,
+    externalId: conversation.externalId,
+    kind: conversation.kind,
+    parentExternalId: conversation.parentExternalId,
+    subreddit: conversation.subreddit,
+    title: conversation.title,
+    body: conversation.body,
+    author: conversation.author,
+    permalink: conversation.permalink,
+    createdAt: conversation.createdAt,
+    metrics: conversation.metrics,
+    matchedQuery: conversation.matchedQuery,
+    matchedQueries: conversation.matchedQueries ?? (conversation.matchedQuery ? [conversation.matchedQuery] : []),
+    discoveryLanes: conversation.discoveryLanes ?? [],
+    provenance: conversation.provenance,
+  };
+}
+
+function matchedOnlyEnriched(candidate: RedditDiscoveryCandidate): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    ...candidate,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+  };
+}
+
 /**
- * Normalized adapter for an approved Reddit API provider. The configured
- * service must expose POST /search and return provider-authorized public Reddit
- * records; this adapter never requests or parses Reddit HTML.
+ * Normalized adapter for an approved Reddit API provider. Discovery uses its
+ * existing /search contract. Until an approved provider exposes a thread API,
+ * enrichment preserves the matched record as structured context without
+ * inventing surrounding comments.
  */
 export class ApprovedHttpRedditProvider implements RedditProvider {
   readonly name: string;
@@ -894,7 +1115,7 @@ export class ApprovedHttpRedditProvider implements RedditProvider {
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
-  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+  private async rawSearch(request: RedditSearchRequest): Promise<{ conversations: RedditConversation[]; nextCursor?: string }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     let response: Response;
@@ -917,32 +1138,64 @@ export class ApprovedHttpRedditProvider implements RedditProvider {
       throw new Error("The approved Reddit provider response exceeded the size limit.");
     }
     const raw = await response.text();
-    if (raw.length > 2_000_000) {
-      throw new Error("The approved Reddit provider response exceeded the size limit.");
-    }
-    if (!response.ok) {
-      throw new Error(`Approved Reddit provider request failed with HTTP ${response.status}.`);
-    }
+    if (raw.length > 2_000_000) throw new Error("The approved Reddit provider response exceeded the size limit.");
+    if (!response.ok) throw new Error(`Approved Reddit provider request failed with HTTP ${response.status}.`);
     const payload = JSON.parse(raw) as ApprovedProviderResponse;
     if (!Array.isArray(payload.conversations)) {
       throw new Error("The approved Reddit provider returned an invalid response.");
     }
-    const conversations = payload.conversations.map((value) =>
-      normalizedConversation(value as ApprovedProviderConversation, this.name),
-    );
+    return {
+      conversations: payload.conversations.map((value) =>
+        normalizedConversation(value as ApprovedProviderConversation, this.name),
+      ),
+      nextCursor: typeof payload.nextCursor === "string" ? payload.nextCursor : undefined,
+    };
+  }
+
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    const raw = await this.rawSearch(request);
+    const candidates = raw.conversations.map(discoveryCandidateFromConversation);
+    return {
+      candidates,
+      nextCursor: raw.nextCursor,
+      searchPlan: [],
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        queryCount: 0,
+        fetchedCandidates: candidates.length,
+        normalizedCandidates: candidates.length,
+        verifiedRecentCandidates: candidates.length,
+        rejectedByReason: emptyProviderRejections(),
+        laneQueryCounts: {},
+      },
+    };
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const conversations = request.candidates.map(matchedOnlyEnriched);
     return {
       conversations,
-      nextCursor: typeof payload.nextCursor === "string" ? payload.nextCursor : undefined,
-      sourceMode: "live",
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        requested: request.candidates.length,
+        enriched: conversations.length,
+        failed: 0,
+        fallbackUsed: conversations.length,
+      },
+    };
+  }
+
+  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+    const discovery = await this.discover(request);
+    return {
+      conversations: discovery.candidates.map(matchedOnlyEnriched),
+      nextCursor: discovery.nextCursor,
+      sourceMode: this.sourceMode,
     };
   }
 }
 
-/**
- * Provider selection is deliberately explicit. Missing production credentials
- * never masquerade as live Reddit data: development must opt into `mock` and
- * production adapters must be registered by name.
- */
+/** Provider selection is deliberately explicit; missing credentials never masquerade as live data. */
 export function createRedditProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   liveProviders: Readonly<Record<string, RedditProvider>> = {},
@@ -970,7 +1223,7 @@ export function createRedditProviderFromEnv(
     return new ApifyRedditTestProvider({
       actorId: required(env.APIFY_REDDIT_ACTOR_ID, "APIFY_REDDIT_ACTOR_ID"),
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
-      maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 40, 1, 100),
+      maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 50, 1, 100),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 260_000, 20_000, 290_000),
@@ -985,9 +1238,7 @@ export function createRedditProviderFromEnv(
   }
 
   const provider = liveProviders[selected];
-  if (!provider) {
-    throw new Error(`The configured Reddit provider ${selected} is not registered.`);
-  }
+  if (!provider) throw new Error(`The configured Reddit provider ${selected} is not registered.`);
   if (provider.sourceMode !== "live") {
     throw new Error(`The configured provider ${selected} is not a live Reddit API provider.`);
   }

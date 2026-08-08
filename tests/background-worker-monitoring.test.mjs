@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import {
@@ -7,6 +8,7 @@ import {
   isMonitoringCandidateDue,
   monitoringConfiguration,
   monitoringDedupeKey,
+  postJsonWithLongTimeout,
   scheduleMonitoringScans,
 } from "../scripts/background-worker.mjs";
 
@@ -64,8 +66,6 @@ test("only due active paid schedules qualify, while Core survives browser-sessio
   const dueCore = {
     ...duePass,
     plan: "core",
-    // Core eligibility follows verified active subscription state. Unlike the
-    // fixed seven-day pass, it does not require a future accessUntil value.
     accessUntil: new Date(NOW.getTime() - DAY_MS).toISOString(),
     workspaceExpiresAt: new Date(NOW.getTime() - DAY_MS).toISOString(),
   };
@@ -89,7 +89,7 @@ test("monitoring dedupe keys are stable within a plan interval bucket", () => {
   );
 });
 
-test("scheduled monitoring records exactly match the ScanRecord stage contract", () => {
+test("scheduled monitoring records exactly match the new scan-stage contract", () => {
   assert.deepEqual(createMonitoringScanRecord({
     scanId: "scan_fixed",
     workspaceId: "ws_fixed",
@@ -111,37 +111,37 @@ test("scheduled monitoring records exactly match the ScanRecord stage contract",
         id: "understanding",
         label: "Mapping the problems you solve",
         status: "pending",
-        detail: "Building a source-backed product, audience and problem profile.",
+        detail: "Building a source-backed company context pack.",
       },
       {
         id: "discovery",
         label: "Searching recent Reddit conversations",
         status: "pending",
-        detail: "Looking only inside the current seven-day scan window.",
+        detail: "Searching explicit demand, pain, switching, recommendation and brand lanes.",
       },
       {
-        id: "reading",
-        label: "Reading relevant posts and replies",
+        id: "triage",
+        label: "Reading every credible candidate",
         status: "pending",
-        detail: "Checking context, problem fit and source quality.",
+        detail: "Using high-recall AI triage before spending on full thread context.",
       },
       {
-        id: "ranking",
+        id: "enrichment",
+        label: "Opening the strongest conversations",
+        status: "pending",
+        detail: "Fetching useful thread context only for candidates worth deeper review.",
+      },
+      {
+        id: "qualification",
         label: "Identifying potential customers",
         status: "pending",
-        detail: "Removing noise and deduplicating qualified people by Reddit author.",
-      },
-      {
-        id: "competitors",
-        label: "Checking competitor frustrations",
-        status: "pending",
-        detail: "Verifying complaints and alternative-seeking signals from their sources.",
+        detail: "Qualifying first, then ranking and deduplicating people by Reddit author.",
       },
       {
         id: "replies",
-        label: "Ranking the strongest opportunities",
+        label: "Preparing the best next move",
         status: "pending",
-        detail: "Ordering the best fits and preparing source-grounded replies.",
+        detail: "Generating one grounded reply only when the conversation is appropriate to join.",
       },
     ],
     createdAt: NOW.toISOString(),
@@ -296,4 +296,59 @@ test("job claiming never reclaims a job at its maximum attempt count", async () 
   };
   assert.equal(await claimJob(sql, "worker_test"), null);
   assert.match(query, /attempts < max_attempts/u);
+});
+
+test("long worker execution helper uses the configured timeout rather than fetch defaults", async () => {
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ received: JSON.parse(body), ok: true }));
+      }, 80);
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  try {
+    const result = await postJsonWithLongTimeout(
+      `http://127.0.0.1:${address.port}/execute`,
+      {
+        headers: { "content-type": "application/json" },
+        body: { workerId: "worker_test" },
+        signal: AbortSignal.timeout(1_000),
+        timeoutMs: 1_000,
+      },
+    );
+    assert.deepEqual(result, { received: { workerId: "worker_test" }, ok: true });
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("long worker execution helper fails explicitly on its own timeout", async () => {
+  const server = createServer((_request, response) => {
+    setTimeout(() => {
+      if (!response.destroyed) response.end(JSON.stringify({ late: true }));
+    }, 200);
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  try {
+    await assert.rejects(
+      postJsonWithLongTimeout(
+        `http://127.0.0.1:${address.port}/execute`,
+        {
+          body: {},
+          signal: AbortSignal.timeout(500),
+          timeoutMs: 40,
+        },
+      ),
+      /timed out after 40ms/i,
+    );
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
 });

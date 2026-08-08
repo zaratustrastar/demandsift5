@@ -2,6 +2,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { hostname } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,37 +23,37 @@ const MONITORING_STAGES = [
     id: "understanding",
     label: "Mapping the problems you solve",
     status: "pending",
-    detail: "Building a source-backed product, audience and problem profile.",
+    detail: "Building a source-backed company context pack.",
   },
   {
     id: "discovery",
     label: "Searching recent Reddit conversations",
     status: "pending",
-    detail: "Looking only inside the current seven-day scan window.",
+    detail: "Searching explicit demand, pain, switching, recommendation and brand lanes.",
   },
   {
-    id: "reading",
-    label: "Reading relevant posts and replies",
+    id: "triage",
+    label: "Reading every credible candidate",
     status: "pending",
-    detail: "Checking context, problem fit and source quality.",
+    detail: "Using high-recall AI triage before spending on full thread context.",
   },
   {
-    id: "ranking",
+    id: "enrichment",
+    label: "Opening the strongest conversations",
+    status: "pending",
+    detail: "Fetching useful thread context only for candidates worth deeper review.",
+  },
+  {
+    id: "qualification",
     label: "Identifying potential customers",
     status: "pending",
-    detail: "Removing noise and deduplicating qualified people by Reddit author.",
-  },
-  {
-    id: "competitors",
-    label: "Checking competitor frustrations",
-    status: "pending",
-    detail: "Verifying complaints and alternative-seeking signals from their sources.",
+    detail: "Qualifying first, then ranking and deduplicating people by Reddit author.",
   },
   {
     id: "replies",
-    label: "Ranking the strongest opportunities",
+    label: "Preparing the best next move",
     status: "pending",
-    detail: "Ordering the best fits and preparing source-grounded replies.",
+    detail: "Generating one grounded reply only when the conversation is appropriate to join.",
   },
 ];
 
@@ -614,6 +616,7 @@ async function completeJob(sql, job) {
     SET status = 'succeeded',
         locked_at = NULL,
         locked_by = NULL,
+        last_error = NULL,
         finished_at = now(),
         updated_at = now()
     WHERE id = ${job.id} AND locked_by = ${workerId}
@@ -637,7 +640,73 @@ async function failJob(sql, job, error) {
   `;
 }
 
-async function executeScanJob(job, signal) {
+/**
+ * Node's built-in fetch is backed by Undici and can end a long request around
+ * its header timeout even when our AbortSignal allows a longer job. Scan jobs
+ * deliberately use the core HTTP client so BACKGROUND_JOB_TIMEOUT_SECONDS is
+ * the single execution timeout we control.
+ */
+export function postJsonWithLongTimeout(urlValue, options) {
+  const url = new URL(urlValue);
+  const requestFn = url.protocol === "https:" ? httpsRequest : url.protocol === "http:" ? httpRequest : null;
+  if (!requestFn) return Promise.reject(new Error("Worker executor URL must use HTTP or HTTPS."));
+  const body = JSON.stringify(options.body ?? {});
+  const maxResponseBytes = options.maxResponseBytes ?? 1_000_000;
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(error);
+    };
+    const request = requestFn(url, {
+      method: "POST",
+      headers: {
+        ...options.headers,
+        "content-length": Buffer.byteLength(body),
+      },
+      signal: options.signal,
+    }, (response) => {
+      const chunks = [];
+      let bytes = 0;
+      response.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > maxResponseBytes) {
+          response.destroy(new Error("Web executor response exceeded the size limit."));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("error", finishReject);
+      response.once("end", () => {
+        if (settled) return;
+        const text = Buffer.concat(chunks).toString("utf8");
+        const status = response.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          finishReject(new Error(`Web executor returned HTTP ${status}: ${text.slice(0, 1_000)}`));
+          return;
+        }
+        let payload;
+        try {
+          payload = text ? JSON.parse(text) : {};
+        } catch {
+          finishReject(new Error("Web executor returned invalid JSON."));
+          return;
+        }
+        settled = true;
+        resolvePromise(payload);
+      });
+    });
+    request.once("error", finishReject);
+    request.setTimeout(options.timeoutMs, () => {
+      request.destroy(new Error(`Web executor timed out after ${options.timeoutMs}ms.`));
+    });
+    request.end(body);
+  });
+}
+
+export async function executeScanJob(job, signal) {
   const workerSecret = requiredEnvironment("BACKGROUND_WORKER_SECRET");
   if (workerSecret.length < 32) {
     throw new Error("BACKGROUND_WORKER_SECRET must contain at least 32 characters.");
@@ -648,20 +717,20 @@ async function executeScanJob(job, signal) {
     : 900;
   const timeout = AbortSignal.timeout(boundedTimeoutSeconds * 1_000);
   const combinedSignal = AbortSignal.any([signal, timeout]);
-  const response = await fetch(`${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${workerSecret}`,
-      "content-type": "application/json",
+  return postJsonWithLongTimeout(
+    `${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`,
+    {
+      headers: {
+        authorization: `Bearer ${workerSecret}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: { workerId },
+      signal: combinedSignal,
+      timeoutMs: boundedTimeoutSeconds * 1_000,
+      maxResponseBytes: 1_000_000,
     },
-    body: JSON.stringify({ workerId }),
-    signal: combinedSignal,
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 1_000);
-    throw new Error(`Web executor returned HTTP ${response.status}: ${detail}`);
-  }
-  return response.json();
+  );
 }
 
 async function runQueueWorker(databaseUrl, signal) {

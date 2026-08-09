@@ -368,7 +368,7 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
     if (fallback) deduped.push(fallback);
   }
 
-  return deduped.slice(0, 12);
+  return deduped.slice(0, 8);
 }
 
 /** Compatibility helper for tests/callers that only need query strings. */
@@ -737,61 +737,130 @@ export class ApifyRedditTestProvider implements RedditProvider {
     this.maximumItems = Math.max(1, Math.min(100, Math.trunc(input.maximumItems ?? 50)));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(0, Math.min(20, Math.trunc(input.enrichmentComments ?? 6)));
-    this.timeoutMs = Math.max(20_000, Math.min(290_000, Math.trunc(input.timeoutMs ?? 260_000)));
+    this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.timeRange = input.timeRange ?? "month";
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
   private async runActor(actorInput: ApifyRedditActorInput): Promise<unknown[]> {
-    const endpoint = new URL(
-      `/v2/acts/${encodeURIComponent(this.actorId)}/run-sync-get-dataset-items`,
-      "https://api.apify.com",
-    );
-    endpoint.searchParams.set("clean", "true");
-    endpoint.searchParams.set("format", "json");
-    endpoint.searchParams.set("timeout", String(Math.floor(this.timeoutMs / 1_000)));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
+    const headers = {
+      accept: "application/json",
+      authorization: `Bearer ${this.token}`,
+      "content-type": "application/json",
+    };
+
+    const readJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+      const declaredBytes = Number(response.headers.get("content-length") ?? 0);
+      if (Number.isFinite(declaredBytes) && declaredBytes > maximumBytes) {
+        throw new Error("The Apify Reddit test response exceeded the size limit.");
+      }
+      const raw = await response.text();
+      if (new TextEncoder().encode(raw).byteLength > maximumBytes) {
+        throw new Error("The Apify Reddit test response exceeded the size limit.");
+      }
+      if (!response.ok) {
+        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
+      }
+      try {
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error("The Apify Reddit test provider returned invalid JSON.");
+      }
+    };
+
+    const runData = (payload: unknown): Record<string, unknown> => {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new Error("The Apify Reddit test provider returned invalid run metadata.");
+      }
+      const data = (payload as { data?: unknown }).data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw new Error("The Apify Reddit test provider returned invalid run metadata.");
+      }
+      return data as Record<string, unknown>;
+    };
+
     try {
-      response = await this.fetchImpl(endpoint, {
+      const startEndpoint = new URL(
+        `/v2/actors/${encodeURIComponent(this.actorId)}/runs`,
+        "https://api.apify.com",
+      );
+      startEndpoint.searchParams.set("waitForFinish", "60");
+      startEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1_000)));
+      startEndpoint.searchParams.set("maxItems", String(Math.min(100, actorInput.maxItems)));
+
+      const startResponse = await this.fetchImpl(startEndpoint, {
         method: "POST",
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${this.token}`,
-          "content-type": "application/json",
-        },
+        headers,
         body: JSON.stringify(actorInput),
         signal: controller.signal,
       });
+      const started = runData(await readJson(startResponse, 1_000_000));
+      const runId = stringValue(started.id, 120);
+      let status = stringValue(started.status, 40).toUpperCase();
+      let statusMessage = stringValue(started.statusMessage, 500);
+      let datasetId = stringValue(started.defaultDatasetId, 120);
+      if (!runId || !status) {
+        throw new Error("The Apify Reddit test provider returned incomplete run metadata.");
+      }
+
+      const terminalStatuses = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
+      while (!terminalStatuses.has(status)) {
+        const statusEndpoint = new URL(
+          `/v2/actor-runs/${encodeURIComponent(runId)}`,
+          "https://api.apify.com",
+        );
+        statusEndpoint.searchParams.set("waitForFinish", "60");
+        const statusResponse = await this.fetchImpl(statusEndpoint, {
+          method: "GET",
+          headers,
+          signal: controller.signal,
+        });
+        const current = runData(await readJson(statusResponse, 1_000_000));
+        status = stringValue(current.status, 40).toUpperCase();
+        statusMessage = stringValue(current.statusMessage, 500);
+        datasetId = stringValue(current.defaultDatasetId, 120) || datasetId;
+        if (!status) {
+          throw new Error("The Apify Reddit test provider returned incomplete run status.");
+        }
+      }
+
+      if (status !== "SUCCEEDED") {
+        throw new Error(
+          `The Apify Reddit test run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`,
+        );
+      }
+      if (!datasetId) {
+        throw new Error("The Apify Reddit test run completed without a dataset.");
+      }
+
+      const datasetEndpoint = new URL(
+        `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
+        "https://api.apify.com",
+      );
+      datasetEndpoint.searchParams.set("clean", "true");
+      datasetEndpoint.searchParams.set("format", "json");
+      datasetEndpoint.searchParams.set("limit", String(Math.min(100, actorInput.maxItems)));
+
+      const datasetResponse = await this.fetchImpl(datasetEndpoint, {
+        method: "GET",
+        headers,
+        signal: controller.signal,
+      });
+      const payload = await readJson(datasetResponse, 5_000_000);
+      if (!Array.isArray(payload)) {
+        throw new Error("The Apify Reddit test provider returned an invalid dataset.");
+      }
+      return payload;
     } catch (error) {
-      if (controller.signal.aborted) throw new Error("The Apify Reddit test run timed out.");
+      if (controller.signal.aborted) {
+        throw new Error("The Apify Reddit test run timed out.");
+      }
       throw error;
     } finally {
       clearTimeout(timeout);
     }
-
-    const declaredBytes = Number(response.headers.get("content-length") ?? 0);
-    if (Number.isFinite(declaredBytes) && declaredBytes > 5_000_000) {
-      throw new Error("The Apify Reddit test response exceeded the size limit.");
-    }
-    const raw = await response.text();
-    if (new TextEncoder().encode(raw).byteLength > 5_000_000) {
-      throw new Error("The Apify Reddit test response exceeded the size limit.");
-    }
-    if (!response.ok) {
-      throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
-    }
-    let payload: unknown;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      throw new Error("The Apify Reddit test provider returned invalid JSON.");
-    }
-    if (!Array.isArray(payload)) {
-      throw new Error("The Apify Reddit test provider returned an invalid dataset.");
-    }
-    return payload;
   }
 
   async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {

@@ -43,6 +43,40 @@ test("categorical lead status is checked before ranking is calculated", () => {
   assert.ok(leadDecision < ranking);
 });
 
+test("requested enrichment with zero usable conversations fails explicitly", () => {
+  const guard = position("selectedForEnrichment.length > 0 && enrichment.conversations.length === 0");
+  const errorCode = position('"reddit_enrichment_failed"');
+  const completedStage = source.indexOf('"enrichment",\n      "complete"', guard);
+  assert.ok(errorCode > guard);
+  assert.ok(completedStage > errorCode, "enrichment must fail before the stage can be marked complete");
+  assert.ok(source.includes("selected ${selectedForEnrichment.length}, enriched 0, failed ${failed}"));
+});
+
+test("deep qualification is reused only after source and structured context are verified unchanged", () => {
+  assert.equal(
+    source.includes("previous.deepQualification && previous.commentCount === candidate.metrics.comments"),
+    false,
+    "comment count must never be used as proof that thread context is unchanged",
+  );
+  assert.equal(
+    source.includes("deep?.qualification ?? previous?.deepQualification"),
+    false,
+    "processed state must not silently carry a stale deep qualification forward",
+  );
+  assert.ok(source.includes("const currentContextHash = structuredContextHash(conversation)"));
+  assert.ok(source.includes("previous.contentHash === candidate.provenance.contentHash"));
+  assert.ok(source.includes("previous.contextHash === currentContextHash"));
+  assert.ok(source.includes("sourceUnchanged && contextUnchanged && previous?.deepQualification"));
+  assert.ok(source.includes("conversations: conversationsNeedingDeep"));
+  assert.ok(source.includes("deepQualification: deep?.qualification ?? null"));
+  assert.ok(source.includes("const contextHash = deep ? structuredContextHash(deep.conversation) : null"));
+});
+
+test("reply reuse also requires the verified current context hash", () => {
+  assert.equal(source.includes("state.commentCount === row.conversation.metrics.comments"), false);
+  assert.ok(source.includes("state.contextHash === currentContextHash"));
+});
+
 test("scan persists mandatory stage diagnostics and recurring state", () => {
   for (const field of [
     "deterministicSurvivors",

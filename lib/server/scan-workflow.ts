@@ -354,25 +354,8 @@ function localMockDeep(
   };
 }
 
-function discoveryAsEnriched(candidate: RedditDiscoveryCandidate): EnrichedRedditConversation {
-  const matched = {
-    externalId: candidate.externalId,
-    kind: candidate.kind,
-    author: candidate.author,
-    body: candidate.body,
-    parentExternalId: candidate.parentExternalId,
-    createdAt: candidate.createdAt,
-  };
-  return {
-    ...candidate,
-    structuredContext: {
-      originalPost: candidate.kind === "post" ? matched : undefined,
-      matched,
-      parentChain: [],
-      replies: [],
-      surroundingComments: [],
-    },
-  };
+function structuredContextHash(conversation: EnrichedRedditConversation): string {
+  return contentFingerprint(JSON.stringify(conversation.structuredContext));
 }
 
 function canonicalPermalink(value?: string): string | null {
@@ -631,7 +614,6 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
 
     await setStage(scan, "triage", "active");
     const triageById = new Map<string, ConversationTriage>();
-    const reusedDeepById = new Map<string, DeepQualification>();
     let reusedUnchanged = 0;
     let reusedTriageOnly = 0;
     const needsTriage: RedditDiscoveryCandidate[] = [];
@@ -640,12 +622,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       const previous = previousStates.get(`${candidate.provider}:${candidate.externalId}`);
       if (previous && previous.contentHash === candidate.provenance.contentHash) {
         triageById.set(candidate.externalId, previous.triage);
-        if (previous.deepQualification && previous.commentCount === candidate.metrics.comments) {
-          reusedDeepById.set(candidate.externalId, previous.deepQualification);
-          reusedUnchanged += 1;
-        } else {
-          reusedTriageOnly += 1;
-        }
+        reusedTriageOnly += 1;
         continue;
       }
       needsTriage.push(candidate);
@@ -684,11 +661,8 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     );
 
     await setStage(scan, "enrichment", "active");
-    const candidatesNeedingContext = worthEnriching.filter(
-      (candidate) => !reusedDeepById.has(candidate.externalId),
-    );
     const selectedForEnrichment = selectCandidatesForEnrichment({
-      candidates: candidatesNeedingContext,
+      candidates: worthEnriching,
       triageById,
       budget: enrichmentBudget(),
     });
@@ -696,6 +670,14 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       candidates: selectedForEnrichment,
       maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
     });
+    if (selectedForEnrichment.length > 0 && enrichment.conversations.length === 0) {
+      const failed = Math.max(enrichment.diagnostics.failed, selectedForEnrichment.length);
+      throw new ApiError(
+        `Reddit enrichment failed: selected ${selectedForEnrichment.length}, enriched 0, failed ${failed}.`,
+        502,
+        "reddit_enrichment_failed",
+      );
+    }
     await setStage(
       scan,
       "enrichment",
@@ -704,23 +686,45 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     );
 
     await setStage(scan, "qualification", "active");
+    const selectedById = new Map(selectedForEnrichment.map((candidate) => [candidate.externalId, candidate]));
+    const reusedDeepById = new Map<string, DeepQualification>();
     const deepById = new Map<string, DeepQualifiedConversation>();
-    for (const candidate of cleaned.survivors) {
-      const qualification = reusedDeepById.get(candidate.externalId);
-      if (!qualification) continue;
-      deepById.set(candidate.externalId, {
-        externalId: candidate.externalId,
-        conversation: discoveryAsEnriched(candidate),
-        qualification,
-      });
+    const conversationsNeedingDeep: EnrichedRedditConversation[] = [];
+
+    for (const conversation of enrichment.conversations) {
+      const candidate = selectedById.get(conversation.externalId);
+      const previous = previousStates.get(`${conversation.provider}:${conversation.externalId}`) ??
+        previousStates.get(`${conversation.sourceMode === "apify-test" ? "apify-test" : conversation.provider}:${conversation.externalId}`);
+      const currentContextHash = structuredContextHash(conversation);
+      const sourceUnchanged = Boolean(
+        candidate &&
+        previous &&
+        previous.contentHash === candidate.provenance.contentHash,
+      );
+      const contextUnchanged = Boolean(
+        previous?.contextHash && previous.contextHash === currentContextHash,
+      );
+
+      if (sourceUnchanged && contextUnchanged && previous?.deepQualification) {
+        reusedDeepById.set(conversation.externalId, previous.deepQualification);
+        deepById.set(conversation.externalId, {
+          externalId: conversation.externalId,
+          conversation,
+          qualification: previous.deepQualification,
+        });
+        reusedUnchanged += 1;
+        reusedTriageOnly = Math.max(0, reusedTriageOnly - 1);
+      } else {
+        conversationsNeedingDeep.push(conversation);
+      }
     }
 
     let deepReturned = 0;
-    if (enrichment.conversations.length > 0) {
+    if (conversationsNeedingDeep.length > 0) {
       if (aiProvider) {
         const qualified = await aiProvider.qualifyConversations({
           business,
-          conversations: enrichment.conversations,
+          conversations: conversationsNeedingDeep,
           models,
           coverageRetries: 2,
         });
@@ -728,7 +732,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
         deepReturned = qualified.value.length;
         for (const item of qualified.value) deepById.set(item.externalId, item);
       } else {
-        for (const conversation of enrichment.conversations) {
+        for (const conversation of conversationsNeedingDeep) {
           const triage = triageById.get(conversation.externalId);
           if (!triage) continue;
           const qualification = localMockDeep(conversation, triage);
@@ -771,7 +775,6 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       const { conversation, qualification } = row;
       if (qualification.leadStatus !== "potential_customer") return [];
       const score = opportunityRankScore(qualification);
-      const legacy = legacyClassificationFromDeep(qualification);
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${conversation.title ?? ""}\n${conversation.body}`,
         sourceMode: conversation.sourceMode,
@@ -938,12 +941,14 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       const previousOpportunity = previousBySource.get(strongest.sourceId);
       const previousReply = previousOpportunity ? previousReplies.get(previousOpportunity.id) : undefined;
       const state = previousStates.get(`${row?.conversation.sourceMode === "apify-test" ? "apify-test" : row?.conversation.provider}:${row?.conversation.externalId}`);
+      const currentContextHash = row ? structuredContextHash(row.conversation) : null;
       if (
         previousReply?.content.trim() &&
         state &&
         row &&
         state.contentHash === row.conversation.provenance.contentHash &&
-        state.commentCount === row.conversation.metrics.comments
+        state.contextHash !== null &&
+        state.contextHash === currentContextHash
       ) {
         content = previousReply.content;
       } else if (row && aiProvider) {
@@ -1009,9 +1014,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     const processedRedditState: ProcessedRedditState[] = cleaned.survivors.map((candidate) => {
       const previous = previousStates.get(`${candidate.provider}:${candidate.externalId}`);
       const deep = deepById.get(candidate.externalId);
-      const contextHash = deep
-        ? contentFingerprint(JSON.stringify(deep.conversation.structuredContext))
-        : previous?.contextHash ?? null;
+      const contextHash = deep ? structuredContextHash(deep.conversation) : null;
       const opportunity = opportunities.find((row) => row.sourceId === candidate.provenance.id);
       return {
         provider: candidate.provider,
@@ -1024,12 +1027,14 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
         firstSeenAt: previous?.firstSeenAt ?? scan.createdAt,
         lastSeenAt: scan.createdAt,
         lastAnalyzedAt:
-          previous && previous.contentHash === candidate.provenance.contentHash && reusedDeepById.has(candidate.externalId)
+          previous && reusedDeepById.has(candidate.externalId)
             ? previous.lastAnalyzedAt
-            : scan.createdAt,
+            : deep
+              ? scan.createdAt
+              : previous?.lastAnalyzedAt ?? scan.createdAt,
         commentCount: candidate.metrics.comments,
         triage: triageById.get(candidate.externalId)!,
-        deepQualification: deep?.qualification ?? previous?.deepQualification ?? null,
+        deepQualification: deep?.qualification ?? null,
         replyStatus: opportunity && generatedReplyIds.has(opportunity.id)
           ? "generated"
           : opportunity?.shouldReply
@@ -1073,7 +1078,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       requestedForEnrichment: enrichment.diagnostics.requested,
       enrichedSuccessfully: enrichment.diagnostics.enriched,
       enrichmentFailures: enrichment.diagnostics.failed,
-      submittedForDeepQualification: enrichment.conversations.length,
+      submittedForDeepQualification: conversationsNeedingDeep.length,
       deepQualificationsReturned: deepReturned,
       deepQualificationMissing: 0,
       potentialCustomerConversations: rawOpportunities.length,

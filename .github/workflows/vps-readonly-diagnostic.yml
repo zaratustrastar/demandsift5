@@ -1,6 +1,7 @@
-name: Validate enrichment fix and run controlled probe
+name: VPS read-only Docker permission preflight
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feature/reddit-intelligence-pipeline
@@ -11,47 +12,35 @@ permissions:
   contents: read
 
 jobs:
-  validate-and-probe:
+  inspect:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - name: Check out feature branch
-        uses: actions/checkout@v4
-        with:
-          ref: feature/reddit-intelligence-pipeline
-          fetch-depth: 0
-
-      - name: Set up project Node runtime
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install locked dependencies
+      - name: Inspect deployment identity and Docker access
         shell: bash
         run: |
-          set -euo pipefail
-          npm ci
+          set -u
+          echo "identity=$(id -un)"
+          echo "groups=$(id -Gn)"
+          echo "host=$(hostname)"
 
-      - name: Run focused lint and regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          npx eslint lib/providers/reddit.server.ts scripts/background-worker.mjs tests/apify-reddit-provider.test.mjs tests/background-worker-monitoring.test.mjs
-          node --test tests/apify-reddit-provider.test.mjs
-          node --test --test-name-pattern='reddit enrichment failure|transient executor failures' tests/background-worker-monitoring.test.mjs
-          git diff --check
+          for directory in /opt/demandsift5-pr1 /opt/demandsift5; do
+            if [ -d "$directory" ]; then
+              stat -c 'directory=%n owner=%U group=%G mode=%a' "$directory"
+              git -C "$directory" status --short --branch 2>&1 || true
+              git -C "$directory" log -1 --format='head=%H subject=%s' 2>&1 || true
+            else
+              echo "directory=$directory absent"
+            fi
+          done
 
-      - name: Run one sanitized live enrichment probe
-        shell: bash
-        run: |
-          set -euo pipefail
-          token_file=/home/demandsift-dev/actions-runner/.diagnostic-secrets/apify-token
-          test -s "$token_file"
-          cleanup() {
-            rm -f "$token_file"
-          }
-          trap cleanup EXIT
-          APIFY_TOKEN="$(<"$token_file")" \
-            APIFY_LIVE_ENRICHMENT_PROBE=true \
-            node --test --test-name-pattern='controlled live enrichment probe' tests/apify-reddit-provider.test.mjs
+          for env_file in /opt/demandsift5-pr1/deploy/vps.env /opt/demandsift5/deploy/vps.env; do
+            if [ -e "$env_file" ]; then
+              stat -c 'env_file=%n owner=%U group=%G mode=%a bytes=%s' "$env_file"
+            fi
+          done
+
+          echo "docker_binary=$(command -v docker || true)"
+          docker version --format 'docker_client={{.Client.Version}} server={{.Server.Version}}' 2>&1 || true
+          docker ps --format 'container={{.Names}} status={{.Status}} project={{.Label "com.docker.compose.project"}} service={{.Label "com.docker.compose.service"}}' 2>&1 || true
+          sudo -n -l 2>&1 || true

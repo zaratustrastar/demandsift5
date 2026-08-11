@@ -21,6 +21,12 @@ jobs:
           ref: feature/reddit-intelligence-pipeline
           fetch-depth: 0
 
+      - name: Set up project Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Install locked dependencies
         shell: bash
         run: |

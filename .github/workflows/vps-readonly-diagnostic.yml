@@ -44,3 +44,12 @@ jobs:
           docker version --format 'docker_client={{.Client.Version}} server={{.Server.Version}}' 2>&1 || true
           docker ps --format 'container={{.Names}} status={{.Status}} project={{.Label "com.docker.compose.project"}} service={{.Label "com.docker.compose.service"}}' 2>&1 || true
           sudo -n -l 2>&1 || true
+
+          for installed_file in /usr/local/sbin/demandsift-release /etc/sudoers.d/demandsift-release; do
+            if [ -e "$installed_file" ]; then
+              stat -c 'installed_file=%n owner=%U group=%G mode=%a bytes=%s' "$installed_file"
+            else
+              echo "installed_file=$installed_file absent"
+            fi
+          done
+          sudo -n /usr/local/sbin/demandsift-release inspect 2>&1 || true

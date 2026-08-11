@@ -412,8 +412,75 @@ test("enrichment is a separate call and returns structured speaker context", asy
   assert.deepEqual(input.startUrls, [{ url: documentedActorItem.url }]);
   assert.equal(input.skipComments, false);
   assert.equal(input.includeMediaLinks, true);
+  assert.equal(input.maxItems, redditModule.APIFY_REDDIT_ENRICHMENT_MIN_ITEMS);
   assert.equal(input.maxComments, 6);
+  assert.equal(input.maxPostCount, 1);
   assert.equal("searches" in input, false);
+  assert.equal(conversation.externalId, discovery.candidates[0].externalId);
+  assert.equal(conversation.permalink, discovery.candidates[0].permalink);
+});
+
+test("startUrls enrichment never falls below the Trudax Actor minimum", async () => {
+  const calls = [];
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token: "private-apify-token",
+    enrichmentComments: 0,
+    fetchImpl: async (url, init = {}) => {
+      const parsedUrl = new URL(url);
+      const input = init.body ? JSON.parse(init.body) : null;
+      calls.push({ url: parsedUrl, input });
+
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        return new Response(JSON.stringify({
+          data: {
+            id: "run-enrichment-minimum",
+            status: "SUCCEEDED",
+            defaultDatasetId: "dataset-enrichment-minimum",
+          },
+        }), { status: 201 });
+      }
+
+      if (parsedUrl.pathname.includes("/datasets/dataset-enrichment-minimum/items")) {
+        return new Response(JSON.stringify([documentedActorItem]), { status: 200 });
+      }
+
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  await provider.enrich({
+    candidates: [{
+      externalId: "abc123",
+      kind: "post",
+      subreddit: "SaaS",
+      title: "Looking for demand intelligence",
+      body: "What do people recommend?",
+      author: "public_user",
+      permalink: documentedActorItem.url,
+      createdAt: "2026-08-05T10:00:00.000Z",
+      score: 14,
+      comments: 3,
+      queryLane: "explicit_demand",
+      query: "demand intelligence recommendations",
+      sourceId: "apify:trudax/reddit-scraper-lite",
+      provenance: {
+        sourceType: "reddit",
+        sourceUrl: documentedActorItem.url,
+        retrievedAt: "2026-08-05T10:05:00.000Z",
+        sourceId: "apify:trudax/reddit-scraper-lite",
+      },
+    }],
+    maxComments: 0,
+  });
+
+  const start = calls[0];
+  assert.equal(start.input.maxItems, redditModule.APIFY_REDDIT_ENRICHMENT_MIN_ITEMS);
+  assert.equal(start.url.searchParams.get("maxItems"), String(redditModule.APIFY_REDDIT_ENRICHMENT_MIN_ITEMS));
+  assert.equal(start.input.maxPostCount, 1);
+  assert.equal(start.input.maxComments, 0);
+  assert.deepEqual(start.input.startUrls, [{ url: documentedActorItem.url }]);
+  assert.equal("searches" in start.input, false);
 });
 
 test("enrichment only opens the candidates selected by the workflow", async () => {
@@ -527,6 +594,117 @@ test("enrichment failure is recorded and never silently promoted", async () => {
   assert.equal(result.diagnostics.requested, 1);
   assert.equal(result.diagnostics.enriched, 0);
   assert.equal(result.diagnostics.failed, 1);
+});
+
+test("controlled live enrichment probe opens and maps one selected thread", {
+  skip: process.env.APIFY_LIVE_ENRICHMENT_PROBE !== "true",
+  timeout: 480_000,
+}, async () => {
+  const token = process.env.APIFY_TOKEN?.trim();
+  assert.ok(token, "APIFY_TOKEN is required when the live probe is enabled");
+
+  const selectedUrl = "https://www.reddit.com/r/smallbusinessuk/comments/1vk6db7/apps_for_efficient_team_work/";
+  const trace = {
+    input: null,
+    runId: "",
+    datasetId: "",
+    statuses: [],
+    datasetItems: 0,
+  };
+
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token,
+    enrichmentLimit: 1,
+    enrichmentComments: 6,
+    fetchImpl: async (url, init = {}) => {
+      const parsedUrl = new URL(url);
+      if (
+        init.method === "POST" &&
+        parsedUrl.pathname.includes("/actors/") &&
+        parsedUrl.pathname.endsWith("/runs")
+      ) {
+        trace.input = JSON.parse(init.body);
+      }
+
+      const response = await fetch(url, init);
+      if (
+        parsedUrl.pathname.includes("/actors/") ||
+        parsedUrl.pathname.includes("/actor-runs/")
+      ) {
+        const payload = await response.clone().json().catch(() => null);
+        if (payload?.data) {
+          trace.runId = payload.data.id || trace.runId;
+          trace.datasetId = payload.data.defaultDatasetId || trace.datasetId;
+          if (payload.data.status) trace.statuses.push(payload.data.status);
+        }
+      }
+      if (parsedUrl.pathname.includes("/datasets/") && response.ok) {
+        const payload = await response.clone().json().catch(() => null);
+        if (Array.isArray(payload)) trace.datasetItems = payload.length;
+      }
+      return response;
+    },
+  });
+
+  const result = await provider.enrich({
+    candidates: [{
+      provider: "apify-test",
+      sourceMode: "apify-test",
+      externalId: "1vk6db7",
+      kind: "post",
+      subreddit: "smallbusinessuk",
+      title: "Apps for efficient team work",
+      body: "Apps for efficient team work",
+      permalink: selectedUrl,
+      createdAt: "2026-08-10T00:00:00.000Z",
+      metrics: { score: 0, comments: 0 },
+      matchedQuery: "apps for efficient team work",
+      matchedQueries: ["apps for efficient team work"],
+      discoveryLanes: ["explicit_demand"],
+      provenance: {
+        id: "reddit_apify_live_probe_1vk6db7",
+        kind: "reddit",
+        provider: "apify-test",
+        providerExternalId: "1vk6db7",
+        url: selectedUrl,
+        title: "Apps for efficient team work",
+        excerpt: "Apps for efficient team work",
+        contentHash: "live-probe-1vk6db7",
+        observedAt: "2026-08-10T00:00:00.000Z",
+        isMock: false,
+        metadata: { testOnly: true },
+      },
+    }],
+    maxComments: 6,
+  });
+
+  assert.equal(trace.input.maxItems, redditModule.APIFY_REDDIT_ENRICHMENT_MIN_ITEMS);
+  assert.equal(trace.input.maxPostCount, 1);
+  assert.equal(trace.input.maxComments, 6);
+  assert.deepEqual(trace.input.startUrls, [{ url: selectedUrl }]);
+  assert.equal("searches" in trace.input, false);
+  assert.ok(trace.runId, "Actor run metadata should include a run id");
+  assert.ok(trace.datasetId, "Actor run metadata should include a dataset id");
+  assert.equal(trace.statuses.at(-1), "SUCCEEDED");
+  assert.ok(trace.datasetItems > 0, "Actor dataset should contain usable records");
+  assert.equal(result.diagnostics.enriched, 1);
+  assert.equal(result.diagnostics.failed, 0);
+  assert.equal(result.conversations.length, 1);
+  assert.equal(result.conversations[0].externalId, "1vk6db7");
+  assert.equal(result.conversations[0].permalink, selectedUrl);
+  assert.ok(result.conversations[0].body);
+  assert.ok(result.conversations[0].structuredContext.matched.body);
+
+  console.log("LIVE_APIFY_ENRICHMENT_PROBE", JSON.stringify({
+    runId: trace.runId,
+    status: trace.statuses.at(-1),
+    datasetId: trace.datasetId,
+    datasetItems: trace.datasetItems,
+    parsedConversations: result.conversations.length,
+    matchedExternalId: result.conversations[0].externalId,
+    replies: result.conversations[0].structuredContext.replies.length,
+  }));
 });
 
 test("factory keeps Apify web scraping behind an explicit test-mode guard", () => {

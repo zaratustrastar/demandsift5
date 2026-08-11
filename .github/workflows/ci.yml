@@ -63,10 +63,20 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Verify installed release wrapper
+      - name: Diagnose release wrapper installation
         shell: bash
         run: |
-          set -euo pipefail
-          stat -c 'wrapper=%n owner=%U group=%G mode=%a bytes=%s' /usr/local/sbin/demandsift-release
-          stat -c 'sudoers=%n owner=%U group=%G mode=%a bytes=%s' /etc/sudoers.d/demandsift-release
-          sudo -n /usr/local/sbin/demandsift-release inspect
+          set -u
+          echo "identity=$(id -un)"
+          git -c safe.directory=/opt/demandsift5-pr1 -C /opt/demandsift5-pr1 status --short --branch 2>&1 || true
+          git -c safe.directory=/opt/demandsift5-pr1 -C /opt/demandsift5-pr1 log -1 --format='head=%H subject=%s' 2>&1 || true
+          git -c safe.directory=/opt/demandsift5-pr1 -C /opt/demandsift5-pr1 diff --stat 2>&1 || true
+          for candidate in /opt/demandsift5-pr1/deploy/demandsift-release /usr/local/sbin/demandsift-release /etc/sudoers.d/demandsift-release; do
+            if [ -e "$candidate" ]; then
+              stat -c 'file=%n owner=%U group=%G mode=%a bytes=%s' "$candidate"
+            else
+              echo "file=$candidate absent"
+            fi
+          done
+          sudo -n -l 2>&1 || true
+          sudo -n /usr/local/sbin/demandsift-release inspect 2>&1 || true

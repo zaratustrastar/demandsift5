@@ -20,6 +20,7 @@ jobs:
         shell: bash
         run: |
           set -u
+          echo "inspection=after-wrapper-install"
           echo "identity=$(id -un)"
           echo "groups=$(id -Gn)"
           echo "host=$(hostname)"

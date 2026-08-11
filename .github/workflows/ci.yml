@@ -58,16 +58,16 @@ jobs:
       - name: Test
         run: npm test
 
-  acceptance-diagnostics-release:
+
+  apify-search-semantics-probe:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
-      - name: Build exact pull request candidate
-        run: sudo -n /usr/local/sbin/demandsift-release build "${{ github.event.pull_request.head.sha }}"
+      - name: Check out probe
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Deploy candidate with rollback preserved
-        run: sudo -n /usr/local/sbin/demandsift-release deploy
-
-      - name: Verify deployed services
-        run: sudo -n /usr/local/sbin/demandsift-release inspect
+      - name: Run bounded real-data search probe
+        run: node scripts/acceptance-apify-search-probe.mjs

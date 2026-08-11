@@ -623,18 +623,64 @@ async function completeJob(sql, job) {
   `;
 }
 
-async function failJob(sql, job, error) {
+const TERMINAL_SCAN_ERROR_CODES = new Set([
+  "reddit_enrichment_failed",
+]);
+
+function executorErrorCode(responseText) {
+  try {
+    const payload = JSON.parse(responseText);
+    const code = payload?.error?.code;
+    return typeof code === "string" && code.trim() ? code.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export class WorkerExecutorHttpError extends Error {
+  constructor(status, responseText) {
+    super(`Web executor returned HTTP ${status}: ${responseText.slice(0, 1_000)}`);
+    this.name = "WorkerExecutorHttpError";
+    this.status = status;
+    this.code = executorErrorCode(responseText);
+  }
+}
+
+export function isRetryableJobError(error) {
+  return !(
+    error &&
+    typeof error === "object" &&
+    typeof error.code === "string" &&
+    TERMINAL_SCAN_ERROR_CODES.has(error.code)
+  );
+}
+
+export function jobFailureDisposition(job, error, now = new Date()) {
   const exhausted = job.attempts >= job.max_attempts;
+  const retryable = isRetryableJobError(error);
+  const terminal = exhausted || !retryable;
   const delaySeconds = Math.min(300, 2 ** job.attempts * 5);
-  const retryAt = new Date(Date.now() + delaySeconds * 1_000);
+  const retryAt = new Date(now.getTime() + delaySeconds * 1_000);
+  return {
+    status: terminal ? "failed" : "retrying",
+    retryable,
+    terminal,
+    exhausted,
+    retryAt,
+    finishedAt: terminal ? now : null,
+  };
+}
+
+async function failJob(sql, job, error, disposition = jobFailureDisposition(job, error)) {
+  const message = error instanceof Error ? error.message : String(error);
   await sql`
     UPDATE background_jobs
-    SET status = ${exhausted ? "failed" : "retrying"}::job_status,
-        run_at = ${retryAt},
+    SET status = ${disposition.status}::job_status,
+        run_at = ${disposition.retryAt},
         locked_at = NULL,
         locked_by = NULL,
-        last_error = ${String(error).slice(0, 4_000)},
-        finished_at = ${exhausted ? new Date() : null},
+        last_error = ${message.slice(0, 4_000)},
+        finished_at = ${disposition.finishedAt},
         updated_at = now()
     WHERE id = ${job.id} AND locked_by = ${workerId}
   `;
@@ -684,7 +730,7 @@ export function postJsonWithLongTimeout(urlValue, options) {
         const text = Buffer.concat(chunks).toString("utf8");
         const status = response.statusCode ?? 0;
         if (status < 200 || status >= 300) {
-          finishReject(new Error(`Web executor returned HTTP ${status}: ${text.slice(0, 1_000)}`));
+          finishReject(new WorkerExecutorHttpError(status, text));
           return;
         }
         let payload;
@@ -764,10 +810,13 @@ async function runQueueWorker(databaseUrl, signal) {
         await completeJob(sql, job);
         log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
       } catch (error) {
-        await failJob(sql, job, error instanceof Error ? error.message : String(error));
+        const disposition = jobFailureDisposition(job, error);
+        await failJob(sql, job, error, disposition);
         log("error", "job_failed", {
           jobId: job.id,
           attempt: job.attempts,
+          retryable: disposition.retryable,
+          terminal: disposition.terminal,
           message: error instanceof Error ? error.message : String(error),
         });
       }

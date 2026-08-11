@@ -147,7 +147,7 @@ function enrichMock(candidate: RedditDiscoveryCandidate): EnrichedRedditConversa
   };
 }
 
-/** Development fallback. Records are marked mock and have no invented permalink. */
+/** Development fallback. Each record is marked mock and intentionally has no Reddit permalink. */
 export class MockRedditProvider implements RedditProvider {
   readonly name = "mock-reddit";
   readonly sourceMode = "mock" as const;

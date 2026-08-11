@@ -5,13 +5,14 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 unset COMPOSE_FILE COMPOSE_PROJECT_NAME DOCKER_CONTEXT DOCKER_HOST
 
-readonly REPOSITORY=/opt/demandsift5-pr1
+readonly SOURCE_REPOSITORY=/opt/demandsift5-pr1
 readonly PRODUCTION_ROOT=/opt/demandsift5
 readonly ENV_FILE="$PRODUCTION_ROOT/deploy/vps.env"
 readonly COMPOSE_FILE_PATH="$PRODUCTION_ROOT/deploy/compose.vps.yaml"
 readonly PROJECT=demandsift2
 readonly FEATURE_REF=refs/heads/feature/reddit-intelligence-pipeline
 readonly STATE_DIRECTORY=/var/lib/demandsift-release
+readonly REPOSITORY="$STATE_DIRECTORY/repository"
 readonly CANDIDATE_STATE="$STATE_DIRECTORY/candidate"
 readonly DEPLOYED_STATE="$STATE_DIRECTORY/deployed"
 
@@ -20,11 +21,25 @@ fail() {
   exit 1
 }
 
+source_git() {
+  /usr/bin/git -c safe.directory="$SOURCE_REPOSITORY" -C "$SOURCE_REPOSITORY" "$@"
+}
+
+ensure_release_checkout() {
+  [ -e "$SOURCE_REPOSITORY/.git" ] || fail "missing source checkout"
+  install -d -m 0700 -o root -g root "$STATE_DIRECTORY"
+  if [ ! -e "$REPOSITORY/.git" ]; then
+    [ ! -e "$REPOSITORY" ] || fail "release checkout path exists but is not a Git worktree"
+    source_git worktree add --detach "$REPOSITORY" HEAD >/dev/null
+  fi
+  # The dedicated release checkout is a linked worktree, so .git is a file.
+  [ -e "$REPOSITORY/.git" ] || fail "missing release checkout"
+}
+
 require_fixed_layout() {
-  # The release checkout may be a normal clone (.git directory) or a linked\n  # worktree (.git file). Both are valid Git checkouts.\n  [ -e "$REPOSITORY/.git" ] || fail "missing release checkout"
+  ensure_release_checkout
   [ -f "$ENV_FILE" ] || fail "missing production environment file"
   [ -f "$COMPOSE_FILE_PATH" ] || fail "missing production Compose file"
-  install -d -m 0700 -o root -g root "$STATE_DIRECTORY"
 }
 
 compose() {
@@ -51,6 +66,7 @@ read_candidate_state() {
 
 inspect_release() {
   require_fixed_layout
+  echo "source_checkout=$SOURCE_REPOSITORY"
   echo "release_checkout=$REPOSITORY"
   git_at_release status --short --branch
   git_at_release log -1 --format='release_head=%H subject=%s'

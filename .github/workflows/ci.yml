@@ -57,3 +57,17 @@ jobs:
 
       - name: Test
         run: npm test
+
+  acceptance-diagnostics-release:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Build exact pull request candidate
+        run: sudo -n /usr/local/sbin/demandsift-release build "$GITHUB_SHA"
+
+      - name: Deploy candidate with rollback preserved
+        run: sudo -n /usr/local/sbin/demandsift-release deploy
+
+      - name: Verify deployed services
+        run: sudo -n /usr/local/sbin/demandsift-release inspect

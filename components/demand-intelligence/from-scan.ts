@@ -248,6 +248,8 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       supportingSignalCount: opportunity.supportingSignalCount,
       supportingSourceIds: opportunity.supportingSourceIds,
       appearedInPreviousDemandDrop: opportunity.appearedInPreviousDemandDrop,
+      mentionProduct: opportunity.mentionProduct,
+      disclosureRequired: opportunity.disclosureRequired,
       matchReasons: [opportunity.whyItMatters, opportunity.customerProblem].filter(Boolean),
       classification: {
         relevanceScore: opportunity.relevanceScore ?? 0,
@@ -270,7 +272,9 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
           reply?.content ??
           "This reply is stored but hidden in the free Market Scan. Unlocking does not publish it.",
         alternateDrafts: [],
-        disclosure: "Disclose the business connection whenever the product is mentioned.",
+        disclosure: opportunity.disclosureRequired
+          ? "Disclose the business connection because this reply mentions the product."
+          : "No disclosure is needed while the reply remains product-neutral.",
         verifiedClaims: report.profile.features,
         sourceFactIds: factIds,
         provenanceIds: [...report.profile.sourceIds, ...opportunity.sourceIds],

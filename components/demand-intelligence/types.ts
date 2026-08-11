@@ -144,6 +144,8 @@ export interface RedditOpportunity {
   supportingSignalCount?: number;
   supportingSourceIds?: string[];
   appearedInPreviousDemandDrop?: boolean;
+  mentionProduct?: boolean;
+  disclosureRequired?: boolean;
   matchReasons: string[];
   classification: OpportunityClassification;
   reply: SuggestedReply;

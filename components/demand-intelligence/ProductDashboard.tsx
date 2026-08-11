@@ -701,11 +701,15 @@ function ReplyComposer({
       <div className={styles.replyHeader}>
         <div>
           <span className={styles.eyebrow}>Grounded suggested reply</span>
-          <h2>Answer first. Be useful. Disclose the connection.</h2>
+          <h2>
+            {opportunity.disclosureRequired
+              ? "Answer first. Be useful. Disclose the connection."
+              : "Answer first. Be useful. Keep promotion out."}
+          </h2>
         </div>
         <span className={styles.sourcePill}>
           <Icon name="check" size={14} />
-          {opportunity.reply.verifiedClaims.length} claims source-checked
+          Grounded in verified website facts
         </span>
       </div>
 
@@ -740,9 +744,15 @@ function ReplyComposer({
         <span>
           <Icon name="check" size={13} /> Uses source-backed website facts only
         </span>
-        <span>
-          <Icon name="check" size={13} /> Includes disclosure
-        </span>
+        {opportunity.disclosureRequired ? (
+          <span>
+            <Icon name="check" size={13} /> Includes required disclosure
+          </span>
+        ) : (
+          <span>
+            <Icon name="check" size={13} /> Keeps the product out unless it helps
+          </span>
+        )}
         <span>
           <Icon name="check" size={13} /> Makes no experience claim
         </span>

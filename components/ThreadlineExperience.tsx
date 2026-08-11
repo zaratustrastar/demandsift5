@@ -97,14 +97,14 @@ async function copyText(value: string): Promise<boolean> {
 
 function Brand() {
   return (
-    <div className={styles.brand} aria-label="Threadline home">
+    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">
       <span className={styles.brandMark} aria-hidden="true">
         <i />
         <i />
         <i />
       </span>
       <span>threadline</span>
-    </div>
+    </a>
   );
 }
 

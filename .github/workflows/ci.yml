@@ -57,3 +57,16 @@ jobs:
 
       - name: Test
         run: npm test
+
+  vps-wrapper-preflight:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Verify installed release wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          stat -c 'wrapper=%n owner=%U group=%G mode=%a bytes=%s' /usr/local/sbin/demandsift-release
+          stat -c 'sudoers=%n owner=%U group=%G mode=%a bytes=%s' /etc/sudoers.d/demandsift-release
+          sudo -n /usr/local/sbin/demandsift-release inspect

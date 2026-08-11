@@ -6,10 +6,12 @@ import {
   claimJob,
   createMonitoringScanRecord,
   isMonitoringCandidateDue,
+  jobFailureDisposition,
   monitoringConfiguration,
   monitoringDedupeKey,
   postJsonWithLongTimeout,
   scheduleMonitoringScans,
+  WorkerExecutorHttpError,
 } from "../scripts/background-worker.mjs";
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
@@ -351,4 +353,36 @@ test("long worker execution helper fails explicitly on its own timeout", async (
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
+});
+
+test("reddit enrichment failure is terminal and cannot restart discovery", async () => {
+  const executorError = new WorkerExecutorHttpError(502, JSON.stringify({
+    error: {
+      code: "reddit_enrichment_failed",
+      message: "Selected Reddit candidates could not be enriched.",
+    },
+  }));
+
+  const disposition = jobFailureDisposition(
+    { attempts: 1, max_attempts: 5 },
+    executorError,
+    NOW,
+  );
+  assert.equal(executorError.code, "reddit_enrichment_failed");
+  assert.equal(disposition.retryable, false);
+  assert.equal(disposition.terminal, true);
+  assert.equal(disposition.status, "failed");
+  assert.equal(disposition.finishedAt, NOW);
+});
+
+test("transient executor failures remain retryable before attempts are exhausted", () => {
+  const disposition = jobFailureDisposition(
+    { attempts: 1, max_attempts: 5 },
+    new Error("temporary network failure"),
+    NOW,
+  );
+  assert.equal(disposition.retryable, true);
+  assert.equal(disposition.terminal, false);
+  assert.equal(disposition.status, "retrying");
+  assert.equal(disposition.finishedAt, null);
 });

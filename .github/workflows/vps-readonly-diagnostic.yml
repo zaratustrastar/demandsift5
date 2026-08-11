@@ -21,6 +21,9 @@ jobs:
           set -uo pipefail
           worktree=/opt/demandsift5-pr1
           baseline=6186a536c4b4c8a7523043d0d2e95e7a2eefdb4e
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="${worktree}"
 
           redact() {
             sed -E               -e 's#(https://)[^/@[:space:]]+@#\1[REDACTED]@#g'               -e 's/((api[_-]?key|token|password|secret)[=:][[:space:]]*)[^,[:space:]"]+/\1[REDACTED]/Ig'

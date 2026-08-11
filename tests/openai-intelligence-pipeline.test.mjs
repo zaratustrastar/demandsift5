@@ -139,7 +139,15 @@ test("persistent missing triage IDs fail explicitly instead of becoming irreleva
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",
     apiStyle: "chat",
-    fetchImpl: async () => chatResponse({ triage: [triageItem("a")] }),
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      return chatResponse({
+        triage: user.candidates.some((row) => row.externalId === "a")
+          ? [triageItem("a")]
+          : [],
+      });
+    },
   });
   await assert.rejects(
     provider.triageConversations({

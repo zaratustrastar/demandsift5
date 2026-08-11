@@ -22,7 +22,7 @@ async function compilePotentialCustomers() {
   return import(moduleUrl(javascript));
 }
 
-const module = await compilePotentialCustomers();
+const potentialCustomersModule = await compilePotentialCustomers();
 
 function opportunity(overrides = {}) {
   const id = overrides.id ?? "opp_1";
@@ -64,7 +64,7 @@ function opportunity(overrides = {}) {
 }
 
 test("categorical potential customer survives even with a low legacy qualification score", () => {
-  const result = module.aggregatePotentialCustomers({
+  const result = potentialCustomersModule.aggregatePotentialCustomers({
     opportunities: [opportunity({ qualificationScore: 1, score: 42 })],
     scanId: "scan_current",
     windowEndedAt: "2026-08-09T00:00:00.000Z",
@@ -75,7 +75,7 @@ test("categorical potential customer survives even with a low legacy qualificati
 });
 
 test("same Reddit author with multiple conversations becomes one customer card while retaining supporting sources", () => {
-  const result = module.aggregatePotentialCustomers({
+  const result = potentialCustomersModule.aggregatePotentialCustomers({
     opportunities: [
       opportunity({ id: "one", sourceId: "source_one", potentialCustomerIntent: "problem_aware", score: 60 }),
       opportunity({ id: "two", sourceId: "source_two", potentialCustomerIntent: "high_intent", score: 45 }),
@@ -91,7 +91,7 @@ test("same Reddit author with multiple conversations becomes one customer card w
 });
 
 test("high community risk can remain a lead when shouldReply is false", () => {
-  const result = module.aggregatePotentialCustomers({
+  const result = potentialCustomersModule.aggregatePotentialCustomers({
     opportunities: [
       opportunity({
         communityRisk: "high",
@@ -110,7 +110,7 @@ test("high community risk can remain a lead when shouldReply is false", () => {
 });
 
 test("not_customer never enters customer aggregation regardless of ranking score", () => {
-  const result = module.aggregatePotentialCustomers({
+  const result = potentialCustomersModule.aggregatePotentialCustomers({
     opportunities: [
       opportunity({
         leadStatus: "not_customer",

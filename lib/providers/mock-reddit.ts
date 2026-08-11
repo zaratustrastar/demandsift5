@@ -207,6 +207,7 @@ export class MockRedditProvider implements RedditProvider {
         rejectedByReason: {
           invalid_record: 0,
           invalid_url: 0,
+          query_mismatch: 0,
           bot_author: 0,
           deleted: 0,
           nsfw: 0,

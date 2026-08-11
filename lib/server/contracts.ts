@@ -230,8 +230,14 @@ export type ProcessedRedditState = {
   provider: string;
   externalId: string;
   conversationId: string;
+  title: string | null;
+  excerpt: string;
+  subreddit: string;
   author: string | null;
   canonicalPermalink: string | null;
+  sourceCreatedAt: string;
+  matchedQueries: string[];
+  discoveryLanes: RedditSearchLane[];
   contentHash: string;
   contextHash: string | null;
   firstSeenAt: string;
@@ -293,6 +299,16 @@ export type ScanResult = {
   retrievalDiagnostics?: {
     provider: string;
     queryCount: number;
+    searchPlan: Array<{
+      lane: RedditSearchLane;
+      query: string;
+      seed?: string;
+    }>;
+    queryCountsByLane: Partial<Record<RedditSearchLane, number>>;
+    matchedCandidatesByLane: Partial<Record<RedditSearchLane, number>>;
+    worthEnrichingByLane: Partial<Record<RedditSearchLane, number>>;
+    matchedCandidatesByQuery: Record<string, number>;
+    worthEnrichingByQuery: Record<string, number>;
     fetchedCandidates: number;
     normalizedCandidates: number;
     locallyMatchedCandidates: number;

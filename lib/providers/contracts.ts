@@ -172,6 +172,7 @@ export interface RedditSearchPlanEntry {
 export type ProviderRejectionReason =
   | "invalid_record"
   | "invalid_url"
+  | "query_mismatch"
   | "bot_author"
   | "deleted"
   | "nsfw"

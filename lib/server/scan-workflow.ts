@@ -6,6 +6,7 @@ import type {
   EnrichedRedditConversation,
   QualifiedOpportunity,
   RedditDiscoveryCandidate,
+  RedditSearchLane,
 } from "@/lib/domain/types";
 import { identifyVerifiedCompetitorSignal } from "@/lib/intelligence/competitor-signal";
 import {
@@ -84,6 +85,34 @@ const STAGES: ScanStage[] = [
     detail: "Generating one grounded reply only when the conversation is appropriate to join.",
   },
 ];
+
+function countCandidatesByLane(
+  candidates: readonly RedditDiscoveryCandidate[],
+): Partial<Record<RedditSearchLane, number>> {
+  const counts: Partial<Record<RedditSearchLane, number>> = {};
+
+  for (const candidate of candidates) {
+    for (const lane of new Set(candidate.discoveryLanes)) {
+      counts[lane] = (counts[lane] ?? 0) + 1;
+    }
+  }
+
+  return counts;
+}
+
+function countCandidatesByQuery(
+  candidates: readonly RedditDiscoveryCandidate[],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+
+  for (const candidate of candidates) {
+    for (const query of new Set(candidate.matchedQueries)) {
+      counts[query] = (counts[query] ?? 0) + 1;
+    }
+  }
+
+  return counts;
+}
 
 function cloneStages(): ScanStage[] {
   return STAGES.map((stage) => ({ ...stage }));
@@ -1047,8 +1076,14 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
         provider: candidate.provider,
         externalId: candidate.externalId,
         conversationId: candidate.externalId,
+        title: candidate.title ?? null,
+        excerpt: candidate.body.slice(0, 500),
+        subreddit: candidate.subreddit,
         author: normalizedRedditAuthor(candidate.author),
         canonicalPermalink: canonicalPermalink(candidate.permalink),
+        sourceCreatedAt: candidate.createdAt,
+        matchedQueries: candidate.matchedQueries,
+        discoveryLanes: candidate.discoveryLanes,
         contentHash: candidate.provenance.contentHash,
         contextHash,
         firstSeenAt: previous?.firstSeenAt ?? scan.createdAt,
@@ -1087,6 +1122,10 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
 
     const providerRejectedCount = Object.values(discovery.diagnostics.rejectedByReason)
       .reduce((sum, count) => sum + count, 0);
+    const matchedCandidatesByLane = countCandidatesByLane(cleaned.survivors);
+    const worthEnrichingByLane = countCandidatesByLane(worthEnriching);
+    const matchedCandidatesByQuery = countCandidatesByQuery(cleaned.survivors);
+    const worthEnrichingByQuery = countCandidatesByQuery(worthEnriching);
     const diagnostics: ScanDiagnostics = {
       provider: redditProvider.name,
       retrieved: discovery.diagnostics.fetchedCandidates,
@@ -1140,6 +1179,12 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       retrievalDiagnostics: {
         provider: redditProvider.name,
         queryCount: discovery.diagnostics.queryCount,
+        searchPlan: discovery.searchPlan,
+        queryCountsByLane: discovery.diagnostics.laneQueryCounts,
+        matchedCandidatesByLane,
+        worthEnrichingByLane,
+        matchedCandidatesByQuery,
+        worthEnrichingByQuery,
         fetchedCandidates: discovery.diagnostics.fetchedCandidates,
         normalizedCandidates: discovery.diagnostics.normalizedCandidates,
         locallyMatchedCandidates: cleaned.survivors.length,

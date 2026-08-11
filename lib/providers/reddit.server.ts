@@ -73,7 +73,7 @@ type ApifySearchActorInput = {
   skipCommunity: true;
   includeMediaLinks: false;
   searchPosts: true;
-  searchComments: true;
+  searchComments: false;
   searchCommunities: false;
   searchUsers: false;
   searchMedia: false;
@@ -89,8 +89,6 @@ type ApifySearchActorInput = {
   navigationTimeout: number;
   debugMode: false;
   searchCommunityName?: string;
-  postDateLimit?: string;
-  commentDateLimit?: string;
   proxy: {
     useApifyProxy: true;
     apifyProxyGroups: ["RESIDENTIAL"];
@@ -223,16 +221,6 @@ function usefulShortPhrase(value: string, maximumWords = 8): boolean {
   return wordCount(value) <= maximumWords && isUsefulSearchPhrase(value);
 }
 
-function redditSearchAtom(value: string): string {
-  const normalized = normalizeSearchText(cleanSearchTerm(value))
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 8)
-    .join(" ");
-  if (!normalized) return "";
-  return normalized.includes(" ") ? `"${normalized}"` : normalized;
-}
-
 const PROBLEM_TOKEN_STOP_WORDS = new Set([
   "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",
   "the", "their", "this", "too", "using", "with", "without", "your",
@@ -273,7 +261,14 @@ function boundedPlanEntry(
  * hypotheses with extra "pain words".
  */
 export function buildApifyRedditSearchPlan(request: RedditSearchRequest): RedditSearchPlanEntry[] {
-  type DemandLane = "explicit_demand" | "pain" | "workaround" | "switching" | "timing";
+  type DemandLane =
+    | "direct_buying_intent"
+    | "problem_pain"
+    | "competitor_switching"
+    | "category_recommendation"
+    | "brand_competitor_mentions"
+    | "workaround"
+    | "timing";
 
   const cleanUnique = (values: readonly string[], maximumWords: number): string[] => {
     const seen = new Set<string>();
@@ -309,20 +304,20 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
     if (tokens.length === 0) return "";
     if (tokens.length === 1) return tokens[0] ?? "";
-    if (tokens.length === 2) return `(${tokens.join(" AND ")})`;
-    return `(${tokens[0]} AND ${tokens[tokens.length - 1]})`;
+    if (tokens.length === 2) return tokens.join(" ");
+    return `${tokens[0]} ${tokens[tokens.length - 1]}`;
   };
 
   const categoryExpression = (value: string): string => {
     const tokens = problemTokens(value).slice(0, 2);
     if (tokens.length === 0) return "";
-    return tokens.length === 1 ? tokens[0] ?? "" : `(${tokens.join(" AND ")})`;
+    return tokens.join(" ");
   };
 
   const triggerExpression = (value: string): string => {
     const tokens = problemTokens(value).slice(0, 2);
     if (tokens.length === 0) return "";
-    return tokens.length === 1 ? tokens[0] ?? "" : `(${tokens.join(" AND ")})`;
+    return tokens.join(" ");
   };
 
   const contextOrExpression = (value: string): string => {
@@ -336,7 +331,7 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
       .slice(0, 2);
 
     if (tokens.length === 0) return "";
-    return tokens.length === 1 ? tokens[0] ?? "" : `(${tokens.join(" OR ")})`;
+    return tokens.join(" ");
   };
 
   const productTerms = cleanUnique(request.queries.productTerms, 8);
@@ -354,10 +349,12 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
   );
 
   const pools: Record<DemandLane, RedditSearchPlanEntry[]> = {
-    explicit_demand: [],
-    pain: [],
+    direct_buying_intent: [],
+    problem_pain: [],
+    competitor_switching: [],
+    category_recommendation: [],
+    brand_competitor_mentions: [],
     workaround: [],
-    switching: [],
     timing: [],
   };
 
@@ -392,17 +389,18 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
   const context = contextOrExpression(contextSeed);
 
-  /*
-   * EXPLICIT DEMAND
-   *
-   * One conventional category query plus indirect problem/JTBD queries.
-   * A user does not need to know the official product category.
-   */
+  /* Direct buying intent and category recommendations stay separate so a
+   * result can be traced back to the signal we intended to retrieve. */
   const category = categoryExpression(categorySeed);
   if (category) {
     push(
-      "explicit_demand",
-      `${category} AND ("looking for" OR "need a" OR "need help" OR recommend OR recommendations OR alternative OR "what do you use" OR "which tool")`,
+      "direct_buying_intent",
+      `looking for ${category}`,
+      categorySeed,
+    );
+    push(
+      "category_recommendation",
+      `${category} recommendations`,
       categorySeed,
     );
   }
@@ -412,8 +410,8 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
     if (!manifestation) continue;
 
     push(
-      "explicit_demand",
-      `${manifestation} AND ("looking for" OR "need help" OR recommend OR recommendations OR tool OR solution OR alternative OR "what do you use")`,
+      "direct_buying_intent",
+      `need help ${manifestation}`,
       seed,
     );
   }
@@ -426,19 +424,24 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
    */
   for (const seed of problems.slice(0, 8)) {
     const manifestation = manifestationExpression(seed);
-    if (manifestation) push("pain", manifestation, seed);
+    if (manifestation) push("problem_pain", manifestation, seed);
   }
 
-  /*
-   * Brand-specific complaints remain useful but are lower-priority fallback
-   * candidates, not a replacement for problem-language discovery.
-   */
-  const brand = redditSearchAtom(brandTerms[0] ?? "");
-  if (brand) {
+  /* Competitor switching and broader competitor-frustration discussions are
+   * distinct. Only website-verified competitors reach this request. */
+  for (const competitorName of competitors.slice(0, 4)) {
+    const competitor = cleanSearchTerm(competitorName);
+    if (!competitor) continue;
+
     push(
-      "pain",
-      `${brand} AND (frustrated OR problem OR issue OR missing OR difficult OR expensive OR "doesn't work")`,
-      brandTerms[0],
+      "competitor_switching",
+      `${competitor} alternative`,
+      competitorName,
+    );
+    push(
+      "brand_competitor_mentions",
+      `${competitor} problem`,
+      competitorName,
     );
   }
 
@@ -454,25 +457,8 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
     push(
       "workaround",
-      `${workaround}${context ? ` AND ${context}` : ""}`,
+      `${workaround}${context ? ` ${context}` : ""}`,
       seed,
-    );
-  }
-
-  /*
-   * SWITCHING
-   *
-   * Only verified direct/alternative competitors reach this request from the
-   * workflow.
-   */
-  for (const competitorName of competitors.slice(0, 4)) {
-    const competitor = redditSearchAtom(competitorName);
-    if (!competitor) continue;
-
-    push(
-      "switching",
-      `${competitor} AND (alternative OR alternatives OR switching OR switch OR replace OR replaced OR frustrated OR expensive OR overkill OR "moving away" OR "moved away")`,
-      competitorName,
     );
   }
 
@@ -488,16 +474,18 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
     push(
       "timing",
-      `${trigger}${context ? ` AND ${context}` : ""}`,
+      `${trigger}${context ? ` ${context}` : ""}`,
       seed,
     );
   }
 
   const quotas: Array<[DemandLane, number]> = [
-    ["explicit_demand", 2],
-    ["pain", 2],
-    ["workaround", 2],
-    ["switching", 1],
+    ["direct_buying_intent", 1],
+    ["problem_pain", 2],
+    ["competitor_switching", 1],
+    ["category_recommendation", 1],
+    ["brand_competitor_mentions", 1],
+    ["workaround", 1],
     ["timing", 1],
   ];
 
@@ -518,10 +506,12 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
   }
 
   const laneOrder: DemandLane[] = [
-    "explicit_demand",
-    "pain",
+    "direct_buying_intent",
+    "problem_pain",
+    "competitor_switching",
+    "category_recommendation",
+    "brand_competitor_mentions",
     "workaround",
-    "switching",
     "timing",
   ];
 
@@ -584,16 +574,49 @@ function searchPlanMatches(
       seedScore = matched;
     }
 
+    const explicitDemandSignal =
+      /\b(?:looking for|need help|recommend|recommendation|alternative|which tool|what do you use)\b/.test(text);
+    const categoryRecommendationSignal =
+      /\b(?:recommend|recommendation|which tool|what do you use|best tool)\b/.test(text);
+    const competitorSwitchingSignal =
+      /\b(?:alternative|switch|switching|replace|moving away|frustrated|expensive|overkill)\b/.test(text);
+    const competitorProblemSignal =
+      /\b(?:problem|issue|frustrat|hate|missing|limitation|expensive|overkill)\w*\b/.test(text);
+
+    const requiresSignal =
+      entry.lane === "direct_buying_intent" ||
+      entry.lane === "explicit_demand" ||
+      entry.lane === "category_recommendation" ||
+      entry.lane === "competitor_switching" ||
+      entry.lane === "switching" ||
+      entry.lane === "brand_competitor_mentions";
+    const signalMatched =
+      entry.lane === "direct_buying_intent" || entry.lane === "explicit_demand"
+        ? explicitDemandSignal
+        : entry.lane === "category_recommendation"
+          ? categoryRecommendationSignal
+          : entry.lane === "competitor_switching" || entry.lane === "switching"
+            ? competitorSwitchingSignal
+            : entry.lane === "brand_competitor_mentions"
+              ? competitorProblemSignal
+              : true;
+
+    if (requiresSignal && !signalMatched) return [];
+
     const signalBoost =
-      entry.lane === "explicit_demand" &&
-      /\b(?:looking for|need help|recommend|recommendation|alternative|which tool|what do you use)\b/.test(text)
+      explicitDemandSignal &&
+      (entry.lane === "direct_buying_intent" || entry.lane === "explicit_demand")
         ? 2
-        : entry.lane === "switching" &&
-            /\b(?:alternative|switch|switching|replace|moving away|frustrated|expensive|overkill)\b/.test(text)
+        : categoryRecommendationSignal && entry.lane === "category_recommendation"
           ? 2
-          : entry.lane === "pain" &&
+          : competitorSwitchingSignal &&
+            (entry.lane === "competitor_switching" || entry.lane === "switching")
+          ? 2
+          : (entry.lane === "problem_pain" || entry.lane === "pain") &&
               /\b(?:missed|buried|scattered|struggl|frustrat|messy|manual|difficult|overwhelm|nightmare)\w*\b/.test(text)
             ? 1
+            : competitorProblemSignal && entry.lane === "brand_competitor_mentions"
+              ? 1
             : entry.lane === "workaround" &&
                 /\b(?:spreadsheet|email|manual|workaround|copy paste)\w*\b/.test(text)
               ? 1
@@ -656,6 +679,7 @@ function candidateFromApify(
     stringValue(item.id, 200).replace(/^t[13]_/i, "") ||
     `derived_${contentFingerprint(`${permalink}\n${body}`)}`;
   const matches = searchPlanMatches(title, body, plan);
+  if (plan.length > 0 && matches.length === 0) return { reason: "query_mismatch" };
   const matchedQueries = [...new Set(matches.map((entry) => entry.query))];
   const discoveryLanes = [...new Set(matches.map((entry) => entry.lane))];
   const provider = "apify-test";
@@ -911,12 +935,28 @@ function emptyProviderRejections(): Record<ProviderRejectionReason, number> {
   return {
     invalid_record: 0,
     invalid_url: 0,
+    query_mismatch: 0,
     bot_author: 0,
     deleted: 0,
     nsfw: 0,
     missing_timestamp: 0,
     outside_window: 0,
   };
+}
+
+function boundedSearchTime(
+  configured: ApifySearchActorInput["time"],
+  since: string | undefined,
+  now = Date.now(),
+): ApifySearchActorInput["time"] {
+  const sinceMs = since ? Date.parse(since) : Number.NaN;
+  if (!Number.isFinite(sinceMs) || sinceMs > now) return configured;
+
+  const ageDays = (now - sinceMs) / 86_400_000;
+  const requested: ApifySearchActorInput["time"] =
+    ageDays <= 1.25 ? "day" : ageDays <= 8 ? "week" : ageDays <= 32 ? "month" : configured;
+  const order: ApifySearchActorInput["time"][] = ["day", "week", "month", "year", "all"];
+  return order.indexOf(requested) < order.indexOf(configured) ? requested : configured;
 }
 
 /**
@@ -1100,12 +1140,12 @@ export class ApifyRedditTestProvider implements RedditProvider {
       skipCommunity: true,
       includeMediaLinks: false,
       searchPosts: true,
-      searchComments: true,
+      searchComments: false,
       searchCommunities: false,
       searchUsers: false,
       searchMedia: false,
       sort: "relevance",
-      time: this.timeRange,
+      time: boundedSearchTime(this.timeRange, request.since),
       includeNSFW: false,
       maxItems,
       maxPostCount: postsPerSearch,
@@ -1121,9 +1161,6 @@ export class ApifyRedditTestProvider implements RedditProvider {
       },
       ...(subreddit && /^[A-Za-z0-9_]{1,32}$/.test(subreddit)
         ? { searchCommunityName: subreddit }
-        : {}),
-      ...(request.since && Number.isFinite(Date.parse(request.since))
-        ? { postDateLimit: request.since, commentDateLimit: request.since }
         : {}),
     };
 

@@ -120,38 +120,54 @@ const documentedComment = {
   dataType: "comment",
 };
 
-test("builds an eight-query five-signal demand plan", () => {
+test("builds an eight-query seven-signal demand plan", () => {
   const plan = redditModule.buildApifyRedditSearchPlan(searchRequest);
 
   assert.equal(plan.length, 8);
 
   const counts = Object.fromEntries(
-    ["explicit_demand", "pain", "workaround", "switching", "timing"]
+    [
+      "direct_buying_intent",
+      "problem_pain",
+      "competitor_switching",
+      "category_recommendation",
+      "brand_competitor_mentions",
+      "workaround",
+      "timing",
+    ]
       .map((lane) => [lane, plan.filter((entry) => entry.lane === lane).length]),
   );
 
   assert.deepEqual(counts, {
-    explicit_demand: 2,
-    pain: 2,
-    workaround: 2,
-    switching: 1,
+    direct_buying_intent: 1,
+    problem_pain: 2,
+    competitor_switching: 1,
+    category_recommendation: 1,
+    brand_competitor_mentions: 1,
+    workaround: 1,
     timing: 1,
   });
 
   assert.ok(
     plan.some(
       (entry) =>
-        entry.lane === "pain" &&
-        entry.query.includes("find AND intent"),
+        entry.lane === "problem_pain" &&
+        entry.query.includes("find intent"),
     ),
+  );
+
+  assert.ok(
+    plan.every((entry) => !/[()]/.test(entry.query) && !/\b(?:AND|OR)\b/.test(entry.query)),
+    "Trudax searches should use plain keyword phrases, not Reddit Boolean syntax",
   );
 
   assert.ok(
     plan.some(
       (entry) =>
-        entry.lane === "switching" &&
-        entry.query.includes("legacy monitor"),
+        entry.lane === "competitor_switching" &&
+        /legacy monitor/i.test(entry.query),
     ),
+    JSON.stringify(plan),
   );
 
   assert.deepEqual(
@@ -193,19 +209,20 @@ test("Basecamp demand plan searches indirect pain and redistributes only from ev
   assert.equal(plan.length, 8);
 
   const painQueries = plan
-    .filter((entry) => entry.lane === "pain")
+    .filter((entry) => entry.lane === "problem_pain")
     .map((entry) => entry.query);
 
   assert.ok(
     painQueries.some((query) =>
-      query.includes("documents AND email"),
+      query.includes("documents email"),
     ),
   );
 
   assert.ok(
     painQueries.some((query) =>
-      query.includes("client AND deadlines"),
+      query.includes("client deadlines"),
     ),
+    JSON.stringify(plan),
   );
 
   assert.ok(painQueries.every((query) => !/basecamp/i.test(query)));
@@ -215,11 +232,21 @@ test("Basecamp demand plan searches indirect pain and redistributes only from ev
 
   assert.equal(
     plan.filter((entry) => entry.lane === "workaround").length,
-    2,
+    1,
   );
 
   assert.equal(
-    plan.filter((entry) => entry.lane === "switching").length,
+    plan.filter((entry) => entry.lane === "competitor_switching").length,
+    1,
+  );
+
+  assert.equal(
+    plan.filter((entry) => entry.lane === "category_recommendation").length,
+    1,
+  );
+
+  assert.equal(
+    plan.filter((entry) => entry.lane === "brand_competitor_mentions").length,
     1,
   );
 
@@ -231,6 +258,32 @@ test("Basecamp demand plan searches indirect pain and redistributes only from ev
 
 test("discovery is lightweight and does not perform enrichment", async () => {
   const calls = [];
+  const unrelatedActorItem = {
+    ...documentedActorItem,
+    id: "t3_noise123",
+    parsedId: "noise123",
+    url: "https://www.reddit.com/r/shortstories/comments/noise123/a_story_about_a_mountain/",
+    title: "A story about a mountain",
+    body: "I wrote a short story about a mountain trail and would appreciate feedback.",
+    communityName: "r/shortstories",
+    parsedCommunityName: "shortstories",
+  };
+  const competitorMentionOnly = {
+    ...documentedActorItem,
+    id: "t3_mention123",
+    parsedId: "mention123",
+    url: "https://www.reddit.com/r/SaaS/comments/mention123/legacy_monitor_release_notes/",
+    title: "Legacy Monitor release notes",
+    body: "Here is a neutral summary of the latest Legacy Monitor feature release.",
+  };
+  const competitorSwitchingItem = {
+    ...documentedActorItem,
+    id: "t3_switch123",
+    parsedId: "switch123",
+    url: "https://www.reddit.com/r/SaaS/comments/switch123/legacy_monitor_alternative/",
+    title: "Looking for a Legacy Monitor alternative",
+    body: "We need to replace Legacy Monitor because it has become overkill for our workflow.",
+  };
 
   const provider = new redditModule.ApifyRedditTestProvider({
     actorId: "trudax/reddit-scraper",
@@ -258,7 +311,12 @@ test("discovery is lightweight and does not perform enrichment", async () => {
       }
 
       if (parsedUrl.pathname.includes("/datasets/dataset-discovery/items")) {
-        return new Response(JSON.stringify([documentedActorItem]), {
+        return new Response(JSON.stringify([
+          documentedActorItem,
+          unrelatedActorItem,
+          competitorMentionOnly,
+          competitorSwitchingItem,
+        ]), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -270,16 +328,22 @@ test("discovery is lightweight and does not perform enrichment", async () => {
 
   const result = await provider.discover({
     ...searchRequest,
-    since: "2026-08-01T00:00:00.000Z",
+    since: new Date(Date.now() - (6 * 86_400_000)).toISOString(),
   });
 
   assert.equal(calls.length, 2);
-  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates.length, 2);
   assert.equal(result.candidates[0].externalId, "abc123");
   assert.equal(result.candidates[0].createdAt, documentedActorItem.createdAt);
   assert.equal(result.candidates[0].sourceMode, "apify-test");
-  assert.equal(result.diagnostics.fetchedCandidates, 1);
-  assert.equal(result.diagnostics.verifiedRecentCandidates, 1);
+  assert.equal(result.candidates[1].externalId, "switch123");
+  assert.deepEqual(
+    new Set(result.candidates[1].discoveryLanes),
+    new Set(["competitor_switching", "brand_competitor_mentions"]),
+  );
+  assert.equal(result.diagnostics.fetchedCandidates, 4);
+  assert.equal(result.diagnostics.verifiedRecentCandidates, 2);
+  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 2);
 
   const startCall = calls[0];
   const discovery = startCall.input;
@@ -290,11 +354,13 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   assert.equal(startCall.init.headers.authorization, "Bearer private-apify-token");
 
   assert.equal(discovery.searchPosts, true);
-  assert.equal(discovery.searchComments, true);
+  assert.equal(discovery.searchComments, false);
   assert.equal(discovery.skipComments, true);
   assert.equal(discovery.includeMediaLinks, false);
   assert.equal(discovery.maxComments, 0);
-  assert.equal(discovery.postDateLimit, "2026-08-01T00:00:00.000Z");
+  assert.equal(discovery.time, "week");
+  assert.equal(Object.hasOwn(discovery, "postDateLimit"), false);
+  assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);
   assert.deepEqual(discovery.proxy.apifyProxyGroups, ["RESIDENTIAL"]);
 
   assert.equal(calls[1].init.method, "GET");

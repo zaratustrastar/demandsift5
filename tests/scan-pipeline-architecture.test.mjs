@@ -92,6 +92,14 @@ test("scan persists mandatory stage diagnostics and recurring state", () => {
     "replyEligible",
     "repliesGenerated",
     "processedRedditState",
+    "searchPlan: discovery.searchPlan",
+    "queryCountsByLane: discovery.diagnostics.laneQueryCounts",
+    "matchedCandidatesByLane",
+    "worthEnrichingByLane",
+    "matchedCandidatesByQuery",
+    "worthEnrichingByQuery",
+    "matchedQueries: candidate.matchedQueries",
+    "discoveryLanes: candidate.discoveryLanes",
   ]) {
     assert.ok(source.includes(field), `missing ${field}`);
   }

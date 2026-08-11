@@ -120,10 +120,10 @@ const documentedComment = {
   dataType: "comment",
 };
 
-test("builds an eight-query seven-signal demand plan", () => {
+test("builds a bounded seven-signal demand plan", () => {
   const plan = redditModule.buildApifyRedditSearchPlan(searchRequest);
 
-  assert.equal(plan.length, 8);
+  assert.equal(plan.length, 9);
 
   const counts = Object.fromEntries(
     [
@@ -139,7 +139,7 @@ test("builds an eight-query seven-signal demand plan", () => {
   );
 
   assert.deepEqual(counts, {
-    direct_buying_intent: 1,
+    direct_buying_intent: 2,
     problem_pain: 2,
     competitor_switching: 1,
     category_recommendation: 1,
@@ -206,7 +206,7 @@ test("Basecamp demand plan searches indirect pain and redistributes only from ev
     limit: 25,
   });
 
-  assert.equal(plan.length, 8);
+  assert.equal(plan.length, 9);
 
   const painQueries = plan
     .filter((entry) => entry.lane === "problem_pain")
@@ -312,6 +312,15 @@ test("rejects observed broad-query noise while retaining concrete Basecamp deman
     },
     {
       ...baseItem,
+      id: "t3_teamworkapps",
+      parsedId: "teamworkapps",
+      url: "https://www.reddit.com/r/smallbusinessuk/comments/teamworkapps/apps_for_efficient_team_work/",
+      title: "Apps for efficient team work",
+      body: "I have a small startup and hope it will grow. I want apps for communication and project management. I have considered Slack and Trello. If anyone has suggestions or workflows they use, I would be grateful.",
+      communityName: "r/smallbusinessuk",
+    },
+    {
+      ...baseItem,
       id: "t3_buyingpm",
       parsedId: "buyingpm",
       url: "https://www.reddit.com/r/smallbusiness/comments/buyingpm/looking_for_project_management_software/",
@@ -350,9 +359,9 @@ test("rejects observed broad-query noise while retaining concrete Basecamp deman
 
   const result = await provider.discover({
     queries: {
-      productTerms: ["Basecamp", "project management software"],
+      productTerms: ["Basecamp", "project management and team collaboration software"],
       brandTerms: ["Basecamp"],
-      productCategories: ["project management software"],
+      productCategories: ["project management and team collaboration software"],
       customerProblems: ["work scattered across apps", "tasks lost in shuffle"],
       jobsToBeDone: ["keep client projects organized"],
       workarounds: ["forwarding lengthy email threads to new project participants"],
@@ -368,7 +377,7 @@ test("rejects observed broad-query noise while retaining concrete Basecamp deman
 
   assert.deepEqual(
     result.candidates.map((candidate) => candidate.externalId).sort(),
-    ["buyingpm", "scatteredwork"],
+    ["buyingpm", "scatteredwork", "teamworkapps"],
   );
   assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 3);
 });

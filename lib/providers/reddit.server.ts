@@ -223,7 +223,7 @@ function usefulShortPhrase(value: string, maximumWords = 8): boolean {
 
 const PROBLEM_TOKEN_STOP_WORDS = new Set([
   "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",
-  "the", "their", "this", "too", "using", "with", "without", "your", "a", "an", "to", "of",
+  "the", "their", "this", "using", "with", "without", "your", "a", "an", "to", "of",
   "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
 ]);
 
@@ -299,6 +299,33 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
     );
     if (descriptor && !selected.includes(descriptor)) selected.push(descriptor);
     return selected.join(" ");
+  };
+
+  const categorySearchExpressions = (value: string): string[] => {
+    const normalized = normalizeSearchText(value);
+    const descriptor = problemTokens(value).find((token) =>
+      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
+    ) ?? "software";
+    const fragments = normalized
+      .split(/\band\b/g)
+      .map((fragment) => categoryExpression(fragment))
+      .filter(Boolean)
+      .map((fragment) =>
+        /\b(?:app|apps|platform|software|system|tool|tools)\b/.test(fragment)
+          ? fragment
+          : `${fragment} ${descriptor}`,
+      );
+    const variants = [...fragments];
+
+    /* "Team work apps" is common customer language for the formal category
+     * "team collaboration software". Keeping this deterministic synonym here
+     * lets discovery retrieve that wording without teaching the classifier to
+     * accept unrelated app discussions. */
+    if (/\bteam\b/.test(normalized) && /\bcollaborat\w*\b/.test(normalized)) {
+      variants.splice(Math.min(1, variants.length), 0, "team work apps");
+    }
+
+    return [...new Set(variants.map((variant) => variant.trim()).filter(Boolean))].slice(0, 3);
   };
 
   const triggerExpression = (value: string): string => {
@@ -377,7 +404,8 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
   /* Direct buying intent and category recommendations stay separate so a
    * result can be traced back to the signal we intended to retrieve. */
-  const category = categoryExpression(categorySeed);
+  const categorySearches = categorySearchExpressions(categorySeed);
+  const category = categorySearches[0] ?? "";
   if (category) {
     push(
       "direct_buying_intent",
@@ -389,6 +417,9 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
       `${category} recommendations`,
       categorySeed,
     );
+  }
+  for (const customerCategory of categorySearches.slice(1, 2)) {
+    push("direct_buying_intent", customerCategory, customerCategory);
   }
 
   for (const seed of [...problems, ...jobs].slice(0, 8)) {
@@ -466,7 +497,7 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
   }
 
   const quotas: Array<[DemandLane, number]> = [
-    ["direct_buying_intent", 1],
+    ["direct_buying_intent", 2],
     ["problem_pain", 2],
     ["competitor_switching", 1],
     ["category_recommendation", 1],
@@ -501,7 +532,7 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
     "timing",
   ];
 
-  while (selected.length < 8) {
+  while (selected.length < 9) {
     let added = false;
 
     for (const lane of laneOrder) {
@@ -512,14 +543,14 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
       if (selectEntry(next)) {
         added = true;
-        if (selected.length >= 8) break;
+        if (selected.length >= 9) break;
       }
     }
 
     if (!added) break;
   }
 
-  return selected.slice(0, 8);
+  return selected.slice(0, 9);
 }
 
 /** Compatibility helper for tests/callers that only need query strings. */
@@ -579,7 +610,9 @@ function searchPlanMatches(
       ? seedTokens.length
       : isDemandLane
         ? Math.min(seedTokens.length, 2)
-        : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));
+        : seedTokens.length <= 4
+          ? seedTokens.length
+          : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));
 
     if (seed.length >= 4 && text.includes(seed)) {
       seedScore = seedTokens.length + 4;
@@ -604,9 +637,9 @@ function searchPlanMatches(
     }
 
     const explicitDemandSignal =
-      /\b(?:looking for|need help|recommend|recommendation|alternative|which tool|what do you use)\b/.test(text);
+      /\b(?:advice|any suggestions|anyone using|hoping someone|looking for|need help|recommend|recommendation|suggestions?|alternative|which tool|what do you use)\b/.test(text);
     const categoryRecommendationSignal =
-      /\b(?:recommend|recommendation|which tool|what do you use|best tool)\b/.test(text);
+      /\b(?:advice|any suggestions|anyone using|hoping someone|recommend|recommendation|suggestions?|which tool|what do you use|best tool)\b/.test(text);
     const competitorSwitchingSignal =
       /\b(?:alternative|switch|switching|replace|moving away|frustrated|expensive|overkill)\b/.test(text);
     const competitorProblemSignal =

@@ -14,6 +14,8 @@ import { getStateRepository } from "@/lib/server/repository";
  * discovery, returns conversation text, or exposes provider credentials.
  */
 export async function POST(request: Request) {
+  const diagnosticEvents: OpenAiProviderDiagnosticEvent[] = [];
+
   try {
     const actor = await requireWorkspace(request);
     const scan = await getStateRepository().getLatestScan(actor.workspaceId);
@@ -86,7 +88,6 @@ export async function POST(request: Request) {
       },
     }));
 
-    const diagnosticEvents: OpenAiProviderDiagnosticEvent[] = [];
     const provider = createOpenAiProviderFromEnv(process.env, {
       onDiagnostic: (event) => diagnosticEvents.push(event),
     });
@@ -109,11 +110,14 @@ export async function POST(request: Request) {
       diagnosticEvents,
     }, { headers: { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow" } });
   } catch (error) {
-    if (error instanceof OpenAiProviderError) {
+    if (error instanceof Error) {
+      const providerError = error as OpenAiProviderError;
       return Response.json({
         ok: false,
-        error: error.message,
-        requestId: error.requestId ?? null,
+        errorType: error.name || "Error",
+        error: error.message.slice(0, 500),
+        requestId: typeof providerError.requestId === "string" ? providerError.requestId : null,
+        diagnosticEvents,
       }, { status: 502, headers: { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow" } });
     }
     return apiErrorResponse(error);

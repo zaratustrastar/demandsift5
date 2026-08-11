@@ -152,7 +152,7 @@ test("builds an eight-query seven-signal demand plan", () => {
     plan.some(
       (entry) =>
         entry.lane === "problem_pain" &&
-        entry.query.includes("find intent"),
+        entry.query.includes("find buyer intent"),
     ),
   );
 
@@ -214,13 +214,13 @@ test("Basecamp demand plan searches indirect pain and redistributes only from ev
 
   assert.ok(
     painQueries.some((query) =>
-      query.includes("documents email"),
+      query.includes("documents buried email"),
     ),
   );
 
   assert.ok(
     painQueries.some((query) =>
-      query.includes("client deadlines"),
+      query.includes("missing client deadlines"),
     ),
     JSON.stringify(plan),
   );
@@ -254,6 +254,123 @@ test("Basecamp demand plan searches indirect pain and redistributes only from ev
     plan.filter((entry) => entry.lane === "timing").length,
     1,
   );
+
+  assert.ok(
+    plan.some((entry) =>
+      entry.lane === "direct_buying_intent" &&
+      entry.query === "looking for project management software"),
+    JSON.stringify(plan),
+  );
+
+  assert.ok(
+    plan.some((entry) =>
+      entry.lane === "competitor_switching" &&
+      entry.query === "Asana alternative project management software"),
+    JSON.stringify(plan),
+  );
+});
+
+test("rejects observed broad-query noise while retaining concrete Basecamp demand", async () => {
+  const now = new Date();
+  const createdAt = new Date(now.getTime() - 2 * 86_400_000).toISOString();
+  const baseItem = {
+    username: "public_user",
+    numberOfComments: 4,
+    upVotes: 3,
+    createdAt,
+    dataType: "post",
+    isAd: false,
+    over18: false,
+  };
+  const items = [
+    {
+      ...baseItem,
+      id: "t3_offlineapps",
+      parsedId: "offlineapps",
+      url: "https://www.reddit.com/r/whenthe/comments/offlineapps/offline_apps/",
+      title: "consequences of not having any apps that work offline",
+      body: "consequences of not having any apps that work offline",
+      communityName: "r/whenthe",
+    },
+    {
+      ...baseItem,
+      id: "t3_alienstasks",
+      parsedId: "alienstasks",
+      url: "https://www.reddit.com/r/aliens/comments/alienstasks/tasks_and_shuffle/",
+      title: "Predictions for next year",
+      body: "A long alien theory mentions tasks in one section and a random shuffle much later.",
+      communityName: "r/aliens",
+    },
+    {
+      ...baseItem,
+      id: "t3_starwars",
+      parsedId: "starwars",
+      url: "https://www.reddit.com/r/StarWarsShips/comments/starwars/defender_project/",
+      title: "The Defender project was never cancelled because it was expensive",
+      body: "The problem was a lack of political slack in the weapons project, not its cost.",
+      communityName: "r/StarWarsShips",
+    },
+    {
+      ...baseItem,
+      id: "t3_buyingpm",
+      parsedId: "buyingpm",
+      url: "https://www.reddit.com/r/smallbusiness/comments/buyingpm/looking_for_project_management_software/",
+      title: "Looking for simple project management software",
+      body: "We need project management software recommendations for a small client-services team.",
+      communityName: "r/smallbusiness",
+    },
+    {
+      ...baseItem,
+      id: "t3_scatteredwork",
+      parsedId: "scatteredwork",
+      url: "https://www.reddit.com/r/projectmanagement/comments/scatteredwork/work_scattered_across_apps/",
+      title: "Our work is scattered across apps",
+      body: "Tasks and client updates are scattered across too many apps and deadlines get missed.",
+      communityName: "r/projectmanagement",
+    },
+  ];
+
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper",
+    token: "private-apify-token",
+    maximumItems: 40,
+    fetchImpl: async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        return new Response(JSON.stringify({
+          data: { id: "run-basecamp-noise", status: "SUCCEEDED", defaultDatasetId: "dataset-basecamp-noise" },
+        }), { status: 201 });
+      }
+      if (parsedUrl.pathname.includes("/datasets/dataset-basecamp-noise/items")) {
+        return new Response(JSON.stringify(items), { status: 200 });
+      }
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  const result = await provider.discover({
+    queries: {
+      productTerms: ["Basecamp", "project management software"],
+      brandTerms: ["Basecamp"],
+      productCategories: ["project management software"],
+      customerProblems: ["work scattered across apps", "tasks lost in shuffle"],
+      jobsToBeDone: ["keep client projects organized"],
+      workarounds: ["forwarding lengthy email threads to new project participants"],
+      triggerEvents: ["a team starts juggling multiple projects and deadlines"],
+      buyerIntent: ["recommendations"],
+      competitors: ["Slack"],
+      excludedTerms: [],
+      ambiguityRisks: [],
+    },
+    limit: 25,
+    since: new Date(now.getTime() - 7 * 86_400_000).toISOString(),
+  });
+
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.externalId).sort(),
+    ["buyingpm", "scatteredwork"],
+  );
+  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 3);
 });
 
 test("discovery is lightweight and does not perform enrichment", async () => {

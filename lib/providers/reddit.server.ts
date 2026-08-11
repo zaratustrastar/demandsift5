@@ -223,14 +223,18 @@ function usefulShortPhrase(value: string, maximumWords = 8): boolean {
 
 const PROBLEM_TOKEN_STOP_WORDS = new Set([
   "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",
-  "the", "their", "this", "too", "using", "with", "without", "your",
+  "the", "their", "this", "too", "using", "with", "without", "your", "a", "an", "to", "of",
+  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
 ]);
 
 function problemTokens(value: string): string[] {
   return normalizeSearchText(value)
     .split(" ")
-    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token))
-    .slice(0, 4);
+    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
+}
+
+function naturalKeywordPhrase(value: string, maximumWords = 5): string {
+  return problemTokens(value).slice(0, maximumWords).join(" ");
 }
 
 function automatedAuthor(value: string): boolean {
@@ -282,42 +286,23 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
     });
   };
 
-  /*
-   * For a natural manifestation such as "files buried in email", using every
-   * word is brittle. First + last normally retain the concrete objects while
-   * allowing wording between them to vary.
-   */
   const manifestationExpression = (value: string): string => {
-    const rawTokens = problemTokens(value).slice(0, 4);
-    const filler = new Set([
-      "buried",
-      "missed",
-      "missing",
-      "unclear",
-      "scattered",
-      "everywhere",
-      "many",
-    ]);
-
-    const meaningful = rawTokens.filter((token) => !filler.has(token));
-    const tokens = meaningful.length > 0 ? meaningful : rawTokens;
-
-    if (tokens.length === 0) return "";
-    if (tokens.length === 1) return tokens[0] ?? "";
-    if (tokens.length === 2) return tokens.join(" ");
-    return `${tokens[0]} ${tokens[tokens.length - 1]}`;
+    return naturalKeywordPhrase(value, 5);
   };
 
   const categoryExpression = (value: string): string => {
-    const tokens = problemTokens(value).slice(0, 2);
+    const tokens = problemTokens(value);
     if (tokens.length === 0) return "";
-    return tokens.join(" ");
+    const selected = tokens.slice(0, 2);
+    const descriptor = tokens.find((token) =>
+      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
+    );
+    if (descriptor && !selected.includes(descriptor)) selected.push(descriptor);
+    return selected.join(" ");
   };
 
   const triggerExpression = (value: string): string => {
-    const tokens = problemTokens(value).slice(0, 2);
-    if (tokens.length === 0) return "";
-    return tokens.join(" ");
+    return naturalKeywordPhrase(value, 5);
   };
 
   const contextOrExpression = (value: string): string => {
@@ -388,6 +373,7 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
     "";
 
   const context = contextOrExpression(contextSeed);
+  const categoryContext = categoryExpression(categorySeed) || context;
 
   /* Direct buying intent and category recommendations stay separate so a
    * result can be traced back to the signal we intended to retrieve. */
@@ -435,12 +421,12 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
     push(
       "competitor_switching",
-      `${competitor} alternative`,
+      `${competitor} alternative${categoryContext ? ` ${categoryContext}` : ""}`,
       competitorName,
     );
     push(
       "brand_competitor_mentions",
-      `${competitor} problem`,
+      `${competitor} problem${categoryContext ? ` ${categoryContext}` : ""}`,
       competitorName,
     );
   }
@@ -547,6 +533,21 @@ function searchPlanMatches(
   plan: readonly RedditSearchPlanEntry[],
 ): RedditSearchPlanEntry[] {
   const text = normalizeSearchText(`${title ?? ""}\n${body}`);
+  const textTokens = text.split(" ").filter(Boolean);
+  const textTokenSet = new Set(textTokens);
+
+  const matchesWithinWindow = (
+    targets: readonly string[],
+    required: number,
+    windowSize = 18,
+  ): boolean => {
+    if (required <= 0) return true;
+    for (let start = 0; start < textTokens.length; start += 1) {
+      const present = new Set(textTokens.slice(start, start + windowSize));
+      if (targets.filter((token) => present.has(token)).length >= required) return true;
+    }
+    return false;
+  };
 
   const scored = plan.flatMap((entry) => {
     const seed = normalizeSearchText(entry.seed ?? "");
@@ -559,19 +560,47 @@ function searchPlanMatches(
           token.length >= 3 &&
           !PROBLEM_TOKEN_STOP_WORDS.has(token),
       )
-      .slice(0, 4);
+      .slice(0, 6);
 
     if (seedTokens.length === 0) return [];
 
     let seedScore = 0;
 
+    const matched = seedTokens.filter((token) => textTokenSet.has(token)).length;
+    const isCompetitorLane =
+      entry.lane === "competitor_switching" ||
+      entry.lane === "switching" ||
+      entry.lane === "brand_competitor_mentions";
+    const isDemandLane =
+      entry.lane === "direct_buying_intent" ||
+      entry.lane === "explicit_demand" ||
+      entry.lane === "category_recommendation";
+    const required = isCompetitorLane
+      ? seedTokens.length
+      : isDemandLane
+        ? Math.min(seedTokens.length, 2)
+        : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));
+
     if (seed.length >= 4 && text.includes(seed)) {
       seedScore = seedTokens.length + 4;
     } else {
-      const matched = seedTokens.filter((token) => text.includes(token)).length;
-      const required = seedTokens.length <= 2 ? seedTokens.length : 2;
       if (matched < required) return [];
+      if (!isCompetitorLane && !isDemandLane && !matchesWithinWindow(seedTokens, required)) return [];
       seedScore = matched;
+    }
+
+    if (isCompetitorLane && seedTokens.length === 1) {
+      const signalWords = new Set([
+        "alternative", "alternatives", "expensive", "frustrated", "issue", "limitation",
+        "missing", "moving", "overkill", "problem", "replace", "switch", "switching",
+      ]);
+      const contextTokens = problemTokens(entry.query)
+        .filter((token) => !seedTokens.includes(token) && !signalWords.has(token))
+        .slice(0, 4);
+      const contextRequired = Math.min(2, contextTokens.length);
+      if (contextRequired > 0 && contextTokens.filter((token) => textTokenSet.has(token)).length < contextRequired) {
+        return [];
+      }
     }
 
     const explicitDemandSignal =

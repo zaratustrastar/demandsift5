@@ -21,7 +21,7 @@ fail() {
 }
 
 require_fixed_layout() {
-  [ -d "$REPOSITORY/.git" ] || fail "missing release checkout"
+  # The release checkout may be a normal clone (.git directory) or a linked\n  # worktree (.git file). Both are valid Git checkouts.\n  [ -e "$REPOSITORY/.git" ] || fail "missing release checkout"
   [ -f "$ENV_FILE" ] || fail "missing production environment file"
   [ -f "$COMPOSE_FILE_PATH" ] || fail "missing production Compose file"
   install -d -m 0700 -o root -g root "$STATE_DIRECTORY"

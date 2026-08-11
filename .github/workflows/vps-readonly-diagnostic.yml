@@ -15,88 +15,39 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Inspect current DemandSift VPS state
+      - name: Inspect unpublished DemandSift source patch
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           worktree=/opt/demandsift5-pr1
-          baseline=6186a536c4b4c8a7523043d0d2e95e7a2eefdb4e
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0=safe.directory
           export GIT_CONFIG_VALUE_0="${worktree}"
 
-          redact() {
-            sed -E               -e 's#(https://)[^/@[:space:]]+@#\1[REDACTED]@#g'               -e 's/((api[_-]?key|token|password|secret)[=:][[:space:]]*)[^,[:space:]"]+/\1[REDACTED]/Ig'
-          }
-
-          echo "::group::Host and resources"
-          date -u
-          whoami
-          hostname
-          pwd
-          uname -a
-          df -h /
-          free -h
-          node --version 2>/dev/null || echo "host_node=unavailable"
-          npm --version 2>/dev/null || echo "host_npm=unavailable"
-          docker --version
-          docker compose version
-          echo "::endgroup::"
-
-          echo "::group::Worktree presence"
-          ls -ld "${worktree}" "${worktree}/.git" 2>&1 || true
-          test -e "${worktree}/.git" || { echo "Missing Git worktree metadata: ${worktree}/.git"; exit 1; }
-          git -C "${worktree}" rev-parse --is-inside-work-tree
-          git -C "${worktree}" rev-parse --show-toplevel
-          echo "::endgroup::"
-
-          echo "::group::Git branch status remotes"
-          git -C "${worktree}" status --short --branch
-          git -C "${worktree}" branch --verbose --verbose
-          git -C "${worktree}" remote -v | redact
+          test -e "${worktree}/.git"
+          echo "::group::Patch identity and validation"
           echo "HEAD=$(git -C "${worktree}" rev-parse HEAD)"
-          git -C "${worktree}" log -15 --oneline --decorate
+          git -C "${worktree}" status --short --branch
+          git -C "${worktree}" diff --check
           echo "::endgroup::"
 
-          echo "::group::Comparison with 6186a53"
-          if git -C "${worktree}" cat-file -e "${baseline}^{commit}" 2>/dev/null; then
-            echo "baseline_present=yes"
-            printf 'baseline_to_head_left_right='
-            git -C "${worktree}" rev-list --left-right --count "${baseline}...HEAD"
-            if git -C "${worktree}" merge-base --is-ancestor "${baseline}" HEAD; then
-              echo "baseline_is_ancestor=yes"
-            else
-              echo "baseline_is_ancestor=no"
-            fi
-            echo "Committed files changed since baseline:"
-            git -C "${worktree}" diff --name-status "${baseline}..HEAD"
-            echo "Committed diff statistics since baseline:"
-            git -C "${worktree}" diff --stat "${baseline}..HEAD"
-          else
-            echo "baseline_present=no"
-          fi
-          echo "Uncommitted tracked files:"
-          git -C "${worktree}" diff --name-status
-          echo "Uncommitted diff statistics:"
-          git -C "${worktree}" diff --stat
-          echo "Staged files:"
-          git -C "${worktree}" diff --cached --name-status
+          echo "::group::Uncommitted application and provider patch"
+          git -C "${worktree}" diff --no-ext-diff --unified=20 -- \
+            lib/domain/types.ts \
+            lib/providers/contracts.ts \
+            lib/providers/openai.server.ts \
+            lib/providers/reddit.server.ts \
+            lib/server/contracts.ts \
+            lib/server/scan-workflow.ts
           echo "::endgroup::"
 
-          echo "::group::DemandSift directory structure"
-          find "${worktree}" -maxdepth 2             ! -path '*/.git/*'             ! -name '*.env'             ! -name 'vps.env'             ! -name '*.zip'             -printf '%y %P\n' | sort | head -400
+          echo "::group::Uncommitted Apify regression tests"
+          git -C "${worktree}" diff --no-ext-diff --unified=12 -- \
+            tests/apify-reddit-provider.test.mjs
           echo "::endgroup::"
 
-          echo "::group::Docker projects and containers"
-          docker compose ls 2>&1 || true
-          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1 || true
-          echo "::endgroup::"
-
-          echo "::group::Relevant services"
-          systemctl is-active docker 2>/dev/null || true
-          systemctl list-units --type=service --all --no-pager 2>/dev/null             | grep -E 'docker|actions\.runner|caddy|postgres' || true
-          echo "::endgroup::"
-
-          echo "::group::Listening TCP ports"
-          ss -ltnp 2>/dev/null | sed -n '1,120p' | redact
+          echo "::group::Existing worker retry logic references"
+          grep -n -E -C 12 \
+            'executeScanJob|job_failed|maxAttempts|retry|scan\.run|setTimeout|next_attempt' \
+            "${worktree}/scripts/background-worker.mjs" || true
           echo "::endgroup::"

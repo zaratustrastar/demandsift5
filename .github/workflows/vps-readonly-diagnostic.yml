@@ -20,80 +20,80 @@ jobs:
         run: |
           set -uo pipefail
           worktree=/opt/demandsift5-pr1
+          baseline=6186a536c4b4c8a7523043d0d2e95e7a2eefdb4e
 
           redact() {
-            sed -E               -e 's/(Authorization: Bearer )[A-Za-z0-9._~+\/-]+/\1[REDACTED]/g'               -e 's/((api[_-]?key|token|password|secret)[=:][[:space:]]*)[^,[:space:]"]+/\1[REDACTED]/Ig'               -e 's/(sk-[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+/\1[REDACTED]/g'               -e 's/(inf_[A-Za-z0-9_-]{6})[A-Za-z0-9_-]+/\1[REDACTED]/g'
+            sed -E               -e 's#(https://)[^/@[:space:]]+@#\1[REDACTED]@#g'               -e 's/((api[_-]?key|token|password|secret)[=:][[:space:]]*)[^,[:space:]"]+/\1[REDACTED]/Ig'
           }
 
-          echo "::group::Host and toolchain"
+          echo "::group::Host and resources"
           date -u
-          uname -a
           whoami
-          node --version 2>/dev/null || true
-          npm --version 2>/dev/null || true
+          hostname
+          pwd
+          uname -a
+          df -h /
+          free -h
+          node --version 2>/dev/null || echo "host_node=unavailable"
+          npm --version 2>/dev/null || echo "host_npm=unavailable"
           docker --version
           docker compose version
           echo "::endgroup::"
 
-          echo "::group::Git and worktree state"
-          test -d "${worktree}/.git" || { echo "Missing worktree: ${worktree}"; exit 1; }
+          echo "::group::Worktree presence"
+          ls -ld "${worktree}" "${worktree}/.git" 2>&1 || true
+          test -e "${worktree}/.git" || { echo "Missing Git worktree metadata: ${worktree}/.git"; exit 1; }
+          git -C "${worktree}" rev-parse --is-inside-work-tree
+          git -C "${worktree}" rev-parse --show-toplevel
+          echo "::endgroup::"
+
+          echo "::group::Git branch status remotes"
           git -C "${worktree}" status --short --branch
           git -C "${worktree}" branch --verbose --verbose
-          git -C "${worktree}" log -15 --oneline --decorate
           git -C "${worktree}" remote -v | redact
+          echo "HEAD=$(git -C "${worktree}" rev-parse HEAD)"
+          git -C "${worktree}" log -15 --oneline --decorate
+          echo "::endgroup::"
+
+          echo "::group::Comparison with 6186a53"
+          if git -C "${worktree}" cat-file -e "${baseline}^{commit}" 2>/dev/null; then
+            echo "baseline_present=yes"
+            printf 'baseline_to_head_left_right='
+            git -C "${worktree}" rev-list --left-right --count "${baseline}...HEAD"
+            if git -C "${worktree}" merge-base --is-ancestor "${baseline}" HEAD; then
+              echo "baseline_is_ancestor=yes"
+            else
+              echo "baseline_is_ancestor=no"
+            fi
+            echo "Committed files changed since baseline:"
+            git -C "${worktree}" diff --name-status "${baseline}..HEAD"
+            echo "Committed diff statistics since baseline:"
+            git -C "${worktree}" diff --stat "${baseline}..HEAD"
+          else
+            echo "baseline_present=no"
+          fi
+          echo "Uncommitted tracked files:"
+          git -C "${worktree}" diff --name-status
+          echo "Uncommitted diff statistics:"
           git -C "${worktree}" diff --stat
-          git -C "${worktree}" diff --name-only
-          git -C "${worktree}" diff --check || true
+          echo "Staged files:"
+          git -C "${worktree}" diff --cached --name-status
           echo "::endgroup::"
 
-          echo "::group::Project structure"
-          find "${worktree}" -maxdepth 2 -type f             ! -path '*/.git/*'             ! -name '*.env'             ! -name 'vps.env'             ! -name '*.zip'             -printf '%P\n' | sort | head -300
+          echo "::group::DemandSift directory structure"
+          find "${worktree}" -maxdepth 2             ! -path '*/.git/*'             ! -name '*.env'             ! -name 'vps.env'             ! -name '*.zip'             -printf '%y %P\n' | sort | head -400
           echo "::endgroup::"
 
-          echo "::group::Reddit provider symbols"
-          rg -n 'runActor|maxTotalChargeUsd|startUrls|ApifyEnrichmentActorInput|async enrich|reddit_enrichment_failed|searchPosts|searchComments'             "${worktree}/lib/providers/reddit.server.ts"             "${worktree}/lib/server/scan-workflow.ts"             "${worktree}/scripts/background-worker.mjs" || true
+          echo "::group::Docker projects and containers"
+          docker compose ls 2>&1 || true
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1 || true
           echo "::endgroup::"
 
-          echo "::group::Reddit provider implementation"
-          sed -n '700,1060p' "${worktree}/lib/providers/reddit.server.ts"
-          echo "::endgroup::"
-
-          echo "::group::Scan enrichment failure handling"
-          sed -n '630,720p' "${worktree}/lib/server/scan-workflow.ts"
-          echo "::endgroup::"
-
-          echo "::group::Background worker retry handling"
-          sed -n '650,830p' "${worktree}/scripts/background-worker.mjs"
-          echo "::endgroup::"
-
-          echo "::group::Relevant regression tests"
-          sed -n '200,360p' "${worktree}/tests/apify-reddit-provider.test.mjs"
-          rg -n 'reddit_enrichment_failed|retry|non.?retry|executeScanJob|Invalid input|startUrls'             "${worktree}/tests" || true
-          echo "::endgroup::"
-
-          echo "::group::Deployment configuration without environment values"
-          sed -n '1,280p' "${worktree}/deploy/compose.vps.yaml"
-          find "${worktree}/deploy" -maxdepth 2 -type f ! -name '*.env' ! -name 'vps.env' -printf '%P\n' | sort
-          echo "::endgroup::"
-
-          echo "::group::Docker and service state"
-          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+          echo "::group::Relevant services"
           systemctl is-active docker 2>/dev/null || true
-          systemctl list-units --type=service --state=running --no-pager 2>/dev/null             | grep -E 'docker|actions\.runner|caddy|postgres' || true
-          ss -ltnp 2>/dev/null | sed -n '1,100p' | redact
+          systemctl list-units --type=service --all --no-pager 2>/dev/null             | grep -E 'docker|actions\.runner|caddy|postgres' || true
           echo "::endgroup::"
 
-          echo "::group::Container runtime health"
-          docker exec demandsift2-web-1 node --version 2>/dev/null || true
-          docker exec demandsift2-worker-1 node --version 2>/dev/null || true
-          docker exec demandsift2-database-1 pg_isready 2>/dev/null || true
-          curl -sS -o /dev/null -w 'local_http=%{http_code} total=%{time_total}s\n' http://127.0.0.1/ || true
-          curl -sS -o /dev/null -w 'public_https=%{http_code} total=%{time_total}s\n' https://demandsift.143-244-154-139.sslip.io/ || true
-          echo "::endgroup::"
-
-          echo "::group::Relevant redacted application events"
-          {
-            docker logs --since 48h --tail 800 demandsift2-web-1 2>&1
-            docker logs --since 48h --tail 800 demandsift2-worker-1 2>&1
-          } | grep -E 'cN1l66hPsTTOj3PNV|8vc2hFrE1RMN9sXBV|reddit_enrichment_failed|Reddit enrichment|Apify Reddit|job_(claimed|failed|succeeded)|scan_already_running|Invalid input|fetch failed'             | redact | tail -400 || true
+          echo "::group::Listening TCP ports"
+          ss -ltnp 2>/dev/null | sed -n '1,120p' | redact
           echo "::endgroup::"

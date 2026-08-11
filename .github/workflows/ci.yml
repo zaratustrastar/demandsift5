@@ -58,25 +58,19 @@ jobs:
       - name: Test
         run: npm test
 
-  vps-wrapper-preflight:
+  vps-release:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
+    needs: [source-tests, verify]
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 5
+    timeout-minutes: 45
+    env:
+      RELEASE_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - name: Diagnose release wrapper installation
+      - name: Build, validate and deploy exact feature tip
         shell: bash
         run: |
-          set -u
-          echo "identity=$(id -un)"
-          git -c safe.directory=/opt/demandsift5-pr1 -C /opt/demandsift5-pr1 status --short --branch 2>&1 || true
-          git -c safe.directory=/opt/demandsift5-pr1 -C /opt/demandsift5-pr1 log -1 --format='head=%H subject=%s' 2>&1 || true
-          git -c safe.directory=/opt/demandsift5-pr1 -C /opt/demandsift5-pr1 diff --stat 2>&1 || true
-          for candidate in /opt/demandsift5-pr1/deploy/demandsift-release /usr/local/sbin/demandsift-release /etc/sudoers.d/demandsift-release; do
-            if [ -e "$candidate" ]; then
-              stat -c 'file=%n owner=%U group=%G mode=%a bytes=%s' "$candidate"
-            else
-              echo "file=$candidate absent"
-            fi
-          done
-          sudo -n -l 2>&1 || true
-          sudo -n /usr/local/sbin/demandsift-release inspect 2>&1 || true
+          set -euo pipefail
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          sudo -n /usr/local/sbin/demandsift-release build "$RELEASE_SHA"
+          sudo -n /usr/local/sbin/demandsift-release deploy
+          sudo -n /usr/local/sbin/demandsift-release inspect

@@ -1,4 +1,4 @@
-name: One-shot VPS read-only diagnostic
+name: Preserve VPS source patch
 
 on:
   push:
@@ -8,20 +8,59 @@ on:
       - .github/workflows/vps-readonly-diagnostic.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  preserve:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Inspect narrow runner privileges
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Copy tracked VPS source changes
         shell: bash
         run: |
           set -euo pipefail
-          echo "runner_user=$(id -un)"
-          echo "runner_groups=$(id -Gn)"
-          echo "sudo_noninteractive_status:"
-          sudo -n -l 2>&1 | sed -E             -e 's#(Bearer|token|password|secret|api[_-]?key)([=: ]+)[^ ,]+#\1\2[REDACTED]#Ig'             -e 's#/(root|home)/[^ /]+#/\1/[REDACTED]#g' || true
-          echo "env_permissions:"
-          stat -c '%A %U:%G %n'             /opt/demandsift5-pr1/deploy/vps.env             /opt/demandsift5/deploy/vps.env 2>&1 || true
+          source_root=/opt/demandsift5-pr1
+          files=(
+            lib/domain/types.ts
+            lib/providers/contracts.ts
+            lib/providers/openai.server.ts
+            lib/providers/reddit.server.ts
+            lib/server/contracts.ts
+            lib/server/scan-workflow.ts
+            tests/apify-reddit-provider.test.mjs
+          )
+          for file in "${files[@]}"; do
+            test -f "${source_root}/${file}"
+            install -D -m 0644 "${source_root}/${file}" "${GITHUB_WORKSPACE}/${file}"
+          done
+          git diff --check
+          git status --short -- "${files[@]}"
+
+      - name: Commit preserved patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            lib/domain/types.ts
+            lib/providers/contracts.ts
+            lib/providers/openai.server.ts
+            lib/providers/reddit.server.ts
+            lib/server/contracts.ts
+            lib/server/scan-workflow.ts
+            tests/apify-reddit-provider.test.mjs
+          )
+          git config user.name "DemandSift diagnostic runner"
+          git config user.email "actions@users.noreply.github.com"
+          git add -- "${files[@]}"
+          if git diff --cached --quiet; then
+            echo "No source changes to preserve."
+            exit 0
+          fi
+          git commit -m "Preserve VPS Reddit intelligence patch"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

@@ -407,7 +407,7 @@ function communityRiskForUi(risk: DeepQualification["communityRisk"]): Opportuni
   return risk === "unknown" ? "medium" : risk;
 }
 
-function fallbackReply(profile: ScanBusinessProfile, opportunity: OpportunityRecord): string {
+function fallbackReply(profile: ScanBusinessProfile): string {
   const fact = profile.features[0] ?? profile.problemsSolved[0] ?? profile.summary;
   return `A practical way to narrow this down is to start with the workflow that is causing the most friction, then compare options against setup effort, day-to-day maintenance, and the specific handoffs your team needs to keep visible.\n\nFull disclosure: I work with ${profile.name}. Our public site describes ${fact}. If that directly matches what you are trying to fix, it may be worth including in the same comparison, but I would test it against those workflow criteria rather than choosing on feature count alone.`;
 }
@@ -872,7 +872,9 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     });
     const opportunities = discovery.sourceMode === "mock" ? rawOpportunities : aggregated.opportunities;
     const deepBySourceId = new Map(deepRows.map((row) => [row.conversation.provenance.id, row]));
-    const qualifiedOpportunities: QualifiedOpportunity[] = opportunities.flatMap((opportunity) => {
+    const qualifiedOpportunities: Array<QualifiedOpportunity & {
+      conversation: EnrichedRedditConversation;
+    }> = opportunities.flatMap((opportunity) => {
       const row = deepBySourceId.get(opportunity.sourceId);
       if (!row) return [];
       return [{
@@ -986,7 +988,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
         usage.push(usageRecord(generated, "reply-generation"));
         content = generated.value.body.trim();
       } else if (row && discovery.sourceMode === "mock") {
-        content = fallbackReply(profile, strongest);
+        content = fallbackReply(profile);
       }
       if (!content) {
         throw new Error("The strongest reply-eligible opportunity did not produce a grounded reply.");

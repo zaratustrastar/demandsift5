@@ -57,20 +57,3 @@ jobs:
 
       - name: Test
         run: npm test
-
-  vps-release:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
-    needs: [source-tests, verify]
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 45
-    env:
-      RELEASE_SHA: ${{ github.event.pull_request.head.sha }}
-    steps:
-      - name: Build, validate and deploy exact feature tip
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo -n /usr/local/sbin/demandsift-release inspect
-          sudo -n /usr/local/sbin/demandsift-release build "$RELEASE_SHA"
-          sudo -n /usr/local/sbin/demandsift-release deploy
-          sudo -n /usr/local/sbin/demandsift-release inspect

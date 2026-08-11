@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Build exact pull request candidate
-        run: sudo -n /usr/local/sbin/demandsift-release build "$GITHUB_SHA"
+        run: sudo -n /usr/local/sbin/demandsift-release build "${{ github.event.pull_request.head.sha }}"
 
       - name: Deploy candidate with rollback preserved
         run: sudo -n /usr/local/sbin/demandsift-release deploy

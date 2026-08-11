@@ -13,92 +13,56 @@ permissions:
 jobs:
   diagnose:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Inspect failed Apify enrichment run safely
+      - name: Probe known Apify run without credentials
         shell: bash
         run: |
           set -euo pipefail
           run_id=cN1l66hPsTTOj3PNV
-          env_file=""
-
-          for candidate in /opt/demandsift5-pr1/deploy/vps.env /opt/demandsift5/deploy/vps.env; do
-            if test -r "${candidate}" && grep -q '^APIFY_TOKEN=' "${candidate}"; then
-              env_file="${candidate}"
-              break
-            fi
-          done
-
-          if test -z "${env_file}"; then
-            echo "apify_credential_source=unreadable"
-            exit 2
-          fi
-
-          apify_token="$(sed -n 's/^APIFY_TOKEN=//p' "${env_file}" | tail -n 1)"
-          apify_token="${apify_token%\"}"
-          apify_token="${apify_token#\"}"
-          test -n "${apify_token}" || { echo "apify_credential=empty"; exit 2; }
-
-          case "${env_file}" in
-            /opt/demandsift5-pr1/*) echo "apify_credential_source=pr1" ;;
-            *) echo "apify_credential_source=production" ;;
-          esac
-
           temp_dir="$(mktemp -d)"
           trap 'rm -rf "${temp_dir}"' EXIT
 
-          curl --fail --silent --show-error \
+          metadata_status="$(curl --silent --show-error \
             --max-time 30 \
-            -H "Authorization: Bearer ${apify_token}" \
-            "https://api.apify.com/v2/actor-runs/${run_id}" \
-            -o "${temp_dir}/run.json"
+            -o "${temp_dir}/run.json" \
+            -w '%{http_code}' \
+            "https://api.apify.com/v2/actor-runs/${run_id}")"
+          log_status="$(curl --silent --show-error \
+            --max-time 30 \
+            -o "${temp_dir}/run.log" \
+            -w '%{http_code}' \
+            "https://api.apify.com/v2/logs/${run_id}")"
 
-          echo "::group::Sanitized run metadata"
-          python3 - "${temp_dir}/run.json" <<'PY'
+          echo "metadata_http=${metadata_status}"
+          echo "log_http=${log_status}"
+
+          if test "${metadata_status}" = 200; then
+            python3 - "${temp_dir}/run.json" <<'PY'
           import json, sys
           with open(sys.argv[1], encoding="utf-8") as handle:
               data = json.load(handle).get("data", {})
-          allowed = (
-              "id", "actId", "actorTaskId", "buildId", "buildNumber",
-              "status", "statusMessage", "exitCode", "startedAt", "finishedAt",
-          )
-          for key in allowed:
+          for key in ("id", "actId", "buildId", "status", "statusMessage", "exitCode", "startedAt", "finishedAt"):
               value = data.get(key)
               if value is not None:
                   print(f"{key}={value}")
           PY
-          echo "::endgroup::"
+          fi
 
-          curl --fail --silent --show-error \
-            --max-time 30 \
-            -H "Authorization: Bearer ${apify_token}" \
-            "https://api.apify.com/v2/logs/${run_id}" \
-            -o "${temp_dir}/run.log"
-
-          echo "::group::Sanitized failure lines"
-          python3 - "${temp_dir}/run.log" <<'PY'
+          if test "${log_status}" = 200; then
+            python3 - "${temp_dir}/run.log" <<'PY'
           import re, sys
           with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
               lines = handle.readlines()
+          signal = re.compile(r"(invalid input|input must|missing|required field|validation|\berror\b|\bfailed\b|exception)", re.I)
           selected = []
-          signal = re.compile(
-              r"(invalid input|input must|missing|required field|validation|"
-              r"\berror\b|\bfailed\b|exception|starturls|searches)",
-              re.I,
-          )
           for raw in lines:
               if not signal.search(raw):
                   continue
-              line = raw.strip()
-              line = re.sub(r"https?://\S+", "[URL]", line)
+              line = re.sub(r"https?://\S+", "[URL]", raw.strip())
               line = re.sub(r"(?i)(authorization|bearer|api[_-]?key|token|password|secret)(\s*[:=]\s*)\S+", r"\1\2[REDACTED]", line)
-              line = re.sub(r"inf_[A-Za-z0-9_-]+|apify_api_[A-Za-z0-9_-]+", "[REDACTED]", line)
-              if len(line) > 700:
-                  line = line[:700] + "…"
-              selected.append(line)
-          for line in selected[-80:]:
+              selected.append(line[:700])
+          for line in selected[-40:]:
               print(line)
-          if not selected:
-              print("no_matching_failure_lines")
           PY
-          echo "::endgroup::"
+          fi

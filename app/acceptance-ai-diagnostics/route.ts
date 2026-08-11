@@ -119,3 +119,7 @@ export async function POST(request: Request) {
     return apiErrorResponse(error);
   }
 }
+
+// Browser-controlled acceptance cannot issue arbitrary in-page network calls.
+// Keep the temporary replay accessible through an authenticated navigation too.
+export const GET = POST;

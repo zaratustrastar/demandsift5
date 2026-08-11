@@ -24,6 +24,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build application for server-rendered tests
+        run: npm run build
+
       - name: Run source-level test suite
         run: node --test tests/*.test.mjs
 

@@ -15,54 +15,13 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Probe known Apify run without credentials
+      - name: Inspect narrow runner privileges
         shell: bash
         run: |
           set -euo pipefail
-          run_id=cN1l66hPsTTOj3PNV
-          temp_dir="$(mktemp -d)"
-          trap 'rm -rf "${temp_dir}"' EXIT
-
-          metadata_status="$(curl --silent --show-error \
-            --max-time 30 \
-            -o "${temp_dir}/run.json" \
-            -w '%{http_code}' \
-            "https://api.apify.com/v2/actor-runs/${run_id}")"
-          log_status="$(curl --silent --show-error \
-            --max-time 30 \
-            -o "${temp_dir}/run.log" \
-            -w '%{http_code}' \
-            "https://api.apify.com/v2/logs/${run_id}")"
-
-          echo "metadata_http=${metadata_status}"
-          echo "log_http=${log_status}"
-
-          if test "${metadata_status}" = 200; then
-            python3 - "${temp_dir}/run.json" <<'PY'
-          import json, sys
-          with open(sys.argv[1], encoding="utf-8") as handle:
-              data = json.load(handle).get("data", {})
-          for key in ("id", "actId", "buildId", "status", "statusMessage", "exitCode", "startedAt", "finishedAt"):
-              value = data.get(key)
-              if value is not None:
-                  print(f"{key}={value}")
-          PY
-          fi
-
-          if test "${log_status}" = 200; then
-            python3 - "${temp_dir}/run.log" <<'PY'
-          import re, sys
-          with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
-              lines = handle.readlines()
-          signal = re.compile(r"(invalid input|input must|missing|required field|validation|\berror\b|\bfailed\b|exception)", re.I)
-          selected = []
-          for raw in lines:
-              if not signal.search(raw):
-                  continue
-              line = re.sub(r"https?://\S+", "[URL]", raw.strip())
-              line = re.sub(r"(?i)(authorization|bearer|api[_-]?key|token|password|secret)(\s*[:=]\s*)\S+", r"\1\2[REDACTED]", line)
-              selected.append(line[:700])
-          for line in selected[-40:]:
-              print(line)
-          PY
-          fi
+          echo "runner_user=$(id -un)"
+          echo "runner_groups=$(id -Gn)"
+          echo "sudo_noninteractive_status:"
+          sudo -n -l 2>&1 | sed -E             -e 's#(Bearer|token|password|secret|api[_-]?key)([=: ]+)[^ ,]+#\1\2[REDACTED]#Ig'             -e 's#/(root|home)/[^ /]+#/\1/[REDACTED]#g' || true
+          echo "env_permissions:"
+          stat -c '%A %U:%G %n'             /opt/demandsift5-pr1/deploy/vps.env             /opt/demandsift5/deploy/vps.env 2>&1 || true

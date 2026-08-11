@@ -120,6 +120,12 @@ type ApifyEnrichmentActorInput = {
 
 export type ApifyRedditActorInput = ApifySearchActorInput | ApifyEnrichmentActorInput;
 
+/**
+ * Trudax charges for at least ten initialized items and rejects smaller
+ * maxItems values even when a startUrls run only opens one selected thread.
+ */
+export const APIFY_REDDIT_ENRICHMENT_MIN_ITEMS = 10;
+
 type ApifyCandidate = RedditDiscoveryCandidate & { item: ApifyRedditItem };
 
 type CandidateParseResult =
@@ -237,12 +243,6 @@ function problemTokens(value: string): string[] {
     .split(" ")
     .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token))
     .slice(0, 4);
-}
-
-function problemPainExpression(value: string): string {
-  const tokens = problemTokens(value);
-  if (tokens.length < 2) return "";
-  return `(${tokens.join(" AND ")}) AND (problem OR struggling OR manual OR spreadsheet OR nightmare OR difficult OR help OR solution)`;
 }
 
 function automatedAuthor(value: string): boolean {
@@ -1162,7 +1162,11 @@ export class ApifyRedditTestProvider implements RedditProvider {
       });
     }
 
-    const candidates = [...byKey.values()].slice(0, maxItems).map(({ item: _item, ...candidate }) => candidate);
+    const candidates = [...byKey.values()].slice(0, maxItems).map((candidate) => {
+      const normalized = { ...candidate };
+      Reflect.deleteProperty(normalized, "item");
+      return normalized;
+    });
     const laneQueryCounts: Partial<Record<RedditSearchLane, number>> = {};
     for (const entry of searchPlan) laneQueryCounts[entry.lane] = (laneQueryCounts[entry.lane] ?? 0) + 1;
     const diagnostics: RedditDiscoveryDiagnostics = {
@@ -1196,7 +1200,13 @@ export class ApifyRedditTestProvider implements RedditProvider {
       skipCommunity: true,
       includeMediaLinks: true,
       includeNSFW: false,
-      maxItems: Math.min(100, candidates.length * (maxComments + 1)),
+      maxItems: Math.min(
+        100,
+        Math.max(
+          APIFY_REDDIT_ENRICHMENT_MIN_ITEMS,
+          candidates.length * (maxComments + 1),
+        ),
+      ),
       maxPostCount: candidates.length,
       maxComments,
       maxCommunitiesCount: 0,

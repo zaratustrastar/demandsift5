@@ -56,6 +56,16 @@ export interface OpenAiUsageEvent {
   providerRequestId?: string;
 }
 
+export interface OpenAiProviderDiagnosticEvent {
+  kind: "structured_chat_empty_retry";
+  operation: AiOperation;
+  model: string;
+  finishReason: "length" | "stop" | "content_filter" | "tool_calls" | "missing" | "other";
+  outputTokens: number;
+  requestedMaxTokens: number;
+  retryMaxTokens: number;
+}
+
 export interface OpenAiProviderOptions {
   apiKey: string;
   baseUrl?: string;
@@ -67,6 +77,8 @@ export interface OpenAiProviderOptions {
   maxRetries?: number;
   pricing?: ModelPriceCatalog;
   onUsage?: (event: OpenAiUsageEvent) => void | Promise<void>;
+  /** Sanitized provider-boundary metadata only; never includes prompts or model text. */
+  onDiagnostic?: (event: OpenAiProviderDiagnosticEvent) => void | Promise<void>;
 }
 
 interface ResponsesApiPayload {
@@ -96,9 +108,12 @@ interface EmbeddingsApiPayload {
 
 interface ChatCompletionsPayload {
   id?: string;
+  model?: string;
   choices?: Array<{
+    finish_reason?: string | null;
     message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
+      content?: string | Array<{ type?: string; text?: string }> | null;
+      refusal?: string | null;
     };
   }>;
   usage?: {
@@ -750,14 +765,44 @@ function chatUsage(payload: ChatCompletionsPayload): TokenUsage {
   };
 }
 
-function chatText(payload: ChatCompletionsPayload): string {
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content === "string" && content.trim()) return content;
+function normalizedFinishReason(value: string | null | undefined): OpenAiProviderDiagnosticEvent["finishReason"] {
+  if (!value) return "missing";
+  if (value === "length" || value === "max_tokens" || value === "max_output_tokens") return "length";
+  if (value === "stop" || value === "content_filter" || value === "tool_calls") return value;
+  return "other";
+}
+
+type ChatTextResult =
+  | { state: "complete"; text: string }
+  | {
+      state: "empty";
+      finishReason: OpenAiProviderDiagnosticEvent["finishReason"];
+      retryable: boolean;
+      contentType: string;
+      outputTokens: number;
+    };
+
+function chatText(payload: ChatCompletionsPayload, requestId?: string): ChatTextResult {
+  const choice = payload.choices?.[0];
+  const content = choice?.message?.content;
+  if (typeof content === "string" && content.trim()) return { state: "complete", text: content };
   if (Array.isArray(content)) {
     const text = content.map((item) => item.text ?? "").join("");
-    if (text.trim()) return text;
+    if (text.trim()) return { state: "complete", text };
   }
-  throw new OpenAiProviderError("OpenAI returned no structured chat response text.");
+  if (choice?.message?.refusal) {
+    throw new OpenAiProviderError("OpenAI refused the structured chat request.", undefined, requestId);
+  }
+  const finishReason = normalizedFinishReason(choice?.finish_reason);
+  const contentType = content === null ? "null" : Array.isArray(content) ? "array" : typeof content;
+  const outputTokens = payload.usage?.completion_tokens ?? 0;
+  return {
+    state: "empty",
+    finishReason,
+    retryable: finishReason === "length" || finishReason === "stop" || finishReason === "missing" || finishReason === "other",
+    contentType,
+    outputTokens,
+  };
 }
 
 function parseStructuredText(text: string, requestId?: string): unknown {
@@ -855,6 +900,7 @@ export class OpenAiProvider implements AiProvider {
   private readonly maxRetries: number;
   private readonly pricing: ModelPriceCatalog;
   private readonly onUsage?: OpenAiProviderOptions["onUsage"];
+  private readonly onDiagnostic?: OpenAiProviderOptions["onDiagnostic"];
 
   constructor(options: OpenAiProviderOptions) {
     if (!options.apiKey.trim()) throw new Error("OPENAI_API_KEY is required for the live OpenAI provider.");
@@ -870,6 +916,7 @@ export class OpenAiProvider implements AiProvider {
     this.maxRetries = Math.max(0, Math.min(options.maxRetries ?? 2, 5));
     this.pricing = options.pricing ?? {};
     this.onUsage = options.onUsage;
+    this.onDiagnostic = options.onDiagnostic;
   }
 
   private headers(): HeadersInit {
@@ -948,8 +995,13 @@ export class OpenAiProvider implements AiProvider {
     context: { workspaceId?: EntityId; businessId?: EntityId };
     parse: (value: unknown) => T;
   }): Promise<AiProviderResult<T>> {
-    const result = this.apiStyle === "chat"
-      ? await this.post("/chat/completions", {
+    if (this.apiStyle === "chat") {
+      let maxTokens = options.maxOutputTokens;
+      const attemptUsages: TokenUsage[] = [];
+      let estimatedCostUsd = 0;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await this.post("/chat/completions", {
           model: options.model,
           messages: [
             {
@@ -958,38 +1010,79 @@ export class OpenAiProvider implements AiProvider {
             },
             { role: "user", content: options.user },
           ],
-          max_tokens: options.maxOutputTokens,
-        })
-      : await this.post("/responses", {
-          model: options.model,
-          input: [
-            { role: "system", content: options.system },
-            { role: "user", content: options.user },
-          ],
-          text: {
-            format: {
-              type: "json_schema",
-              name: options.schemaName,
-              schema: options.schema,
-              strict: true,
-            },
-          },
-          reasoning: { effort: options.reasoningEffort },
-          max_output_tokens: options.maxOutputTokens,
-          store: false,
+          max_tokens: maxTokens,
         });
-    const payload = objectValue(
-      result.payload,
-      this.apiStyle === "chat" ? "Chat Completions API payload" : "Responses API payload",
-    );
-    const usage = this.apiStyle === "chat"
-      ? chatUsage(payload as ChatCompletionsPayload)
-      : responseUsage(payload as ResponsesApiPayload);
-    const text = this.apiStyle === "chat"
-      ? chatText(payload as ChatCompletionsPayload)
-      : responseText(payload as ResponsesApiPayload);
-    const parsedJson = parseStructuredText(text, result.requestId);
-    const value = options.parse(parsedJson);
+        const payload = objectValue(result.payload, "Chat Completions API payload") as ChatCompletionsPayload;
+        const usage = chatUsage(payload);
+        const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
+        attemptUsages.push(usage);
+        estimatedCostUsd += await this.recordUsage(
+          options.model,
+          options.operation,
+          usage,
+          options.context,
+          providerRequestId,
+        );
+
+        const chatResult = chatText(payload, result.requestId);
+        if (chatResult.state === "complete") {
+          const value = options.parse(parseStructuredText(chatResult.text, result.requestId));
+          return {
+            value,
+            model: options.model,
+            operation: options.operation,
+            usage: combineTokenUsage(attemptUsages),
+            estimatedCostUsd,
+            providerRequestId,
+          };
+        }
+
+        if (!chatResult.retryable || attempt > 0) {
+          throw new OpenAiProviderError(
+            `OpenAI returned no structured chat response text (finish_reason=${chatResult.finishReason}, content_type=${chatResult.contentType}, output_tokens=${chatResult.outputTokens}).`,
+            undefined,
+            result.requestId,
+          );
+        }
+        const retryMaxTokens = chatResult.finishReason === "length"
+          ? Math.min(16_000, Math.max(maxTokens + 1_000, maxTokens * 2))
+          : maxTokens;
+        await this.onDiagnostic?.({
+          kind: "structured_chat_empty_retry",
+          operation: options.operation,
+          model: options.model,
+          finishReason: chatResult.finishReason,
+          outputTokens: usage.outputTokens,
+          requestedMaxTokens: maxTokens,
+          retryMaxTokens,
+        });
+        maxTokens = retryMaxTokens;
+      }
+      throw new OpenAiProviderError("OpenAI structured chat retry did not return a result.");
+    }
+
+    const result = await this.post("/responses", {
+      model: options.model,
+      input: [
+        { role: "system", content: options.system },
+        { role: "user", content: options.user },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: options.schemaName,
+          schema: options.schema,
+          strict: true,
+        },
+      },
+      reasoning: { effort: options.reasoningEffort },
+      max_output_tokens: options.maxOutputTokens,
+      store: false,
+    });
+    const payload = objectValue(result.payload, "Responses API payload") as ResponsesApiPayload;
+    const usage = responseUsage(payload);
+    const text = responseText(payload);
+    const value = options.parse(parseStructuredText(text, result.requestId));
     const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
     const estimatedCostUsd = await this.recordUsage(
       options.model,
@@ -1050,7 +1143,7 @@ export class OpenAiProvider implements AiProvider {
       operation: "conversation_triage",
       schemaName: "reddit_candidate_triage",
       schema: TRIAGE_SCHEMA,
-      maxOutputTokens: Math.max(2_000, Math.min(8_000, candidates.length * 220)),
+      maxOutputTokens: Math.max(4_000, Math.min(12_000, candidates.length * 400)),
       reasoningEffort: "low",
       context: { workspaceId: request.business.workspaceId, businessId: request.business.businessId },
       system:
@@ -1138,7 +1231,7 @@ export class OpenAiProvider implements AiProvider {
       operation: "deep_qualification",
       schemaName: "reddit_deep_qualification",
       schema: DEEP_QUALIFICATION_SCHEMA,
-      maxOutputTokens: Math.max(3_000, Math.min(12_000, conversations.length * 450)),
+      maxOutputTokens: Math.max(5_000, Math.min(16_000, conversations.length * 650)),
       reasoningEffort: "medium",
       context: { workspaceId: request.business.workspaceId, businessId: request.business.businessId },
       system:

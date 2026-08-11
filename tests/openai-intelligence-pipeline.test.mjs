@@ -135,6 +135,51 @@ test("missing triage IDs are retried with only the missing records", async () =>
   assert.equal(result.usage.outputTokens, 10);
 });
 
+test("an empty length-limited gateway response is retried inside the AI provider", async () => {
+  const maxTokens = [];
+  const diagnostics = [];
+  let calls = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async (_url, init) => {
+      calls += 1;
+      const body = JSON.parse(init.body);
+      maxTokens.push(body.max_tokens);
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          id: "chat_exhausted",
+          choices: [{ finish_reason: "length", message: { content: null } }],
+          usage: { prompt_tokens: 100, completion_tokens: body.max_tokens },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.deepEqual(maxTokens, [4_000, 8_000]);
+  assert.equal(result.value[0].externalId, "a");
+  assert.equal(result.usage.inputTokens, 110);
+  assert.equal(result.usage.outputTokens, 4_005);
+  assert.deepEqual(diagnostics, [{
+    kind: "structured_chat_empty_retry",
+    operation: "conversation_triage",
+    model: openai.DEFAULT_OPENAI_MODELS.economyModel,
+    finishReason: "length",
+    outputTokens: 4_000,
+    requestedMaxTokens: 4_000,
+    retryMaxTokens: 8_000,
+  }]);
+});
+
 test("persistent missing triage IDs fail explicitly instead of becoming irrelevant", async () => {
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",

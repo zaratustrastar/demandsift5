@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+unset COMPOSE_FILE COMPOSE_PROJECT_NAME DOCKER_CONTEXT DOCKER_HOST
+
+readonly REPOSITORY=/opt/demandsift5-pr1
+readonly PRODUCTION_ROOT=/opt/demandsift5
+readonly ENV_FILE="$PRODUCTION_ROOT/deploy/vps.env"
+readonly COMPOSE_FILE_PATH="$PRODUCTION_ROOT/deploy/compose.vps.yaml"
+readonly PROJECT=demandsift2
+readonly FEATURE_REF=refs/heads/feature/reddit-intelligence-pipeline
+readonly STATE_DIRECTORY=/var/lib/demandsift-release
+readonly CANDIDATE_STATE="$STATE_DIRECTORY/candidate"
+readonly DEPLOYED_STATE="$STATE_DIRECTORY/deployed"
+
+fail() {
+  echo "demandsift-release: $*" >&2
+  exit 1
+}
+
+require_fixed_layout() {
+  [ -d "$REPOSITORY/.git" ] || fail "missing release checkout"
+  [ -f "$ENV_FILE" ] || fail "missing production environment file"
+  [ -f "$COMPOSE_FILE_PATH" ] || fail "missing production Compose file"
+  install -d -m 0700 -o root -g root "$STATE_DIRECTORY"
+}
+
+compose() {
+  /usr/bin/docker compose \
+    -p "$PROJECT" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE_PATH" \
+    "$@"
+}
+
+git_at_release() {
+  /usr/bin/git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" "$@"
+}
+
+read_candidate_state() {
+  [ -f "$CANDIDATE_STATE" ] || fail "no tested candidate image is staged"
+  # This file is created only by this root-owned script from validated values.
+  # shellcheck disable=SC1090
+  source "$CANDIDATE_STATE"
+  [[ ${CANDIDATE_SHA:-} =~ ^[0-9a-f]{40}$ ]] || fail "invalid candidate state"
+  [[ ${CANDIDATE_WEB:-} =~ ^demandsift2-web:candidate-[0-9a-f]{12}$ ]] || fail "invalid web candidate state"
+  [[ ${CANDIDATE_WORKER:-} =~ ^demandsift2-worker:candidate-[0-9a-f]{12}$ ]] || fail "invalid worker candidate state"
+}
+
+inspect_release() {
+  require_fixed_layout
+  echo "release_checkout=$REPOSITORY"
+  git_at_release status --short --branch
+  git_at_release log -1 --format='release_head=%H subject=%s'
+  /usr/bin/docker ps --format 'container={{.Names}} status={{.Status}} project={{.Label "com.docker.compose.project"}} service={{.Label "com.docker.compose.service"}}'
+  compose ps
+}
+
+build_candidate() {
+  [ "$#" -eq 1 ] || fail "build requires exactly one commit SHA"
+  local expected_sha=$1
+  [[ $expected_sha =~ ^[0-9a-f]{40}$ ]] || fail "commit SHA must be 40 lowercase hexadecimal characters"
+  require_fixed_layout
+
+  [ -z "$(git_at_release status --porcelain --untracked-files=no)" ] || fail "release checkout has tracked local changes"
+  git_at_release fetch --no-tags origin "$FEATURE_REF"
+  local fetched_sha
+  fetched_sha=$(git_at_release rev-parse FETCH_HEAD)
+  [ "$fetched_sha" = "$expected_sha" ] || fail "requested commit is not the current feature branch tip"
+  git_at_release checkout --detach "$fetched_sha"
+
+  local short_sha=${fetched_sha:0:12}
+  local web_image="demandsift2-web:candidate-$short_sha"
+  local worker_image="demandsift2-worker:candidate-$short_sha"
+
+  /usr/bin/docker build --pull -f "$REPOSITORY/deploy/Dockerfile.web" -t "$web_image" "$REPOSITORY"
+  /usr/bin/docker build --pull -f "$REPOSITORY/deploy/Dockerfile.worker" -t "$worker_image" "$REPOSITORY"
+
+  /usr/bin/docker run --rm --network none --entrypoint node "$web_image" \
+    -e 'const fs=require("node:fs"); for (const file of ["dist/standalone/server.js","package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
+  /usr/bin/docker run --rm --network none --entrypoint node "$worker_image" \
+    --check scripts/background-worker.mjs
+
+  {
+    printf 'CANDIDATE_SHA=%s\n' "$fetched_sha"
+    printf 'CANDIDATE_WEB=%s\n' "$web_image"
+    printf 'CANDIDATE_WORKER=%s\n' "$worker_image"
+  } > "$CANDIDATE_STATE"
+  chmod 0600 "$CANDIDATE_STATE"
+  echo "candidate_sha=$fetched_sha"
+  echo "candidate_images_tested=true"
+}
+
+tag_running_for_rollback() {
+  local web_image worker_image migrate_image
+  web_image=$(/usr/bin/docker inspect --format '{{.Image}}' demandsift2-web-1)
+  worker_image=$(/usr/bin/docker inspect --format '{{.Image}}' demandsift2-worker-1)
+  migrate_image=$(/usr/bin/docker inspect --format '{{.Image}}' demandsift2-migrate-1)
+  /usr/bin/docker image tag "$web_image" demandsift2-web:rollback
+  /usr/bin/docker image tag "$worker_image" demandsift2-worker:rollback
+  /usr/bin/docker image tag "$migrate_image" demandsift2-migrate:rollback
+}
+
+activate_rollback_images() {
+  /usr/bin/docker image inspect demandsift2-web:rollback >/dev/null
+  /usr/bin/docker image inspect demandsift2-worker:rollback >/dev/null
+  /usr/bin/docker image inspect demandsift2-migrate:rollback >/dev/null
+  /usr/bin/docker image tag demandsift2-web:rollback demandsift2-web:latest
+  /usr/bin/docker image tag demandsift2-worker:rollback demandsift2-worker:latest
+  /usr/bin/docker image tag demandsift2-migrate:rollback demandsift2-migrate:latest
+  compose up -d --no-build --remove-orphans
+}
+
+wait_for_release() {
+  local attempt web_health worker_status
+  for attempt in $(seq 1 60); do
+    web_health=$(/usr/bin/docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' demandsift2-web-1 2>/dev/null || true)
+    worker_status=$(/usr/bin/docker inspect --format '{{.State.Status}}' demandsift2-worker-1 2>/dev/null || true)
+    if [ "$web_health" = healthy ] && [ "$worker_status" = running ]; then
+      /usr/bin/curl --fail --silent --show-error --max-time 10 http://127.0.0.1/ >/dev/null
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+deploy_candidate() {
+  [ "$#" -eq 0 ] || fail "deploy accepts no arguments"
+  require_fixed_layout
+  read_candidate_state
+  tag_running_for_rollback
+
+  /usr/bin/docker image tag "$CANDIDATE_WEB" demandsift2-web:latest
+  /usr/bin/docker image tag "$CANDIDATE_WORKER" demandsift2-worker:latest
+  /usr/bin/docker image tag "$CANDIDATE_WORKER" demandsift2-migrate:latest
+
+  if ! compose up -d --no-build --remove-orphans || ! wait_for_release; then
+    echo "candidate deployment failed; restoring rollback images" >&2
+    activate_rollback_images
+    wait_for_release || true
+    fail "candidate did not become healthy"
+  fi
+
+  printf 'DEPLOYED_SHA=%s\n' "$CANDIDATE_SHA" > "$DEPLOYED_STATE"
+  chmod 0600 "$DEPLOYED_STATE"
+  echo "deployed_sha=$CANDIDATE_SHA"
+  compose ps
+}
+
+rollback_release() {
+  [ "$#" -eq 0 ] || fail "rollback accepts no arguments"
+  require_fixed_layout
+  activate_rollback_images
+  wait_for_release || fail "rollback images did not become healthy"
+  echo "rollback_healthy=true"
+  compose ps
+}
+
+command_name=${1:-}
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+case "$command_name" in
+  inspect) inspect_release "$@" ;;
+  build) build_candidate "$@" ;;
+  deploy) deploy_candidate "$@" ;;
+  rollback) rollback_release "$@" ;;
+  *) fail "allowed commands: inspect, build <feature-tip-sha>, deploy, rollback" ;;
+esac

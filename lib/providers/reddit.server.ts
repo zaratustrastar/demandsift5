@@ -266,109 +266,284 @@ function boundedPlanEntry(
 }
 
 /**
- * Build explicit retrieval lanes. AI supplies semantic seeds in the company
- * context pack; Reddit/Apify syntax remains deterministic and bounded.
+ * Build a bounded high-recall search plan around observable demand signals.
+ *
+ * The website/AI layer supplies grounded search hypotheses. This layer keeps
+ * Reddit syntax deterministic and deliberately avoids over-constraining those
+ * hypotheses with extra "pain words".
  */
 export function buildApifyRedditSearchPlan(request: RedditSearchRequest): RedditSearchPlanEntry[] {
-  const productTerms = request.queries.productTerms
-    .map(cleanSearchTerm)
-    .filter(isUsefulSearchPhrase);
-  const brandTerms = (request.queries.brandTerms?.length
-    ? request.queries.brandTerms
-    : productTerms.slice(0, 1))
-    .map(cleanSearchTerm)
-    .filter(isUsefulSearchPhrase);
-  const categories = (request.queries.productCategories ?? [])
-    .map(cleanSearchTerm)
-    .filter((term) => usefulShortPhrase(term, 6));
-  const problems = request.queries.customerProblems
-    .map(cleanSearchTerm)
-    .filter((term) => usefulShortPhrase(term, 8));
-  const competitors = request.queries.competitors
-    .map(cleanSearchTerm)
-    .filter(isUsefulSearchPhrase);
+  type DemandLane = "explicit_demand" | "pain" | "workaround" | "switching" | "timing";
 
-  const category = redditSearchAtom(categories[0] ?? productTerms[1] ?? "");
-  const brand = redditSearchAtom(brandTerms[0] ?? productTerms[0] ?? "");
-  const entries: Array<RedditSearchPlanEntry | null> = [];
+  const cleanUnique = (values: readonly string[], maximumWords: number): string[] => {
+    const seen = new Set<string>();
+    return values.flatMap((value) => {
+      const cleaned = cleanSearchTerm(value);
+      if (!usefulShortPhrase(cleaned, maximumWords)) return [];
+      const key = normalizeSearchText(cleaned);
+      if (!key || seen.has(key)) return [];
+      seen.add(key);
+      return [cleaned];
+    });
+  };
 
+  /*
+   * For a natural manifestation such as "files buried in email", using every
+   * word is brittle. First + last normally retain the concrete objects while
+   * allowing wording between them to vary.
+   */
+  const manifestationExpression = (value: string): string => {
+    const rawTokens = problemTokens(value).slice(0, 4);
+    const filler = new Set([
+      "buried",
+      "missed",
+      "missing",
+      "unclear",
+      "scattered",
+      "everywhere",
+      "many",
+    ]);
+
+    const meaningful = rawTokens.filter((token) => !filler.has(token));
+    const tokens = meaningful.length > 0 ? meaningful : rawTokens;
+
+    if (tokens.length === 0) return "";
+    if (tokens.length === 1) return tokens[0] ?? "";
+    if (tokens.length === 2) return `(${tokens.join(" AND ")})`;
+    return `(${tokens[0]} AND ${tokens[tokens.length - 1]})`;
+  };
+
+  const categoryExpression = (value: string): string => {
+    const tokens = problemTokens(value).slice(0, 2);
+    if (tokens.length === 0) return "";
+    return tokens.length === 1 ? tokens[0] ?? "" : `(${tokens.join(" AND ")})`;
+  };
+
+  const triggerExpression = (value: string): string => {
+    const tokens = problemTokens(value).slice(0, 2);
+    if (tokens.length === 0) return "";
+    return tokens.length === 1 ? tokens[0] ?? "" : `(${tokens.join(" AND ")})`;
+  };
+
+  const contextOrExpression = (value: string): string => {
+    const generic = new Set([
+      "keep", "keeping", "manage", "managing", "organize", "organized",
+      "organizing", "coordinate", "coordinating", "use", "using",
+      "help", "helps", "solve", "solves", "make", "makes",
+    ]);
+    const tokens = problemTokens(value)
+      .filter((token) => !generic.has(token))
+      .slice(0, 2);
+
+    if (tokens.length === 0) return "";
+    return tokens.length === 1 ? tokens[0] ?? "" : `(${tokens.join(" OR ")})`;
+  };
+
+  const productTerms = cleanUnique(request.queries.productTerms, 8);
+  const categories = cleanUnique(request.queries.productCategories ?? [], 6);
+  const problems = cleanUnique(request.queries.customerProblems, 8);
+  const jobs = cleanUnique(request.queries.jobsToBeDone ?? [], 10);
+  const workarounds = cleanUnique(request.queries.workarounds ?? [], 8);
+  const triggers = cleanUnique(request.queries.triggerEvents ?? [], 10);
+  const competitors = cleanUnique(request.queries.competitors, 6);
+  const brandTerms = cleanUnique(
+    request.queries.brandTerms?.length
+      ? request.queries.brandTerms
+      : productTerms.slice(0, 1),
+    6,
+  );
+
+  const pools: Record<DemandLane, RedditSearchPlanEntry[]> = {
+    explicit_demand: [],
+    pain: [],
+    workaround: [],
+    switching: [],
+    timing: [],
+  };
+
+  const seenQueries = new Set<string>();
+
+  const push = (lane: DemandLane, query: string, seed?: string) => {
+    const entry = boundedPlanEntry(lane, query, seed);
+    if (!entry) return;
+
+    const key = normalizeSearchText(entry.query);
+    if (!key || seenQueries.has(key)) return;
+
+    seenQueries.add(key);
+    pools[lane].push(entry);
+  };
+
+  const categorySeed =
+    categories[0] ??
+    productTerms.find(
+      (term) =>
+        normalizeSearchText(term) !== normalizeSearchText(brandTerms[0] ?? ""),
+    ) ??
+    productTerms[0] ??
+    "";
+
+  const contextSeed =
+    categories[0] ??
+    jobs[0] ??
+    problems[0] ??
+    productTerms[0] ??
+    "";
+
+  const context = contextOrExpression(contextSeed);
+
+  /*
+   * EXPLICIT DEMAND
+   *
+   * One conventional category query plus indirect problem/JTBD queries.
+   * A user does not need to know the official product category.
+   */
+  const category = categoryExpression(categorySeed);
   if (category) {
-    entries.push(
-      boundedPlanEntry(
-        "direct_buying_intent",
-        `${category} AND ("looking for" OR "need a" OR "which tool" OR "what are you using" OR "recommend a")`,
-        categories[0],
-      ),
-      boundedPlanEntry(
-        "category_recommendation",
-        `${category} AND (recommendations OR recommend OR alternatives OR options OR compare)`,
-        categories[0],
-      ),
+    push(
+      "explicit_demand",
+      `${category} AND ("looking for" OR "need a" OR "need help" OR recommend OR recommendations OR alternative OR "what do you use" OR "which tool")`,
+      categorySeed,
     );
   }
 
-  for (const problem of problems.slice(0, 4)) {
-    const expression = problemPainExpression(problem);
-    if (expression) {
-      entries.push(boundedPlanEntry("problem_pain", expression, problem));
-    }
-  }
+  for (const seed of [...problems, ...jobs].slice(0, 8)) {
+    const manifestation = manifestationExpression(seed);
+    if (!manifestation) continue;
 
-  for (const competitorName of competitors.slice(0, 3)) {
-    const competitor = redditSearchAtom(competitorName);
-    if (!competitor) continue;
-    entries.push(
-      boundedPlanEntry(
-        "competitor_switching",
-        `${competitor} AND (alternative OR switching OR replace OR frustrated OR expensive OR overkill OR problem OR issue)`,
-        competitorName,
-      ),
-      boundedPlanEntry(
-        "brand_competitor_mentions",
-        `${competitor} AND (problem OR issue OR pricing OR missing OR difficult OR comparison)`,
-        competitorName,
-      ),
+    push(
+      "explicit_demand",
+      `${manifestation} AND ("looking for" OR "need help" OR recommend OR recommendations OR tool OR solution OR alternative OR "what do you use")`,
+      seed,
     );
   }
 
+  /*
+   * PAIN
+   *
+   * The problem manifestation itself is evidence. Do not require a second
+   * generic word such as "frustrated" or "problem".
+   */
+  for (const seed of problems.slice(0, 8)) {
+    const manifestation = manifestationExpression(seed);
+    if (manifestation) push("pain", manifestation, seed);
+  }
+
+  /*
+   * Brand-specific complaints remain useful but are lower-priority fallback
+   * candidates, not a replacement for problem-language discovery.
+   */
+  const brand = redditSearchAtom(brandTerms[0] ?? "");
   if (brand) {
-    entries.push(
-      boundedPlanEntry(
-        "brand_competitor_mentions",
-        `${brand} AND (alternative OR switching OR frustrated OR problem OR issue OR pricing OR recommend)`,
-        brandTerms[0] ?? productTerms[0],
-      ),
-    );
-  }
-
-  const seen = new Set<string>();
-  const deduped = entries.flatMap((entry) => {
-    if (!entry) return [];
-    const key = `${entry.lane}:${entry.query.toLocaleLowerCase("en-US")}`;
-    if (seen.has(key)) return [];
-    seen.add(key);
-    return [entry];
-  });
-
-  const lanes = new Set(deduped.map((entry) => entry.lane));
-  if (!lanes.has("problem_pain") && category) {
-    const fallback = boundedPlanEntry(
-      "problem_pain",
-      `${category} AND (struggling OR manual OR spreadsheet OR nightmare OR problem OR issue OR help)`,
-      categories[0],
-    );
-    if (fallback) deduped.push(fallback);
-  }
-  if (!lanes.has("direct_buying_intent") && brand) {
-    const fallback = boundedPlanEntry(
-      "direct_buying_intent",
-      `${brand} AND ("looking for" OR "need a" OR recommend OR alternative)`,
+    push(
+      "pain",
+      `${brand} AND (frustrated OR problem OR issue OR missing OR difficult OR expensive OR "doesn't work")`,
       brandTerms[0],
     );
-    if (fallback) deduped.push(fallback);
   }
 
-  return deduped.slice(0, 8);
+  /*
+   * WORKAROUNDS
+   *
+   * Workaround hypotheses are allowed to be broad, but connect them to a small
+   * OR-context rather than requiring an entire formal JTBD phrase.
+   */
+  for (const seed of workarounds.slice(0, 6)) {
+    const workaround = manifestationExpression(seed);
+    if (!workaround) continue;
+
+    push(
+      "workaround",
+      `${workaround}${context ? ` AND ${context}` : ""}`,
+      seed,
+    );
+  }
+
+  /*
+   * SWITCHING
+   *
+   * Only verified direct/alternative competitors reach this request from the
+   * workflow.
+   */
+  for (const competitorName of competitors.slice(0, 4)) {
+    const competitor = redditSearchAtom(competitorName);
+    if (!competitor) continue;
+
+    push(
+      "switching",
+      `${competitor} AND (alternative OR alternatives OR switching OR switch OR replace OR replaced OR frustrated OR expensive OR overkill OR "moving away" OR "moved away")`,
+      competitorName,
+    );
+  }
+
+  /*
+   * TIMING
+   *
+   * Keep only the strongest part of the trigger and connect it to broad
+   * business context. Do not search an AI-written sentence verbatim.
+   */
+  for (const seed of triggers.slice(0, 6)) {
+    const trigger = triggerExpression(seed);
+    if (!trigger) continue;
+
+    push(
+      "timing",
+      `${trigger}${context ? ` AND ${context}` : ""}`,
+      seed,
+    );
+  }
+
+  const quotas: Array<[DemandLane, number]> = [
+    ["explicit_demand", 2],
+    ["pain", 2],
+    ["workaround", 2],
+    ["switching", 1],
+    ["timing", 1],
+  ];
+
+  const selected: RedditSearchPlanEntry[] = [];
+  const selectedKeys = new Set<string>();
+
+  const selectEntry = (entry: RedditSearchPlanEntry | undefined): boolean => {
+    if (!entry) return false;
+    const key = `${entry.lane}:${normalizeSearchText(entry.query)}`;
+    if (selectedKeys.has(key)) return false;
+    selectedKeys.add(key);
+    selected.push(entry);
+    return true;
+  };
+
+  for (const [lane, quota] of quotas) {
+    for (const entry of pools[lane].slice(0, quota)) selectEntry(entry);
+  }
+
+  const laneOrder: DemandLane[] = [
+    "explicit_demand",
+    "pain",
+    "workaround",
+    "switching",
+    "timing",
+  ];
+
+  while (selected.length < 8) {
+    let added = false;
+
+    for (const lane of laneOrder) {
+      const next = pools[lane].find((entry) => {
+        const key = `${entry.lane}:${normalizeSearchText(entry.query)}`;
+        return !selectedKeys.has(key);
+      });
+
+      if (selectEntry(next)) {
+        added = true;
+        if (selected.length >= 8) break;
+      }
+    }
+
+    if (!added) break;
+  }
+
+  return selected.slice(0, 8);
 }
 
 /** Compatibility helper for tests/callers that only need query strings. */
@@ -382,21 +557,60 @@ function searchPlanMatches(
   plan: readonly RedditSearchPlanEntry[],
 ): RedditSearchPlanEntry[] {
   const text = normalizeSearchText(`${title ?? ""}\n${body}`);
+
   const scored = plan.flatMap((entry) => {
-    const quoted = [...entry.query.matchAll(/"([^"]+)"/g)]
-      .map((match) => normalizeSearchText(match[1] ?? ""))
-      .filter(Boolean);
-    const terms = normalizeSearchText(entry.query.replace(/\b(?:AND|OR|NOT)\b/gi, " "))
+    const seed = normalizeSearchText(entry.seed ?? "");
+    if (!seed) return [];
+
+    const seedTokens = seed
       .split(" ")
-      .filter((term) => term.length >= 4 && !PROBLEM_TOKEN_STOP_WORDS.has(term));
-    const quotedMatches = quoted.filter((phrase) => text.includes(phrase)).length;
-    const tokenMatches = terms.filter((term) => text.includes(term)).length;
-    const score = quotedMatches * 3 + tokenMatches;
-    return score >= 2 ? [{ entry, score }] : [];
+      .filter(
+        (token) =>
+          token.length >= 3 &&
+          !PROBLEM_TOKEN_STOP_WORDS.has(token),
+      )
+      .slice(0, 4);
+
+    if (seedTokens.length === 0) return [];
+
+    let seedScore = 0;
+
+    if (seed.length >= 4 && text.includes(seed)) {
+      seedScore = seedTokens.length + 4;
+    } else {
+      const matched = seedTokens.filter((token) => text.includes(token)).length;
+      const required = seedTokens.length <= 2 ? seedTokens.length : 2;
+      if (matched < required) return [];
+      seedScore = matched;
+    }
+
+    const signalBoost =
+      entry.lane === "explicit_demand" &&
+      /\b(?:looking for|need help|recommend|recommendation|alternative|which tool|what do you use)\b/.test(text)
+        ? 2
+        : entry.lane === "switching" &&
+            /\b(?:alternative|switch|switching|replace|moving away|frustrated|expensive|overkill)\b/.test(text)
+          ? 2
+          : entry.lane === "pain" &&
+              /\b(?:missed|buried|scattered|struggl|frustrat|messy|manual|difficult|overwhelm|nightmare)\w*\b/.test(text)
+            ? 1
+            : entry.lane === "workaround" &&
+                /\b(?:spreadsheet|email|manual|workaround|copy paste)\w*\b/.test(text)
+              ? 1
+              : entry.lane === "timing" &&
+                  /\b(?:grow|grew|growth|outgrown|outgrowing|scal|more clients|new clients)\w*\b/.test(text)
+                ? 1
+                : 0;
+
+    return [{ entry, score: seedScore + signalBoost }];
   });
+
   if (scored.length === 0) return [];
+
   const best = Math.max(...scored.map((row) => row.score));
-  return scored.filter((row) => row.score >= Math.max(2, best - 2)).map((row) => row.entry);
+  return scored
+    .filter((row) => row.score >= Math.max(1, best - 2))
+    .map((row) => row.entry);
 }
 
 function subredditFromItem(item: ApifyRedditItem, permalink: string | undefined): string {
@@ -789,6 +1003,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
       startEndpoint.searchParams.set("waitForFinish", "60");
       startEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1_000)));
       startEndpoint.searchParams.set("maxItems", String(Math.min(100, actorInput.maxItems)));
+      startEndpoint.searchParams.set("maxTotalChargeUsd", "0.50");
 
       const startResponse = await this.fetchImpl(startEndpoint, {
         method: "POST",
@@ -1295,7 +1510,7 @@ export function createRedditProviderFromEnv(
       maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 50, 1, 100),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
-      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 260_000, 20_000, 290_000),
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
       timeRange: configuredTimeRange as "day" | "week" | "month" | "year" | "all",
     });
   }

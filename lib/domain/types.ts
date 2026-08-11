@@ -67,6 +67,21 @@ export interface BusinessUnderstanding {
   productCategory: CitedValue<string>;
   targetAudiences: CitedValue<AudienceSegment[]>;
   problemsSolved: CitedValue<string[]>;
+  /**
+   * Functional JTBD hypotheses inferred from verified website evidence.
+   * These are retrieval/interpretation hypotheses, not verbatim customer claims.
+   */
+  jobsToBeDone?: CitedValue<string[]>;
+  /**
+   * Likely current alternatives or manual workarounds suggested by website evidence.
+   * Empty when the website does not support a responsible inference.
+   */
+  likelyWorkarounds?: CitedValue<string[]>;
+  /**
+   * Events or transitions that could make the verified job urgent now.
+   * Empty when the website does not support a responsible inference.
+   */
+  triggerEvents?: CitedValue<string[]>;
   features: CitedValue<ProductFeature[]>;
   competitors: CitedValue<CompetitorReference[]>;
   irrelevantTopics: CitedValue<string[]>;
@@ -90,6 +105,12 @@ export type RedditConversationKind = "post" | "comment";
 export type RedditSourceMode = "live" | "mock" | "apify-test";
 
 export type RedditSearchLane =
+  | "explicit_demand"
+  | "pain"
+  | "workaround"
+  | "switching"
+  | "timing"
+  // Legacy lane names remain accepted for previously stored scan records.
   | "direct_buying_intent"
   | "problem_pain"
   | "competitor_switching"

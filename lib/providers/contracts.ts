@@ -143,6 +143,12 @@ export interface RedditSearchQueries {
   /** Short generic categories buyers use, such as "project management software". */
   productCategories?: string[];
   customerProblems: string[];
+  /** Source-grounded functional jobs that can seed demand-language searches. */
+  jobsToBeDone?: string[];
+  /** Source-grounded workaround hypotheses such as email, spreadsheets or manual steps. */
+  workarounds?: string[];
+  /** Source-grounded events that may create present-tense buying urgency. */
+  triggerEvents?: string[];
   buyerIntent: string[];
   competitors: string[];
   excludedTerms: string[];

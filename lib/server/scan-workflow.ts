@@ -57,7 +57,7 @@ const STAGES: ScanStage[] = [
     id: "discovery",
     label: "Searching recent Reddit conversations",
     status: "pending",
-    detail: "Searching explicit demand, pain, switching, recommendation and brand lanes.",
+    detail: "Searching explicit demand, pain, workaround, switching and timing signals.",
   },
   {
     id: "triage",
@@ -196,6 +196,10 @@ function conservativeProfile(
     productCategory: pageTitles[0] ?? name,
     targetAudience: [],
     problemsSolved: problemSentences,
+    jobsToBeDone: [],
+    likelyWorkarounds: [],
+    triggerEvents: [],
+    customerProblemLanguage: problemSentences,
     features: [...new Set(pageTitles)].slice(0, 6),
     competitors: [],
     irrelevantTopics: [],
@@ -227,6 +231,9 @@ function toBusinessUnderstanding(input: {
       profile.targetAudience.map((audience) => ({ name: audience, description: audience, pains: [] })),
     ),
     problemsSolved: cited(profile.problemsSolved),
+    jobsToBeDone: cited(profile.jobsToBeDone ?? []),
+    likelyWorkarounds: cited(profile.likelyWorkarounds ?? []),
+    triggerEvents: cited(profile.triggerEvents ?? []),
     features: cited(profile.features.map((feature) => ({ name: feature, description: feature, verified: true }))),
     competitors: cited(profile.competitors.map((competitor) => ({
       name: competitor,
@@ -236,9 +243,13 @@ function toBusinessUnderstanding(input: {
     irrelevantTopics: cited(profile.irrelevantTopics),
     productTerms: cited(productTerms),
     brandTerms: cited(profile.brandTerms?.length ? profile.brandTerms : [profile.name]),
-    customerProblemLanguage: cited(profile.problemsSolved),
+    customerProblemLanguage: cited(
+      profile.customerProblemLanguage?.length
+        ? profile.customerProblemLanguage
+        : profile.problemsSolved,
+    ),
     ambiguityRisks: cited(profile.ambiguityRisks ?? []),
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -251,6 +262,10 @@ function profileFromBusiness(business: BusinessUnderstanding): ScanBusinessProfi
     productCategory: business.productCategory.value,
     targetAudience: business.targetAudiences.value.map((audience) => audience.name),
     problemsSolved: business.problemsSolved.value,
+    jobsToBeDone: business.jobsToBeDone?.value ?? [],
+    likelyWorkarounds: business.likelyWorkarounds?.value ?? [],
+    triggerEvents: business.triggerEvents?.value ?? [],
+    customerProblemLanguage: business.customerProblemLanguage.value,
     features: business.features.value.filter((feature) => feature.verified).map((feature) => feature.name),
     competitors: business.competitors.value
       .filter((competitor) => competitor.verification !== "unverified_hypothesis")
@@ -264,6 +279,9 @@ function profileFromBusiness(business: BusinessUnderstanding): ScanBusinessProfi
       ...business.productCategory.provenanceIds,
       ...business.targetAudiences.provenanceIds,
       ...business.problemsSolved.provenanceIds,
+      ...(business.jobsToBeDone?.provenanceIds ?? []),
+      ...(business.likelyWorkarounds?.provenanceIds ?? []),
+      ...(business.triggerEvents?.provenanceIds ?? []),
       ...business.features.provenanceIds,
       ...business.competitors.provenanceIds,
       ...business.productTerms.provenanceIds,
@@ -575,9 +593,16 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
           business.customerProblemLanguage.value.length > 0
             ? business.customerProblemLanguage.value
             : business.problemsSolved.value,
+        jobsToBeDone: business.jobsToBeDone?.value ?? [],
+        workarounds: business.likelyWorkarounds?.value ?? [],
+        triggerEvents: business.triggerEvents?.value ?? [],
         buyerIntent: ["recommendations", "alternative", "comparing tools", "need a tool"],
         competitors: business.competitors.value
-          .filter((competitor) => competitor.verification !== "unverified_hypothesis")
+          .filter(
+            (competitor) =>
+              competitor.verification !== "unverified_hypothesis" &&
+              (competitor.relationship === "direct" || competitor.relationship === "alternative"),
+          )
           .map((competitor) => competitor.name),
         excludedTerms: business.irrelevantTopics.value,
         ambiguityRisks: business.ambiguityRisks.value,

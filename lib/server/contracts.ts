@@ -49,6 +49,11 @@ export type ScanBusinessProfile = {
   productCategory?: string;
   targetAudience: string[];
   problemsSolved: string[];
+  jobsToBeDone?: string[];
+  likelyWorkarounds?: string[];
+  triggerEvents?: string[];
+  /** Website-grounded search hypotheses, not observed customer quotations. */
+  customerProblemLanguage?: string[];
   features: string[];
   competitors: string[];
   irrelevantTopics: string[];

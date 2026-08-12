@@ -1,0 +1,148 @@
+name: Patch retrieval quality
+
+on:
+  push:
+    branches:
+      - diagnostics/basecamp-retrieval
+    paths:
+      - .github/workflows/patch-retrieval-quality.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Improve Reddit discovery recall without weakening AI triage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one match in {path}, found {count}: {old[:140]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          provider = "lib/providers/reddit.server.ts"
+          tests = "tests/apify-reddit-provider.test.mjs"
+
+          replace_once(
+              provider,
+              '''  const manifestationExpression = (value: string): string => {\n    return naturalKeywordPhrase(value, 5);\n  };''',
+              '''  const genericRetrievalTokens = new Set([\n    "app", "apps", "management", "many", "platform", "software", "system",\n    "team", "tool", "tools", "too", "work",\n  ]);\n\n  const retrievalSpecificity = (value: string): number => {\n    const tokens = problemTokens(value);\n    const distinctive = tokens.filter((token) => !genericRetrievalTokens.has(token));\n    return distinctive.length * 10 + Math.min(tokens.length, 6);\n  };\n\n  const manifestationExpression = (value: string): string => {\n    return naturalKeywordPhrase(value, 5);\n  };''',
+          )
+
+          replace_once(
+              provider,
+              '  const problems = cleanUnique(request.queries.customerProblems, 8);',
+              '  const problems = cleanUnique(request.queries.customerProblems, 8)\n    .sort((left, right) => retrievalSpecificity(right) - retrievalSpecificity(left));',
+          )
+
+          replace_once(
+              provider,
+              '''  const quotas: Array<[DemandLane, number]> = [\n    ["direct_buying_intent", 2],\n    ["problem_pain", 2],\n    ["competitor_switching", 1],\n    ["category_recommendation", 1],\n    ["brand_competitor_mentions", 1],\n    ["workaround", 1],\n    ["timing", 1],\n  ];''',
+              '''  const quotas: Array<[DemandLane, number]> = [\n    ["direct_buying_intent", 2],\n    ["problem_pain", 4],\n    ["competitor_switching", 1],\n    ["category_recommendation", 0],\n    ["brand_competitor_mentions", 0],\n    ["workaround", 1],\n    ["timing", 1],\n  ];''',
+          )
+
+          replace_once(
+              provider,
+              '''  const laneOrder: DemandLane[] = [\n    "direct_buying_intent",\n    "problem_pain",\n    "competitor_switching",\n    "category_recommendation",\n    "brand_competitor_mentions",\n    "workaround",\n    "timing",\n  ];''',
+              '''  const laneOrder: DemandLane[] = [\n    "direct_buying_intent",\n    "problem_pain",\n    "workaround",\n    "competitor_switching",\n    "timing",\n    "category_recommendation",\n    "brand_competitor_mentions",\n  ];''',
+          )
+
+          replace_once(
+              provider,
+              '  const text = normalizeSearchText(`${title ?? ""}\\n${body}`);',
+              '  const text = normalizeSearchText(`${title ?? ""}\\n${body.slice(0, 1_600)}`);',
+          )
+
+          replace_once(
+              provider,
+              '''    const required = isCompetitorLane\n      ? seedTokens.length\n      : isDemandLane\n        ? Math.min(seedTokens.length, 2)\n        : seedTokens.length <= 4\n          ? seedTokens.length\n          : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));''',
+              '''    const required = isCompetitorLane\n      ? seedTokens.length\n      : isDemandLane\n        ? seedTokens.length <= 3\n          ? seedTokens.length\n          : Math.min(seedTokens.length, 3)\n        : seedTokens.length <= 4\n          ? seedTokens.length\n          : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));''',
+          )
+
+          replace_once(
+              provider,
+              '''      if (matched < required) return [];\n      if (!isCompetitorLane && !isDemandLane && !matchesWithinWindow(seedTokens, required)) return [];\n      seedScore = matched;''',
+              '''      if (matched < required) return [];\n      if (!isCompetitorLane && !matchesWithinWindow(seedTokens, required, isDemandLane ? 30 : 18)) return [];\n      seedScore = matched;''',
+          )
+
+          replace_once(
+              provider,
+              '''  const matches = searchPlanMatches(title, body, plan);\n  if (plan.length > 0 && matches.length === 0) return { reason: "query_mismatch" };\n  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];''',
+              '''  const matches = searchPlanMatches(title, body, plan);\n  /* The Actor already returned this record from one of our searches. Local\n   * attribution is diagnostic metadata, not a semantic rejection gate. Every\n   * structurally valid recent result must reach deterministic cleaning and AI\n   * triage so a fuzzy matcher cannot silently hide real demand. */\n  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];''',
+          )
+
+          replace_once(
+              provider,
+              '''    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(30, Math.min(36, request.limit * 2)),\n    );''',
+              '''    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(30, Math.min(40, request.limit * 2)),\n    );''',
+          )
+
+          replace_once(
+              provider,
+              '    const postsPerSearch = Math.max(2, Math.min(4, Math.ceil(maxItems / searches.length)));',
+              '    const postsPerSearch = Math.max(2, Math.min(5, Math.ceil(maxItems / searches.length)));',
+          )
+
+          replace_once(
+              tests,
+              '''test("rejects observed broad-query noise while retaining concrete Basecamp demand", async () => {''',
+              '''test("keeps Actor search results for AI triage while attributing concrete Basecamp demand", async () => {''',
+          )
+
+          replace_once(
+              tests,
+              '''  assert.deepEqual(\n    result.candidates.map((candidate) => candidate.externalId).sort(),\n    ["buyingpm", "scatteredwork", "teamworkapps"],\n  );\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 3);''',
+              '''  assert.deepEqual(\n    result.candidates.map((candidate) => candidate.externalId).sort(),\n    ["alienstasks", "buyingpm", "offlineapps", "scatteredwork", "starwars", "teamworkapps"],\n  );\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);\n  for (const id of ["offlineapps", "alienstasks", "starwars"]) {\n    const candidate = result.candidates.find((item) => item.externalId === id);\n    assert.ok(candidate);\n    assert.deepEqual(candidate.discoveryLanes, []);\n    assert.deepEqual(candidate.matchedQueries, []);\n  }\n  for (const id of ["buyingpm", "scatteredwork", "teamworkapps"]) {\n    const candidate = result.candidates.find((item) => item.externalId === id);\n    assert.ok(candidate);\n    assert.ok(candidate.discoveryLanes.length > 0, id);\n  }''',
+          )
+
+          replace_once(
+              tests,
+              '''  assert.equal(result.candidates.length, 2);\n  assert.equal(result.candidates[0].externalId, "abc123");\n  assert.equal(result.candidates[0].createdAt, documentedActorItem.createdAt);\n  assert.equal(result.candidates[0].sourceMode, "apify-test");\n  assert.equal(result.candidates[1].externalId, "switch123");\n  assert.deepEqual(\n    new Set(result.candidates[1].discoveryLanes),\n    new Set(["competitor_switching", "brand_competitor_mentions"]),\n  );\n  assert.equal(result.diagnostics.fetchedCandidates, 4);\n  assert.equal(result.diagnostics.verifiedRecentCandidates, 2);\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 2);''',
+              '''  assert.equal(result.candidates.length, 4);\n  const documented = result.candidates.find((candidate) => candidate.externalId === "abc123");\n  const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");\n  const noise = result.candidates.find((candidate) => candidate.externalId === "noise123");\n  const mention = result.candidates.find((candidate) => candidate.externalId === "mention123");\n  assert.ok(documented && switching && noise && mention);\n  assert.equal(documented.createdAt, documentedActorItem.createdAt);\n  assert.equal(documented.sourceMode, "apify-test");\n  assert.deepEqual(\n    new Set(switching.discoveryLanes),\n    new Set(["competitor_switching", "brand_competitor_mentions"]),\n  );\n  assert.deepEqual(noise.discoveryLanes, []);\n  assert.deepEqual(mention.discoveryLanes, []);\n  assert.equal(result.diagnostics.fetchedCandidates, 4);\n  assert.equal(result.diagnostics.verifiedRecentCandidates, 4);\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);''',
+          )
+
+          for old, new in [
+              ('assert.equal(discovery.maxItems, 36);', 'assert.equal(discovery.maxItems, 40);'),
+              ('assert.equal(discovery.maxPostCount, 4);', 'assert.equal(discovery.maxPostCount, 5);'),
+              ('assert.equal(startCall.url.searchParams.get("maxItems"), "36");', 'assert.equal(startCall.url.searchParams.get("maxItems"), "40");'),
+          ]:
+              replace_once(tests, old, new)
+
+          # The Basecamp planner should spend its primary budget on concrete pain
+          # rather than secondary brand/category mention lanes.
+          replace_once(
+              tests,
+              '''  assert.equal(\n    plan.filter((entry) => entry.lane === "category_recommendation").length,\n    1,\n  );\n\n  assert.equal(\n    plan.filter((entry) => entry.lane === "brand_competitor_mentions").length,\n    1,\n  );''',
+              '''  assert.equal(\n    plan.filter((entry) => entry.lane === "category_recommendation").length,\n    0,\n  );\n\n  assert.equal(\n    plan.filter((entry) => entry.lane === "brand_competitor_mentions").length,\n    0,\n  );\n  assert.equal(\n    plan.filter((entry) => entry.lane === "problem_pain").length,\n    3,\n  );''',
+          )
+          PY
+
+          git diff --check
+          npm ci
+          node --test tests/apify-reddit-provider.test.mjs
+          npm run build
+          npm run lint
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git commit -m "Improve Reddit discovery recall and attribution"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

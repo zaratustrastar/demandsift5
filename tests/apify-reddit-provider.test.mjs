@@ -454,7 +454,7 @@ test("discovery is lightweight and does not perform enrichment", async () => {
 
   const result = await provider.discover({
     ...searchRequest,
-    since: new Date(Date.now() - (6 * 86_400_000)).toISOString(),
+    since: new Date(Date.parse(documentedActorItem.createdAt) - (6 * 86_400_000)).toISOString(),
   });
 
   assert.equal(calls.length, 2);

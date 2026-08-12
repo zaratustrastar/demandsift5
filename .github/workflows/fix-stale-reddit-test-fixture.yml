@@ -1,0 +1,42 @@
+name: Fix stale Reddit test fixture
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/fix-stale-reddit-test-fixture.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - name: Make discovery fixture time-stable
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('tests/apify-reddit-provider.test.mjs')
+          text = path.read_text()
+          old = '    since: new Date(Date.now() - (6 * 86_400_000)).toISOString(),'
+          new = '    since: new Date(Date.parse(documentedActorItem.createdAt) - (6 * 86_400_000)).toISOString(),'
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected one stale fixture expression, found {count}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          node --test tests/apify-reddit-provider.test.mjs
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/apify-reddit-provider.test.mjs
+          git commit -m "Stabilize Reddit discovery test fixture"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

@@ -6,6 +6,7 @@ on:
       - main
       - feature/reddit-intelligence-pipeline
   pull_request:
+  workflow_dispatch:
 
 jobs:
   source-tests:

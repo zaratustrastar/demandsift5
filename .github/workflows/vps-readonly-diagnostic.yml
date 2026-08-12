@@ -1,4 +1,4 @@
-name: VPS read-only Docker permission preflight
+name: VPS sanitized Apify diagnostic
 
 on:
   workflow_dispatch:
@@ -14,43 +14,62 @@ permissions:
 jobs:
   inspect:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - name: Inspect deployment identity and Docker access
+      - name: Inspect latest Apify actor runs without exposing credentials
         shell: bash
         run: |
-          set -u
-          echo "inspection=after-wrapper-install"
-          echo "identity=$(id -un)"
-          echo "groups=$(id -Gn)"
-          echo "host=$(hostname)"
+          set -Eeuo pipefail
+          token_file=/home/demandsift-dev/actions-runner/.diagnostic-secrets/apify-token
+          test -s "$token_file"
+          token="$(tr -d '\r\n' < "$token_file")"
+          umask 077
+          runs_json="$(mktemp)"
+          trap 'rm -f "$runs_json" "$input_json" "$run_log"' EXIT
+          input_json="$(mktemp)"
+          run_log="$(mktemp)"
 
-          for directory in /opt/demandsift5-pr1 /opt/demandsift5; do
-            if [ -d "$directory" ]; then
-              stat -c 'directory=%n owner=%U group=%G mode=%a' "$directory"
-              git -C "$directory" status --short --branch 2>&1 || true
-              git -C "$directory" log -1 --format='head=%H subject=%s' 2>&1 || true
-            else
-              echo "directory=$directory absent"
-            fi
-          done
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $token" \
+            "https://api.apify.com/v2/acts/trudax~reddit-scraper-lite/runs?limit=8&desc=1" \
+            > "$runs_json"
 
-          for env_file in /opt/demandsift5-pr1/deploy/vps.env /opt/demandsift5/deploy/vps.env; do
-            if [ -e "$env_file" ]; then
-              stat -c 'env_file=%n owner=%U group=%G mode=%a bytes=%s' "$env_file"
-            fi
-          done
+          mapfile -t run_ids < <(python3 - "$runs_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          items = payload.get("data", {}).get("items", [])
+          for item in items:
+              print(item.get("id", ""))
+              print("RUN", item.get("id"), item.get("status"), item.get("statusMessage", ""),
+                    item.get("startedAt"), item.get("finishedAt"))
+          PY
+          )
 
-          echo "docker_binary=$(command -v docker || true)"
-          docker version --format 'docker_client={{.Client.Version}} server={{.Server.Version}}' 2>&1 || true
-          docker ps --format 'container={{.Names}} status={{.Status}} project={{.Label "com.docker.compose.project"}} service={{.Label "com.docker.compose.service"}}' 2>&1 || true
-          sudo -n -l 2>&1 || true
+          latest_id="$(python3 - "$runs_json" <<'PY'
+          import json, sys
+          items = json.load(open(sys.argv[1])).get("data", {}).get("items", [])
+          print(items[0].get("id", "") if items else "")
+          PY
+          )"
+          test -n "$latest_id"
 
-          for installed_file in /usr/local/sbin/demandsift-release /etc/sudoers.d/demandsift-release; do
-            if [ -e "$installed_file" ]; then
-              stat -c 'installed_file=%n owner=%U group=%G mode=%a bytes=%s' "$installed_file"
-            else
-              echo "installed_file=$installed_file absent"
-            fi
-          done
-          sudo -n /usr/local/sbin/demandsift-release inspect 2>&1 || true
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $token" \
+            "https://api.apify.com/v2/actor-runs/$latest_id/input" \
+            > "$input_json"
+          python3 - "$input_json" <<'PY'
+          import json, sys
+          value = json.load(open(sys.argv[1]))
+          safe = {key: value.get(key) for key in (
+              "startUrls", "maxItems", "maxPostCount", "maxComments",
+              "skipComments", "ignoreStartUrls"
+          ) if key in value}
+          print("LATEST_INPUT", json.dumps(safe, separators=(",", ":")))
+          PY
+
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $token" \
+            "https://api.apify.com/v2/logs/$latest_id" \
+            > "$run_log"
+          echo "LATEST_LOG_RELEVANT"
+          grep -Ei 'error|invalid input|found starturl|status message|dataset|finished' "$run_log" | tail -n 80 || true

@@ -375,6 +375,26 @@ test("reddit enrichment failure is terminal and cannot restart discovery", async
   assert.equal(disposition.finishedAt, NOW);
 });
 
+test("reddit discovery failure is terminal and cannot repeat the paid crawl", () => {
+  const executorError = new WorkerExecutorHttpError(502, JSON.stringify({
+    error: {
+      code: "reddit_discovery_failed",
+      message: "The Apify Reddit test run timed out.",
+    },
+  }));
+
+  const disposition = jobFailureDisposition(
+    { attempts: 1, max_attempts: 5 },
+    executorError,
+    NOW,
+  );
+  assert.equal(executorError.code, "reddit_discovery_failed");
+  assert.equal(disposition.retryable, false);
+  assert.equal(disposition.terminal, true);
+  assert.equal(disposition.status, "failed");
+  assert.equal(disposition.finishedAt, NOW);
+});
+
 test("transient executor failures remain retryable before attempts are exhausted", () => {
   const disposition = jobFailureDisposition(
     { attempts: 1, max_attempts: 5 },

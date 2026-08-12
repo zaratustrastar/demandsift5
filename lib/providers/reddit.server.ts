@@ -1058,9 +1058,12 @@ export class ApifyRedditTestProvider implements RedditProvider {
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
-  private async runActor(actorInput: ApifyRedditActorInput): Promise<unknown[]> {
+  private async runActor(
+    actorInput: ApifyRedditActorInput,
+    timeoutMs = this.timeoutMs,
+  ): Promise<unknown[]> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const headers = {
       accept: "application/json",
       authorization: `Bearer ${this.token}`,
@@ -1103,7 +1106,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
         "https://api.apify.com",
       );
       startEndpoint.searchParams.set("waitForFinish", "60");
-      startEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1_000)));
+      startEndpoint.searchParams.set("timeout", String(Math.ceil(timeoutMs / 1_000)));
       startEndpoint.searchParams.set("maxItems", String(Math.min(100, actorInput.maxItems)));
       startEndpoint.searchParams.set("maxTotalChargeUsd", "0.50");
 
@@ -1188,12 +1191,12 @@ export class ApifyRedditTestProvider implements RedditProvider {
     const searches = searchPlan.map((entry) => entry.query);
     const maxItems = Math.min(
       this.maximumItems,
-      Math.max(30, Math.min(100, request.limit * 2)),
+      Math.max(30, Math.min(36, request.limit * 2)),
     );
     const subreddit = request.subreddits?.length === 1
       ? request.subreddits[0]?.replace(/^r\//i, "").trim()
       : undefined;
-    const postsPerSearch = Math.max(2, Math.ceil(maxItems / searches.length));
+    const postsPerSearch = Math.max(2, Math.min(4, Math.ceil(maxItems / searches.length)));
     const discoveryInput: ApifySearchActorInput = {
       searches,
       ignoreStartUrls: true,
@@ -1226,7 +1229,8 @@ export class ApifyRedditTestProvider implements RedditProvider {
         : {}),
     };
 
-    const payload = await this.runActor(discoveryInput);
+    const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 480_000));
+    const payload = await this.runActor(discoveryInput, discoveryTimeoutMs);
     const rejectedByReason = emptyProviderRejections();
     const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
       ? Date.parse(request.since)

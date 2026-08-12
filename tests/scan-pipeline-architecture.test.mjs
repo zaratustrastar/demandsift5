@@ -43,6 +43,15 @@ test("categorical lead status is checked before ranking is calculated", () => {
   assert.ok(leadDecision < ranking);
 });
 
+test("paid Reddit discovery failures surface a terminal machine-readable error", () => {
+  const discovery = position("redditProvider.discover(");
+  const errorCode = source.indexOf('"reddit_discovery_failed"', discovery);
+  const cleaning = source.indexOf("cleanDiscoveryCandidates(", discovery);
+  assert.ok(errorCode > discovery);
+  assert.ok(cleaning > errorCode, "discovery failure must be classified before local cleaning starts");
+  assert.ok(source.includes("Reddit discovery failed: ${message}"));
+});
+
 test("requested enrichment with zero usable conversations fails explicitly", () => {
   const guard = position("selectedForEnrichment.length > 0 && enrichment.conversations.length === 0");
   const errorCode = position('"reddit_enrichment_failed"');

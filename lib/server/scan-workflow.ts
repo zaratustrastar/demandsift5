@@ -638,6 +638,13 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       },
       limit: 25,
       since,
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : "Unknown Reddit discovery failure.";
+      throw new ApiError(
+        `Reddit discovery failed: ${message}`,
+        502,
+        "reddit_discovery_failed",
+      );
     });
     const cleaned = cleanDiscoveryCandidates({
       candidates: discovery.candidates,

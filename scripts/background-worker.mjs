@@ -624,6 +624,7 @@ async function completeJob(sql, job) {
 }
 
 const TERMINAL_SCAN_ERROR_CODES = new Set([
+  "reddit_discovery_failed",
   "reddit_enrichment_failed",
 ]);
 

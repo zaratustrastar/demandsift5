@@ -484,6 +484,10 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   assert.equal(discovery.skipComments, true);
   assert.equal(discovery.includeMediaLinks, false);
   assert.equal(discovery.maxComments, 0);
+  assert.equal(discovery.maxItems, 36);
+  assert.equal(discovery.maxPostCount, 4);
+  assert.equal(startCall.url.searchParams.get("maxItems"), "36");
+  assert.equal(startCall.url.searchParams.get("timeout"), "480");
   assert.equal(discovery.time, "week");
   assert.equal(Object.hasOwn(discovery, "postDateLimit"), false);
   assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);

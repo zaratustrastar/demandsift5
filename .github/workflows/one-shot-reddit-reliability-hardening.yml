@@ -1,0 +1,120 @@
+name: One-shot Reddit reliability hardening
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/one-shot-reddit-reliability-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Harden Reddit discovery timeout and retry behavior
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one match in {path}, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Discovery should have more time than selective enrichment, but do less
+          # actor work per run so normal scans remain inside the worker budget.
+          replace_once(
+              "lib/providers/reddit.server.ts",
+              "  private async runActor(actorInput: ApifyRedditActorInput): Promise<unknown[]> {\n    const controller = new AbortController();\n    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);",
+              "  private async runActor(\n    actorInput: ApifyRedditActorInput,\n    timeoutMs = this.timeoutMs,\n  ): Promise<unknown[]> {\n    const controller = new AbortController();\n    const timeout = setTimeout(() => controller.abort(), timeoutMs);",
+          )
+          replace_once(
+              "lib/providers/reddit.server.ts",
+              '      startEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1_000)));',
+              '      startEndpoint.searchParams.set("timeout", String(Math.ceil(timeoutMs / 1_000)));',
+          )
+          replace_once(
+              "lib/providers/reddit.server.ts",
+              '''    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(30, Math.min(100, request.limit * 2)),\n    );''',
+              '''    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(30, Math.min(36, request.limit * 2)),\n    );''',
+          )
+          replace_once(
+              "lib/providers/reddit.server.ts",
+              '    const postsPerSearch = Math.max(2, Math.ceil(maxItems / searches.length));',
+              '    const postsPerSearch = Math.max(2, Math.min(4, Math.ceil(maxItems / searches.length)));',
+          )
+          replace_once(
+              "lib/providers/reddit.server.ts",
+              '    const payload = await this.runActor(discoveryInput);',
+              '    const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 480_000));\n    const payload = await this.runActor(discoveryInput, discoveryTimeoutMs);',
+          )
+
+          # Provider failures at the paid discovery boundary are terminal for the
+          # whole scan job. Retrying the entire scan only repeats the paid crawl.
+          replace_once(
+              "lib/server/scan-workflow.ts",
+              '''      limit: 25,\n      since,\n    });\n    const cleaned = cleanDiscoveryCandidates({''',
+              '''      limit: 25,\n      since,\n    }).catch((error) => {\n      const message = error instanceof Error ? error.message : "Unknown Reddit discovery failure.";\n      throw new ApiError(\n        `Reddit discovery failed: ${message}`,\n        502,\n        "reddit_discovery_failed",\n      );\n    });\n    const cleaned = cleanDiscoveryCandidates({''',
+          )
+          replace_once(
+              "scripts/background-worker.mjs",
+              '''const TERMINAL_SCAN_ERROR_CODES = new Set([\n  "reddit_enrichment_failed",\n]);''',
+              '''const TERMINAL_SCAN_ERROR_CODES = new Set([\n  "reddit_discovery_failed",\n  "reddit_enrichment_failed",\n]);''',
+          )
+
+          # Provider regression: the real Basecamp crawl timed out with 9 x ~5
+          # post pages. Keep the lane coverage but bound the actor to 36 / 4 and
+          # give discovery an 8-minute provider window.
+          replace_once(
+              "tests/apify-reddit-provider.test.mjs",
+              '''  assert.equal(discovery.maxComments, 0);\n  assert.equal(discovery.time, "week");''',
+              '''  assert.equal(discovery.maxComments, 0);\n  assert.equal(discovery.maxItems, 36);\n  assert.equal(discovery.maxPostCount, 4);\n  assert.equal(startCall.url.searchParams.get("maxItems"), "36");\n  assert.equal(startCall.url.searchParams.get("timeout"), "480");\n  assert.equal(discovery.time, "week");''',
+          )
+
+          replace_once(
+              "tests/background-worker-monitoring.test.mjs",
+              '''test("transient executor failures remain retryable before attempts are exhausted", () => {''',
+              '''test("reddit discovery failure is terminal and cannot repeat the paid crawl", () => {\n  const executorError = new WorkerExecutorHttpError(502, JSON.stringify({\n    error: {\n      code: "reddit_discovery_failed",\n      message: "The Apify Reddit test run timed out.",\n    },\n  }));\n\n  const disposition = jobFailureDisposition(\n    { attempts: 1, max_attempts: 5 },\n    executorError,\n    NOW,\n  );\n  assert.equal(executorError.code, "reddit_discovery_failed");\n  assert.equal(disposition.retryable, false);\n  assert.equal(disposition.terminal, true);\n  assert.equal(disposition.status, "failed");\n  assert.equal(disposition.finishedAt, NOW);\n});\n\ntest("transient executor failures remain retryable before attempts are exhausted", () => {''',
+          )
+
+          replace_once(
+              "tests/scan-pipeline-architecture.test.mjs",
+              '''test("requested enrichment with zero usable conversations fails explicitly", () => {''',
+              '''test("paid Reddit discovery failures surface a terminal machine-readable error", () => {\n  const discovery = position("redditProvider.discover(");\n  const errorCode = source.indexOf('"reddit_discovery_failed"', discovery);\n  const cleaning = source.indexOf("cleanDiscoveryCandidates(", discovery);\n  assert.ok(errorCode > discovery);\n  assert.ok(cleaning > errorCode, "discovery failure must be classified before local cleaning starts");\n  assert.ok(source.includes("Reddit discovery failed: ${message}"));\n});\n\ntest("requested enrichment with zero usable conversations fails explicitly", () => {''',
+          )
+          PY
+
+          git diff --check
+          npm ci
+          node --test \
+            tests/apify-reddit-provider.test.mjs \
+            tests/background-worker-monitoring.test.mjs \
+            tests/scan-pipeline-architecture.test.mjs
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            lib/providers/reddit.server.ts \
+            lib/server/scan-workflow.ts \
+            scripts/background-worker.mjs \
+            tests/apify-reddit-provider.test.mjs \
+            tests/background-worker-monitoring.test.mjs \
+            tests/scan-pipeline-architecture.test.mjs
+          git commit -m "Harden Reddit discovery reliability"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

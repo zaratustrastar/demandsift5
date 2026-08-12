@@ -1324,6 +1324,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
       payload = await this.runActor(input);
     } catch (error) {
       console.error("Apify Reddit thread enrichment failed", error);
+      const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";
       return {
         conversations: [],
         sourceMode: this.sourceMode,
@@ -1332,20 +1333,25 @@ export class ApifyRedditTestProvider implements RedditProvider {
           enriched: 0,
           failed: candidates.length,
           fallbackUsed: 0,
+          failureReason: `actor_error:${message.slice(0, 500)}`,
         },
       };
     }
 
     let failed = 0;
+    let unmatched = 0;
+    let invalidConversation = 0;
     const conversations = candidates.flatMap((candidate) => {
       const enriched = enrichedItemForCandidate(candidate, payload);
       if (!enriched) {
         failed += 1;
+        unmatched += 1;
         return [];
       }
       const conversation = enrichedConversation(candidate, enriched, payload, `apify:${this.actorId}`);
       if (!conversation) {
         failed += 1;
+        invalidConversation += 1;
         return [];
       }
       return [conversation];
@@ -1358,6 +1364,12 @@ export class ApifyRedditTestProvider implements RedditProvider {
         enriched: conversations.length,
         failed,
         fallbackUsed: 0,
+        ...(failed > 0
+          ? {
+              failureReason:
+                `actor_succeeded_mapping_failure:unmatched=${unmatched};invalid=${invalidConversation};payload_items=${payload.length}`,
+            }
+          : {}),
       },
     };
   }

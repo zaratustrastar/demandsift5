@@ -786,6 +786,72 @@ test("enrichment failure is recorded and never silently promoted", async () => {
   assert.equal(result.diagnostics.requested, 1);
   assert.equal(result.diagnostics.enriched, 0);
   assert.equal(result.diagnostics.failed, 1);
+  assert.match(result.diagnostics.failureReason, /^actor_error:.*HTTP 503/i);
+});
+
+test("enrichment reports actor-success mapping failures without inventing context", async () => {
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token: "private-apify-token",
+    fetchImpl: async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        return new Response(JSON.stringify({
+          data: {
+            id: "run-mapping-failure",
+            status: "SUCCEEDED",
+            defaultDatasetId: "dataset-mapping-failure",
+          },
+        }), { status: 201 });
+      }
+      if (parsedUrl.pathname.includes("/datasets/dataset-mapping-failure/items")) {
+        return new Response(JSON.stringify([{
+          ...documentedActorItem,
+          id: "t3_different",
+          parsedId: "different",
+          url: "https://www.reddit.com/r/SaaS/comments/different/different_thread/",
+        }]), { status: 200 });
+      }
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  const candidate = {
+    provider: "apify-test",
+    sourceMode: "apify-test",
+    externalId: "abc123",
+    kind: "post",
+    subreddit: "SaaS",
+    title: documentedActorItem.title,
+    body: documentedActorItem.body,
+    author: documentedActorItem.username,
+    permalink: documentedActorItem.url,
+    createdAt: documentedActorItem.createdAt,
+    metrics: { score: 21, comments: 14 },
+    matchedQueries: ["demand intelligence recommendations"],
+    discoveryLanes: ["direct_buying_intent"],
+    provenance: {
+      id: "reddit_apify_abc123",
+      kind: "reddit",
+      provider: "apify-test",
+      providerExternalId: "abc123",
+      url: documentedActorItem.url,
+      title: documentedActorItem.title,
+      excerpt: documentedActorItem.body.slice(0, 280),
+      contentHash: "hash-abc123",
+      observedAt: "2026-08-06T12:31:00.000Z",
+      isMock: false,
+      metadata: { testOnly: true },
+    },
+  };
+
+  const result = await provider.enrich({ candidates: [candidate] });
+  assert.deepEqual(result.conversations, []);
+  assert.equal(result.diagnostics.failed, 1);
+  assert.match(
+    result.diagnostics.failureReason,
+    /^actor_succeeded_mapping_failure:unmatched=1;invalid=0;payload_items=1$/,
+  );
 });
 
 test("controlled live enrichment probe opens and maps one selected thread", {

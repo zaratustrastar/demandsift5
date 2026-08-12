@@ -726,8 +726,11 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     });
     if (selectedForEnrichment.length > 0 && enrichment.conversations.length === 0) {
       const failed = Math.max(enrichment.diagnostics.failed, selectedForEnrichment.length);
+      const technicalReason = enrichment.diagnostics.failureReason
+        ? ` Technical reason: ${enrichment.diagnostics.failureReason}`
+        : "";
       throw new ApiError(
-        `Reddit enrichment failed: selected ${selectedForEnrichment.length}, enriched 0, failed ${failed}.`,
+        `Reddit enrichment failed: selected ${selectedForEnrichment.length}, enriched 0, failed ${failed}.${technicalReason}`,
         502,
         "reddit_enrichment_failed",
       );

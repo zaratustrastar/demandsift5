@@ -209,6 +209,8 @@ export interface RedditEnrichmentResponse {
     enriched: number;
     failed: number;
     fallbackUsed: number;
+    /** Sanitized provider/mapping reason; never contains credentials or raw Reddit content. */
+    failureReason?: string;
   };
 }
 

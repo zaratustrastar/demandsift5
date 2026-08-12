@@ -23,30 +23,30 @@ jobs:
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0=safe.directory
           export GIT_CONFIG_VALUE_0="$APP"
+          cd "$APP"
           echo "whoami=$(whoami)"
           echo "hostname=$(hostname)"
-          echo "app_dir=$APP"
-          if [ ! -d "$APP/.git" ] && [ ! -f "$APP/.git" ]; then
-            echo "app_git_missing=true"
-            exit 2
-          fi
-          cd "$APP"
-          echo "--- git ---"
+          echo "--- checkout ---"
           git status --short
-          git branch --show-current
-          git rev-parse HEAD
-          git log -n 5 --oneline --decorate
-          git worktree list --porcelain | sed -E 's#(https?://)[^/@]+@#\1REDACTED@#g'
+          echo "local_head=$(git rev-parse HEAD)"
+          git fetch --quiet origin feature/reddit-intelligence-pipeline
+          echo "remote_head=$(git rev-parse FETCH_HEAD)"
+          echo "ahead_behind_local_vs_remote=$(git rev-list --left-right --count HEAD...FETCH_HEAD)"
+          echo "dirty_stat_vs_remote:"
+          git diff --stat FETCH_HEAD -- . ':!deploy/vps.env' || true
+          echo "--- sudo/docker capability ---"
+          if sudo -n true 2>/dev/null; then
+            echo "passwordless_sudo=true"
+            sudo -n docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+            echo "compose_projects:"
+            sudo -n docker compose ls || true
+            echo "demand_images:"
+            sudo -n docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' | grep -Ei 'demandsift|threadline' | head -n 30 || true
+          else
+            echo "passwordless_sudo=false"
+          fi
           echo "--- deploy files ---"
           find . -maxdepth 2 -type f \( -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' -o -name 'compose*.yml' -o -name 'compose*.yaml' -o -name 'Dockerfile*' \) -print | sort
-          echo "--- containers ---"
-          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' || true
-          echo "--- compose projects ---"
-          docker compose ls || true
-          echo "--- recent DemandSift images ---"
-          docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' | grep -Ei 'demandsift|threadline' | head -n 30 || true
-          echo "--- listeners ---"
-          ss -lnt | head -n 40 || true
           echo "--- resource headroom ---"
           df -h / "$APP" | tail -n +2
           free -h

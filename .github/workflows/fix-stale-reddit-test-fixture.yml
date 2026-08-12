@@ -25,6 +25,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # Keep this fixture anchored to the documented actor timestamp so the test does not expire with wall-clock time.
           python3 <<'PY'
           from pathlib import Path
           path = Path('tests/apify-reddit-provider.test.mjs')

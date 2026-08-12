@@ -4,9 +4,12 @@ on:
   push:
     branches:
       - main
-      - feature/reddit-intelligence-pipeline
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: demandsift-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   source-tests:
@@ -66,9 +69,22 @@ jobs:
       - verify
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Build tested candidate images
-        run: sudo -n /usr/local/sbin/demandsift-release build "${{ github.event.pull_request.head.sha }}"
+        run: sudo -n /usr/local/sbin/demandsift-release build "$EXPECTED_SHA"
+
+      - name: Confirm candidate is still the feature tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test -n "$remote_sha"
+          if [ "$remote_sha" != "$EXPECTED_SHA" ]; then
+            echo "Feature branch advanced during the Docker build; refusing stale deployment." >&2
+            exit 1
+          fi
 
       - name: Deploy candidate with rollback preserved
         run: sudo -n /usr/local/sbin/demandsift-release deploy
@@ -80,13 +96,25 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
     needs:
       - candidate-deploy
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      - name: Confirm deployed candidate is still current
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test -n "$remote_sha"
+          if [ "$remote_sha" != "$EXPECTED_SHA" ]; then
+            echo "Feature branch advanced after deployment; skipping stale acceptance scan."
+            exit 78
+          fi
+
       - name: Run one controlled Basecamp scan against production
         shell: bash
-        env:
-          APP_URL: https://demandsift.143-244-154-139.sslip.io
         run: |
           set -Eeuo pipefail
           umask 077
@@ -112,7 +140,9 @@ jobs:
           test -n "$scan_id"
           echo "acceptance_scan_id=$scan_id"
 
-          for attempt in $(seq 1 60); do
+          queued_polls=0
+          running_polls=0
+          for attempt in $(seq 1 150); do
             curl --fail-with-body --silent --show-error \
               --cookie "$cookie_jar" \
               "$APP_URL/api/scans/$scan_id" > "$latest_json"
@@ -123,7 +153,9 @@ jobs:
           print((payload.get("scan") or {}).get("status") or "")
           PY
           )"
-            echo "acceptance_poll=$attempt status=$status"
+            if [ "$status" = "queued" ]; then queued_polls=$((queued_polls + 1)); fi
+            if [ "$status" = "running" ]; then running_polls=$((running_polls + 1)); fi
+            echo "acceptance_poll=$attempt status=$status queued_polls=$queued_polls running_polls=$running_polls"
 
             if [ "$status" = "complete" ]; then
               python3 - "$latest_json" <<'PY'
@@ -166,7 +198,7 @@ jobs:
               exit 1
             fi
 
-            sleep 12
+            sleep 10
           done
 
           echo "acceptance_result=timeout" >&2

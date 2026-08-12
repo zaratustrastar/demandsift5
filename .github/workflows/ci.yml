@@ -75,3 +75,99 @@ jobs:
 
       - name: Verify healthy release
         run: sudo -n /usr/local/sbin/demandsift-release inspect
+
+  acceptance-basecamp:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
+    needs:
+      - candidate-deploy
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      - name: Run one controlled Basecamp scan against production
+        shell: bash
+        env:
+          APP_URL: https://demandsift.143-244-154-139.sslip.io
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://basecamp.com","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          print(scan.get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "acceptance_scan_id=$scan_id"
+
+          for attempt in $(seq 1 60); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id" > "$latest_json"
+
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "acceptance_poll=$attempt status=$status"
+
+            if [ "$status" = "complete" ]; then
+              python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          report = payload.get("report") or {}
+          scan = payload.get("scan") or {}
+          stored = report.get("storedCounts") or {}
+          potential = report.get("potentialCustomers") or {}
+          print("acceptance_result=complete")
+          print("website=" + str(scan.get("websiteUrl") or ""))
+          print("data_mode=" + str(report.get("dataMode") or ""))
+          print("opportunities=" + str(len(report.get("opportunities") or [])))
+          print("potential_customers=" + str(potential.get("total") or 0))
+          print("insights=" + str(len(report.get("insights") or [])))
+          print("replies=" + str(len(report.get("replies") or [])))
+          print("stored_opportunities=" + str(stored.get("opportunities") or 0))
+          print("stored_insights=" + str(stored.get("insights") or 0))
+          print("stored_competitor_signals=" + str(stored.get("competitorSignals") or 0))
+          print("stored_replies=" + str(stored.get("replies") or 0))
+          PY
+              exit 0
+            fi
+
+            if [ "$status" = "failed" ]; then
+              python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          error = payload.get("error") or {}
+          print("acceptance_result=failed")
+          print("scan_error=" + str(scan.get("error") or ""))
+          print("api_error_code=" + str(error.get("code") or ""))
+          print("api_error_message=" + str(error.get("message") or ""))
+          print("progress=" + json.dumps([
+              {"id": x.get("id"), "status": x.get("status")}
+              for x in (scan.get("progress") or [])
+          ], separators=(",", ":")))
+          PY
+              exit 1
+            fi
+
+            sleep 12
+          done
+
+          echo "acceptance_result=timeout" >&2
+          exit 1

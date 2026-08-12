@@ -20,6 +20,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           APP=/opt/demandsift5-pr1
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="$APP"
           echo "whoami=$(whoami)"
           echo "hostname=$(hostname)"
           echo "app_dir=$APP"

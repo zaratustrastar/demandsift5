@@ -1,0 +1,44 @@
+name: DemandSift CI failure capture
+
+on:
+  push:
+    branches:
+      - diagnostics/ci-failure-capture
+    paths:
+      - .github/workflows/ci-failure-capture.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Capture test failures
+        shell: bash
+        run: |
+          set +e
+          node --test tests/*.test.mjs > source-tests.txt 2>&1
+          source_status=$?
+          npm test > npm-test.txt 2>&1
+          npm_status=$?
+          printf 'source_status=%s\nnpm_status=%s\n' "$source_status" "$npm_status" > status.txt
+          exit 0
+      - name: Upload sanitized test output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-capture
+          path: |
+            source-tests.txt
+            npm-test.txt
+            status.txt
+          if-no-files-found: error
+          retention-days: 1

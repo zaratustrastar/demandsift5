@@ -1,0 +1,114 @@
+name: DemandSift trusted VPS release
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/vps-release-deploy.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Check out verified feature head in isolated runner workspace
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
+
+      - name: Build, migrate, deploy, and verify with rollback images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_CHECKOUT=/opt/demandsift5-pr1
+          ENV_FILE="$SOURCE_CHECKOUT/deploy/vps.env"
+          COMPOSE_FILE="$GITHUB_WORKSPACE/deploy/compose.vps.yaml"
+          PROJECT=demandsift
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          ROLLBACK_TAG="rollback-$(date -u +%Y%m%dT%H%M%SZ)"
+
+          test -f "$ENV_FILE" || { echo "missing_deploy_env=true"; exit 2; }
+          sudo -n true
+
+          # The checked-out release is isolated from the preserved dirty VPS worktree.
+          echo "release_sha=$RELEASE_SHA"
+          echo "source_checkout_preserved=$SOURCE_CHECKOUT"
+          echo "rollback_tag=$ROLLBACK_TAG"
+
+          ln -s "$ENV_FILE" "$GITHUB_WORKSPACE/deploy/vps.env"
+
+          compose() {
+            sudo -n docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+          }
+
+          rollback_image() {
+            local image="$1"
+            if sudo -n docker image inspect "$image:latest" >/dev/null 2>&1; then
+              sudo -n docker tag "$image:latest" "$image:$ROLLBACK_TAG"
+              echo "saved_rollback_image=$image:$ROLLBACK_TAG"
+            fi
+          }
+
+          rollback_image demandsift-web
+          rollback_image demandsift-worker
+          rollback_image demandsift-migrate
+
+          echo "--- build release images while production stays up ---"
+          compose build web worker migrate
+
+          echo "--- activate release ---"
+          compose up -d
+
+          echo "--- wait for web health ---"
+          web_id="$(compose ps -q web)"
+          worker_id="$(compose ps -q worker)"
+          caddy_id="$(compose ps -q caddy)"
+          test -n "$web_id" && test -n "$worker_id" && test -n "$caddy_id"
+
+          healthy=false
+          for attempt in $(seq 1 30); do
+            status="$(sudo -n docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$web_id")"
+            echo "web_health_attempt_${attempt}=$status"
+            if [ "$status" = "healthy" ]; then
+              healthy=true
+              break
+            fi
+            if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$healthy" != true ]; then
+            echo "release_health_failed=true"
+            echo "--- bounded service status ---"
+            compose ps
+            echo "--- bounded web logs ---"
+            compose logs --no-color --tail=80 web || true
+            echo "--- rollback app images ---"
+            for image in demandsift-web demandsift-worker; do
+              if sudo -n docker image inspect "$image:$ROLLBACK_TAG" >/dev/null 2>&1; then
+                sudo -n docker tag "$image:$ROLLBACK_TAG" "$image:latest"
+              fi
+            done
+            compose up -d --no-deps --force-recreate web worker
+            exit 3
+          fi
+
+          echo "--- internal application request ---"
+          sudo -n docker exec "$web_id" node -e "fetch('http://127.0.0.1:8080/').then(async r=>{console.log('internal_http_status='+r.status); if(!r.ok) process.exit(1)}).catch(e=>{console.error('internal_http_failed'); process.exit(1)})"
+
+          echo "--- final service status ---"
+          compose ps
+          worker_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$worker_id")"
+          caddy_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$caddy_id")"
+          echo "worker_state=$worker_state"
+          echo "caddy_state=$caddy_state"
+          test "$worker_state" = running
+          test "$caddy_state" = running
+          echo "release_verified=true"

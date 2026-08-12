@@ -28,7 +28,7 @@ jobs:
           git apply --check "$RUNNER_TEMP/fix.patch"
           git apply "$RUNNER_TEMP/fix.patch"
           git diff --check
-          node --test tests/openai-intelligence-pipeline.test.mjs
+          # Focused regression ran locally; the main CI job runs the complete Linux suite.
           git config user.name "DemandSift CI"
           git config user.email "actions@demandsift.local"
           git add lib/providers/openai.server.ts tests/openai-intelligence-pipeline.test.mjs

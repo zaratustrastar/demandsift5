@@ -741,7 +741,10 @@ function candidateFromApify(
     stringValue(item.id, 200).replace(/^t[13]_/i, "") ||
     `derived_${contentFingerprint(`${permalink}\n${body}`)}`;
   const matches = searchPlanMatches(title, body, plan);
-  if (plan.length > 0 && matches.length === 0) return { reason: "query_mismatch" };
+  /* The Actor already returned this structurally valid, recent Reddit record
+   * from one of our searches. Local matching is attribution metadata only; it
+   * must not become a semantic rejection gate that can hide real demand before
+   * AI triage. */
   const matchedQueries = [...new Set(matches.map((entry) => entry.query))];
   const discoveryLanes = [...new Set(matches.map((entry) => entry.lane))];
   const provider = "apify-test";

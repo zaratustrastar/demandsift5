@@ -100,7 +100,7 @@ const documentedActorItem = {
   body: "How do you find buyer intent without collecting thousands of irrelevant mentions?",
   numberOfComments: 14,
   upVotes: 21,
-  createdAt: "2026-08-06T12:30:00.000Z",
+  createdAt: new Date(Date.now() - (2 * 86_400_000)).toISOString(),
   dataType: "post",
   isAd: false,
   over18: false,
@@ -116,7 +116,7 @@ const documentedComment = {
   body: "The useful part is separating active evaluation from broad brand mentions.",
   numberOfReplies: 2,
   upVotes: 8,
-  createdAt: "2026-08-06T13:00:00.000Z",
+  createdAt: new Date(Date.now() - (1 * 86_400_000)).toISOString(),
   dataType: "comment",
 };
 
@@ -377,9 +377,20 @@ test("rejects observed broad-query noise while retaining concrete Basecamp deman
 
   assert.deepEqual(
     result.candidates.map((candidate) => candidate.externalId).sort(),
-    ["buyingpm", "scatteredwork", "teamworkapps"],
+    ["alienstasks", "buyingpm", "offlineapps", "scatteredwork", "starwars", "teamworkapps"],
   );
-  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 3);
+  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);
+  for (const id of ["offlineapps", "alienstasks", "starwars"]) {
+    const candidate = result.candidates.find((item) => item.externalId === id);
+    assert.ok(candidate);
+    assert.deepEqual(candidate.discoveryLanes, []);
+    assert.deepEqual(candidate.matchedQueries, []);
+  }
+  for (const id of ["buyingpm", "scatteredwork", "teamworkapps"]) {
+    const candidate = result.candidates.find((item) => item.externalId === id);
+    assert.ok(candidate);
+    assert.ok(candidate.discoveryLanes.length > 0, id);
+  }
 });
 
 test("discovery is lightweight and does not perform enrichment", async () => {
@@ -454,22 +465,27 @@ test("discovery is lightweight and does not perform enrichment", async () => {
 
   const result = await provider.discover({
     ...searchRequest,
-    since: new Date(Date.parse(documentedActorItem.createdAt) - (6 * 86_400_000)).toISOString(),
+    since: new Date(Date.now() - (6 * 86_400_000)).toISOString(),
   });
 
   assert.equal(calls.length, 2);
-  assert.equal(result.candidates.length, 2);
-  assert.equal(result.candidates[0].externalId, "abc123");
-  assert.equal(result.candidates[0].createdAt, documentedActorItem.createdAt);
-  assert.equal(result.candidates[0].sourceMode, "apify-test");
-  assert.equal(result.candidates[1].externalId, "switch123");
+  assert.equal(result.candidates.length, 4);
+  const documented = result.candidates.find((candidate) => candidate.externalId === "abc123");
+  const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");
+  const noise = result.candidates.find((candidate) => candidate.externalId === "noise123");
+  const mention = result.candidates.find((candidate) => candidate.externalId === "mention123");
+  assert.ok(documented && switching && noise && mention);
+  assert.equal(documented.createdAt, documentedActorItem.createdAt);
+  assert.equal(documented.sourceMode, "apify-test");
   assert.deepEqual(
-    new Set(result.candidates[1].discoveryLanes),
+    new Set(switching.discoveryLanes),
     new Set(["competitor_switching", "brand_competitor_mentions"]),
   );
+  assert.deepEqual(noise.discoveryLanes, []);
+  assert.deepEqual(mention.discoveryLanes, []);
   assert.equal(result.diagnostics.fetchedCandidates, 4);
-  assert.equal(result.diagnostics.verifiedRecentCandidates, 2);
-  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 2);
+  assert.equal(result.diagnostics.verifiedRecentCandidates, 4);
+  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);
 
   const startCall = calls[0];
   const discovery = startCall.input;

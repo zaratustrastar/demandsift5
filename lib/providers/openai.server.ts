@@ -782,6 +782,21 @@ type ChatTextResult =
       outputTokens: number;
     };
 
+const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
+const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
+
+function structuredChatSystemPrompt(options: {
+  system: string;
+  schemaName: string;
+  schema: JsonSchema;
+  recoveryAttempt: boolean;
+}): string {
+  const recoveryInstruction = options.recoveryAttempt
+    ? "\nRecovery attempt: emit the JSON immediately and concisely. Do not explain your reasoning. Keep strings short and arrays within the schema limits."
+    : "";
+  return `${options.system}\nReturn only valid JSON matching this JSON Schema named ${options.schemaName}. Do not use markdown fences.${recoveryInstruction}\n${JSON.stringify(options.schema)}`;
+}
+
 function chatText(payload: ChatCompletionsPayload, requestId?: string): ChatTextResult {
   const choice = payload.choices?.[0];
   const content = choice?.message?.content;
@@ -1000,13 +1015,18 @@ export class OpenAiProvider implements AiProvider {
       const attemptUsages: TokenUsage[] = [];
       let estimatedCostUsd = 0;
 
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < STRUCTURED_CHAT_MAX_ATTEMPTS; attempt += 1) {
         const result = await this.post("/chat/completions", {
           model: options.model,
           messages: [
             {
               role: "system",
-              content: `${options.system}\nReturn only valid JSON matching this JSON Schema named ${options.schemaName}. Do not use markdown fences.\n${JSON.stringify(options.schema)}`,
+              content: structuredChatSystemPrompt({
+                system: options.system,
+                schemaName: options.schemaName,
+                schema: options.schema,
+                recoveryAttempt: attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1,
+              }),
             },
             { role: "user", content: options.user },
           ],
@@ -1037,7 +1057,7 @@ export class OpenAiProvider implements AiProvider {
           };
         }
 
-        if (!chatResult.retryable || attempt > 0) {
+        if (!chatResult.retryable || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) {
           throw new OpenAiProviderError(
             `OpenAI returned no structured chat response text (finish_reason=${chatResult.finishReason}, content_type=${chatResult.contentType}, output_tokens=${chatResult.outputTokens}).`,
             undefined,
@@ -1045,7 +1065,7 @@ export class OpenAiProvider implements AiProvider {
           );
         }
         const retryMaxTokens = chatResult.finishReason === "length"
-          ? Math.min(16_000, Math.max(maxTokens + 1_000, maxTokens * 2))
+          ? Math.min(STRUCTURED_CHAT_MAX_OUTPUT_TOKENS, Math.max(maxTokens + 1_000, maxTokens * 2))
           : maxTokens;
         await this.onDiagnostic?.({
           kind: "structured_chat_empty_retry",

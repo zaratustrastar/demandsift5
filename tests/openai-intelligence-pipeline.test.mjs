@@ -180,6 +180,53 @@ test("an empty length-limited gateway response is retried inside the AI provider
   }]);
 });
 
+test("two length-limited empty string responses get a bounded 16000-token recovery attempt", async () => {
+  const requests = [];
+  const diagnostics = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      requests.push({
+        maxTokens: body.max_tokens,
+        system: body.messages[0].content,
+      });
+      if (requests.length < 3) {
+        return new Response(JSON.stringify({
+          id: `chat_exhausted_${requests.length}`,
+          choices: [{ finish_reason: "length", message: { content: "" } }],
+          usage: { prompt_tokens: 100, completion_tokens: body.max_tokens },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.deepEqual(requests.map((request) => request.maxTokens), [4_000, 8_000, 16_000]);
+  assert.equal(requests[0].system.includes("Recovery attempt:"), false);
+  assert.equal(requests[1].system.includes("Recovery attempt:"), false);
+  assert.equal(requests[2].system.includes("Recovery attempt:"), true);
+  assert.equal(result.value[0].externalId, "a");
+  assert.equal(result.usage.inputTokens, 210);
+  assert.equal(result.usage.outputTokens, 12_005);
+  assert.deepEqual(diagnostics.map((event) => ({
+    requestedMaxTokens: event.requestedMaxTokens,
+    retryMaxTokens: event.retryMaxTokens,
+  })), [
+    { requestedMaxTokens: 4_000, retryMaxTokens: 8_000 },
+    { requestedMaxTokens: 8_000, retryMaxTokens: 16_000 },
+  ]);
+});
+
 test("persistent missing triage IDs fail explicitly instead of becoming irrelevant", async () => {
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",

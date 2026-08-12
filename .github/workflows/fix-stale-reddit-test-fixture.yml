@@ -13,19 +13,16 @@ permissions:
 jobs:
   fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feature/reddit-intelligence-pipeline
           fetch-depth: 0
-      - name: Install dependencies
-        run: npm ci
-      - name: Make discovery fixture time-stable
+      - name: Make discovery fixture time-stable and commit it
         shell: bash
         run: |
           set -Eeuo pipefail
-          # Keep this fixture anchored to the documented actor timestamp so the test does not expire with wall-clock time.
           python3 <<'PY'
           from pathlib import Path
           path = Path('tests/apify-reddit-provider.test.mjs')
@@ -37,7 +34,6 @@ jobs:
               raise SystemExit(f'expected one stale fixture expression, found {count}')
           path.write_text(text.replace(old, new, 1))
           PY
-          node --test tests/apify-reddit-provider.test.mjs
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add tests/apify-reddit-provider.test.mjs

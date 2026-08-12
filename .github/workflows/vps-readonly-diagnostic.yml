@@ -16,7 +16,22 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 8
     steps:
-      - name: Inspect latest Apify actor runs without exposing credentials
+      - name: Inspect diagnostic credential availability
+        shell: bash
+        run: |
+          set -u
+          echo "identity=$(id -un)"
+          for path in \
+            /home/demandsift-dev/actions-runner/.diagnostic-secrets \
+            /home/demandsift-dev/actions-runner/.diagnostic-secrets/apify-token
+          do
+            if [ -e "$path" ]; then
+              stat -c 'path=%n owner=%U group=%G mode=%a bytes=%s' "$path"
+            else
+              echo "path=$path absent"
+            fi
+          done
+      - name: Inspect latest Apify actor run without exposing credentials
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -25,29 +40,21 @@ jobs:
           token="$(tr -d '\r\n' < "$token_file")"
           umask 077
           runs_json="$(mktemp)"
-          trap 'rm -f "$runs_json" "$input_json" "$run_log"' EXIT
           input_json="$(mktemp)"
           run_log="$(mktemp)"
+          trap 'rm -f "$runs_json" "$input_json" "$run_log"' EXIT
 
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $token" \
-            "https://api.apify.com/v2/acts/trudax~reddit-scraper-lite/runs?limit=8&desc=1" \
+            "https://api.apify.com/v2/actor-runs?limit=8&desc=1" \
             > "$runs_json"
-
-          mapfile -t run_ids < <(python3 - "$runs_json" <<'PY'
-          import json, sys
-          payload = json.load(open(sys.argv[1]))
-          items = payload.get("data", {}).get("items", [])
-          for item in items:
-              print(item.get("id", ""))
-              print("RUN", item.get("id"), item.get("status"), item.get("statusMessage", ""),
-                    item.get("startedAt"), item.get("finishedAt"))
-          PY
-          )
 
           latest_id="$(python3 - "$runs_json" <<'PY'
           import json, sys
           items = json.load(open(sys.argv[1])).get("data", {}).get("items", [])
+          for item in items[:8]:
+              print("RUN", item.get("id"), item.get("actId"), item.get("status"),
+                    item.get("statusMessage", ""), item.get("startedAt"), file=sys.stderr)
           print(items[0].get("id", "") if items else "")
           PY
           )"

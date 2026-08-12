@@ -1,0 +1,90 @@
+name: Diagnostic Basecamp retrieval
+
+on:
+  push:
+    branches:
+      - diagnostics/basecamp-retrieval
+    paths:
+      - .github/workflows/diagnostic-basecamp-retrieval.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run isolated Basecamp scan and print owned acceptance diagnostics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          diagnostics_html="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$diagnostics_html"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://basecamp.com","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "diagnostic_scan_id=$scan_id"
+
+          for attempt in $(seq 1 150); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id" > "$latest_json"
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "poll=$attempt status=$status"
+            if [ "$status" = "complete" ]; then
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_html"
+              python3 - "$diagnostics_html" <<'PY'
+          import html, json, re, sys
+          raw = open(sys.argv[1], encoding='utf-8').read()
+          match = re.search(r'<pre>(.*)</pre>', raw, re.S)
+          if not match:
+              raise SystemExit('diagnostic payload missing')
+          payload = json.loads(html.unescape(match.group(1)))
+          print('===SCAN===')
+          print(json.dumps(payload.get('scan', {}), indent=2, sort_keys=True))
+          print('===DIAGNOSTICS===')
+          print(json.dumps(payload.get('diagnostics', {}), indent=2, sort_keys=True))
+          print('===RETRIEVAL===')
+          print(json.dumps(payload.get('retrievalDiagnostics', {}), indent=2, sort_keys=True))
+          print('===PROCESSED===')
+          for row in payload.get('processedRedditState', []):
+              print(json.dumps(row, sort_keys=True))
+          print('===OUTPUT===')
+          print(json.dumps(payload.get('output', {}), indent=2, sort_keys=True))
+          PY
+              exit 0
+            fi
+            if [ "$status" = "failed" ]; then
+              cat "$latest_json"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "diagnostic scan timed out" >&2
+          exit 1

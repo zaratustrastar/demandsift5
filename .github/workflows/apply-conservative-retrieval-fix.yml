@@ -1,0 +1,95 @@
+name: Apply conservative Reddit retrieval fix
+
+on:
+  push:
+    branches:
+      - diagnostics/ci-failure-capture
+    paths:
+      - .github/workflows/apply-conservative-retrieval-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Patch conservative discovery handoff and stable fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          expected_sha=e6713c49a83e22293d2372ab96025186736b25ee
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$expected_sha" || { echo "feature_advanced=$actual_sha"; exit 4; }
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one match in {path}, found {count}: {old[:160]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          provider = "lib/providers/reddit.server.ts"
+          tests = "tests/apify-reddit-provider.test.mjs"
+
+          replace_once(
+              provider,
+              '''  const matches = searchPlanMatches(title, body, plan);\n  if (plan.length > 0 && matches.length === 0) return { reason: "query_mismatch" };\n  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];''',
+              '''  const matches = searchPlanMatches(title, body, plan);\n  /* The Actor already returned this structurally valid, recent Reddit record\n   * from one of our searches. Local matching is attribution metadata only; it\n   * must not become a semantic rejection gate that can hide real demand before\n   * AI triage. */\n  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];''',
+          )
+
+          replace_once(
+              tests,
+              '  createdAt: "2026-08-06T12:30:00.000Z",',
+              '  createdAt: new Date(Date.now() - (2 * 86_400_000)).toISOString(),',
+          )
+          replace_once(
+              tests,
+              '  createdAt: "2026-08-06T13:00:00.000Z",',
+              '  createdAt: new Date(Date.now() - (1 * 86_400_000)).toISOString(),',
+          )
+          replace_once(
+              tests,
+              '    since: new Date(Date.parse(documentedActorItem.createdAt) - (6 * 86_400_000)).toISOString(),',
+              '    since: new Date(Date.now() - (6 * 86_400_000)).toISOString(),',
+          )
+
+          replace_once(
+              tests,
+              '''  assert.deepEqual(\n    result.candidates.map((candidate) => candidate.externalId).sort(),\n    ["buyingpm", "scatteredwork", "teamworkapps"],\n  );\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 3);''',
+              '''  assert.deepEqual(\n    result.candidates.map((candidate) => candidate.externalId).sort(),\n    ["alienstasks", "buyingpm", "offlineapps", "scatteredwork", "starwars", "teamworkapps"],\n  );\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);\n  for (const id of ["offlineapps", "alienstasks", "starwars"]) {\n    const candidate = result.candidates.find((item) => item.externalId === id);\n    assert.ok(candidate);\n    assert.deepEqual(candidate.discoveryLanes, []);\n    assert.deepEqual(candidate.matchedQueries, []);\n  }\n  for (const id of ["buyingpm", "scatteredwork", "teamworkapps"]) {\n    const candidate = result.candidates.find((item) => item.externalId === id);\n    assert.ok(candidate);\n    assert.ok(candidate.discoveryLanes.length > 0, id);\n  }''',
+          )
+
+          replace_once(
+              tests,
+              '''  assert.equal(result.candidates.length, 2);\n  assert.equal(result.candidates[0].externalId, "abc123");\n  assert.equal(result.candidates[0].createdAt, documentedActorItem.createdAt);\n  assert.equal(result.candidates[0].sourceMode, "apify-test");\n  assert.equal(result.candidates[1].externalId, "switch123");\n  assert.deepEqual(\n    new Set(result.candidates[1].discoveryLanes),\n    new Set(["competitor_switching", "brand_competitor_mentions"]),\n  );\n  assert.equal(result.diagnostics.fetchedCandidates, 4);\n  assert.equal(result.diagnostics.verifiedRecentCandidates, 2);\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 2);''',
+              '''  assert.equal(result.candidates.length, 4);\n  const documented = result.candidates.find((candidate) => candidate.externalId === "abc123");\n  const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");\n  const noise = result.candidates.find((candidate) => candidate.externalId === "noise123");\n  const mention = result.candidates.find((candidate) => candidate.externalId === "mention123");\n  assert.ok(documented && switching && noise && mention);\n  assert.equal(documented.createdAt, documentedActorItem.createdAt);\n  assert.equal(documented.sourceMode, "apify-test");\n  assert.deepEqual(\n    new Set(switching.discoveryLanes),\n    new Set(["competitor_switching", "brand_competitor_mentions"]),\n  );\n  assert.deepEqual(noise.discoveryLanes, []);\n  assert.deepEqual(mention.discoveryLanes, []);\n  assert.equal(result.diagnostics.fetchedCandidates, 4);\n  assert.equal(result.diagnostics.verifiedRecentCandidates, 4);\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);''',
+          )
+          PY
+
+          git diff --check
+          npm ci
+          node --test tests/apify-reddit-provider.test.mjs
+          npm run build
+          npm run lint
+          node --test tests/*.test.mjs
+          npm test
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git commit -m "Keep Reddit retrieval conservative before AI triage"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

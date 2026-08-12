@@ -44,3 +44,5 @@ PATCH
           git add lib/providers/reddit.server.ts lib/server/scan-workflow.ts tests/apify-reddit-provider.test.mjs tests/scan-pipeline-architecture.test.mjs
           git commit -m "Degrade safely when Reddit enrichment fails"
           git push origin HEAD:feature/reddit-intelligence-pipeline
+
+# one-shot trigger

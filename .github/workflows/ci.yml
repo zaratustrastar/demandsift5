@@ -1,5 +1,6 @@
 name: CI
 
+# Feature changes are validated through this PR workflow before VPS deployment.
 on:
   push:
     branches:

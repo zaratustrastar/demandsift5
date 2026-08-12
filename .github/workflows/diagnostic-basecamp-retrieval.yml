@@ -21,6 +21,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # Diagnostic rerun for the currently deployed retrieval candidate.
           umask 077
           cookie_jar="$(mktemp)"
           created_json="$(mktemp)"

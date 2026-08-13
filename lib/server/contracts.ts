@@ -268,6 +268,7 @@ export type ScanDiagnostics = {
   requestedForEnrichment: number;
   enrichedSuccessfully: number;
   enrichmentFailures: number;
+  enrichmentFailureReason?: string;
   submittedForDeepQualification: number;
   deepQualificationsReturned: number;
   deepQualificationMissing: number;

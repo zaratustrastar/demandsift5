@@ -522,6 +522,12 @@ test("Actor timeout stays below the client budget so terminal status can be obse
   assert.equal(redditModule.apifyActorTimeoutSeconds(20_000), 20);
 });
 
+test("optional enrichment has a short independent client budget", () => {
+  assert.equal(redditModule.apifyEnrichmentTimeoutMs(600_000), 120_000);
+  assert.equal(redditModule.apifyEnrichmentTimeoutMs(360_000), 120_000);
+  assert.equal(redditModule.apifyEnrichmentTimeoutMs(20_000), 20_000);
+});
+
 test("discovery uses real bounded records retained by a timed-out Actor run", async () => {
   const calls = [];
   const provider = new redditModule.ApifyRedditTestProvider({

@@ -1039,6 +1039,15 @@ export function apifyActorTimeoutSeconds(clientTimeoutMs: number): number {
   return Math.max(20, Math.floor((boundedClientMs - 30_000) / 1_000));
 }
 
+/**
+ * Thread opening is optional context after discovery has already retained the
+ * matched author's verified words. Keep this call short so a blocked Reddit
+ * page cannot add another full discovery-length wait to the user journey.
+ */
+export function apifyEnrichmentTimeoutMs(configuredTimeoutMs: number): number {
+  return Math.max(20_000, Math.min(Math.trunc(configuredTimeoutMs), 120_000));
+}
+
 function positiveInteger(
   value: string | undefined,
   fallback: number,
@@ -1413,7 +1422,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
 
     let payload: unknown[];
     try {
-      payload = await this.runActor(input);
+      payload = await this.runActor(input, apifyEnrichmentTimeoutMs(this.timeoutMs));
     } catch (error) {
       console.error("Apify Reddit thread enrichment failed", error);
       const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";

@@ -13,95 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sanitized-apify-diagnostic:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 5
-    steps:
-      - name: Inspect recent Trudax run metadata without source content or secrets
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          token_file=/home/demandsift-dev/actions-runner/.diagnostic-secrets/apify-token
-          test -s "$token_file"
-          APIFY_DIAGNOSTIC_TOKEN="$(tr -d '\r\n' < "$token_file")" node <<'NODE'
-          const token = process.env.APIFY_DIAGNOSTIC_TOKEN;
-          delete process.env.APIFY_DIAGNOSTIC_TOKEN;
-          const actorId = "oAuCIx3ItNrs2okjQ";
-          const earliest = Date.parse("2026-08-13T15:04:00Z");
-          const headers = { authorization: `Bearer ${token}` };
-
-          async function json(url) {
-            const response = await fetch(url, { headers });
-            if (!response.ok) throw new Error(`Apify diagnostic HTTP ${response.status}`);
-            return response.json();
-          }
-
-          function cleanMessage(value) {
-            return String(value || "")
-              .replace(/https?:\/\/\S+/gi, "[url]")
-              .replace(/apify_api_[A-Za-z0-9_-]+/g, "[redacted]")
-              .replace(/[?&](token|apiKey|key)=[^&\s]+/gi, "$1=[redacted]")
-              .slice(0, 500);
-          }
-
-          (async () => {
-            const listing = await json("https://api.apify.com/v2/actor-runs?desc=1&limit=30");
-            const items = (listing.data?.items || [])
-              .filter((run) => run.actId === actorId && Date.parse(run.startedAt) >= earliest)
-              .slice(0, 4);
-            console.log(`matching_run_count=${items.length}`);
-
-            for (const [index, run] of items.entries()) {
-              const detail = (await json(`https://api.apify.com/v2/actor-runs/${encodeURIComponent(run.id)}`)).data || {};
-              const inputResponse = await fetch(
-                `https://api.apify.com/v2/key-value-stores/${encodeURIComponent(detail.defaultKeyValueStoreId)}/records/INPUT`,
-                { headers },
-              );
-              const input = inputResponse.ok ? await inputResponse.json() : {};
-              const dataset = detail.defaultDatasetId
-                ? (await json(`https://api.apify.com/v2/datasets/${encodeURIComponent(detail.defaultDatasetId)}`)).data || {}
-                : {};
-              const started = Date.parse(detail.startedAt || run.startedAt);
-              const finished = Date.parse(detail.finishedAt || run.finishedAt);
-              const mode = Array.isArray(input.startUrls) && input.startUrls.length > 0 ? "enrichment" : "discovery";
-
-              console.log(JSON.stringify({
-                index,
-                mode,
-                status: detail.status || run.status,
-                statusMessage: cleanMessage(detail.statusMessage || run.statusMessage),
-                durationSeconds: Number.isFinite(started) && Number.isFinite(finished)
-                  ? Math.round((finished - started) / 1000)
-                  : null,
-                datasetItems: Number(dataset.itemCount || 0),
-                inputShape: {
-                  startUrlCount: Array.isArray(input.startUrls) ? input.startUrls.length : 0,
-                  searchCount: Array.isArray(input.searches) ? input.searches.length : 0,
-                  maxItems: Number(input.maxItems || 0),
-                  maxPostCount: Number(input.maxPostCount || 0),
-                  maxComments: Number(input.maxComments || 0),
-                  searchPosts: Boolean(input.searchPosts),
-                  searchComments: Boolean(input.searchComments),
-                  skipComments: Boolean(input.skipComments),
-                },
-              }));
-
-              const logResponse = await fetch(`https://api.apify.com/v2/logs/${encodeURIComponent(run.id)}`, { headers });
-              if (logResponse.ok) {
-                const lines = (await logResponse.text()).split(/\r?\n/)
-                  .filter((line) => /\b(ERROR|WARN|invalid|failed|timeout|timed out)\b/i.test(line))
-                  .slice(-8)
-                  .map(cleanMessage);
-                for (const line of lines) console.log(`run_${index}_diagnostic=${line}`);
-              }
-            }
-          })().catch((error) => {
-            console.error(cleanMessage(error?.message || error));
-            process.exit(1);
-          });
-          NODE
-
   source-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -263,6 +174,18 @@ jobs:
           output = aggregate.get("output") or {}
           diagnostics = aggregate.get("diagnostics") or {}
           retrieval = aggregate.get("retrieval") or {}
+          decisions = aggregate.get("decisionBreakdown") or {}
+          enrichment_failure = str(diagnostics.get("enrichmentFailureReason") or "").lower()
+          if not enrichment_failure:
+              enrichment_failure_category = "none"
+          elif "timed out" in enrichment_failure or "timeout" in enrichment_failure:
+              enrichment_failure_category = "actor_timeout"
+          elif "mapping_failure" in enrichment_failure:
+              enrichment_failure_category = "actor_mapping_failure"
+          elif "http" in enrichment_failure:
+              enrichment_failure_category = "actor_http_error"
+          else:
+              enrichment_failure_category = "actor_error"
           print("acceptance_result=complete")
           print("website=" + str(scan.get("websiteUrl") or ""))
           print("data_mode=" + str(report.get("dataMode") or ""))
@@ -284,6 +207,7 @@ jobs:
               "requestedForEnrichment": diagnostics.get("requestedForEnrichment", 0),
               "enrichedSuccessfully": diagnostics.get("enrichedSuccessfully", 0),
               "enrichmentFailures": diagnostics.get("enrichmentFailures", 0),
+              "enrichmentFailureCategory": enrichment_failure_category,
               "submittedForDeepQualification": diagnostics.get("submittedForDeepQualification", 0),
               "deepQualificationsReturned": diagnostics.get("deepQualificationsReturned", 0),
               "potentialCustomerConversations": diagnostics.get("potentialCustomerConversations", 0),
@@ -295,6 +219,8 @@ jobs:
               "worthEnrichingByLane": retrieval.get("worthEnrichingByLane", {}),
           }
           print("acceptance_funnel=" + json.dumps(safe_funnel, separators=(",", ":"), sort_keys=True))
+          print("acceptance_triage_breakdown=" + json.dumps(decisions.get("triage") or {}, separators=(",", ":"), sort_keys=True))
+          print("acceptance_deep_breakdown=" + json.dumps(decisions.get("deepQualification") or {}, separators=(",", ":"), sort_keys=True))
           if int(output.get("potentialCustomers") or 0) < 1:
               raise SystemExit("Acceptance failed: no qualified potential customer was stored.")
           if int(output.get("replies") or 0) < 1:

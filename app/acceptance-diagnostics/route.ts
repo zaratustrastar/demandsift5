@@ -22,6 +22,33 @@ export async function GET(request: Request) {
         progress: scan.progress.map((stage) => ({ id: stage.id, status: stage.status })),
       },
       diagnostics: scan.result.diagnostics,
+      decisionBreakdown: {
+        triage: scan.result.processedRedditState.reduce<Record<string, number>>((counts, state) => {
+          const key = [
+            state.triage.worthEnriching ? "selected" : "not_selected",
+            state.triage.intent,
+            state.triage.demandSignal,
+            state.triage.productFit,
+            state.triage.timing,
+          ].join("|");
+          counts[key] = (counts[key] ?? 0) + 1;
+          return counts;
+        }, {}),
+        deepQualification: scan.result.processedRedditState.reduce<Record<string, number>>((counts, state) => {
+          const deep = state.deepQualification;
+          if (!deep) return counts;
+          const key = [
+            deep.leadStatus,
+            deep.intent,
+            deep.productFit,
+            deep.timing,
+            deep.evidenceQuality,
+            deep.replyability,
+          ].join("|");
+          counts[key] = (counts[key] ?? 0) + 1;
+          return counts;
+        }, {}),
+      },
       retrieval: scan.result.retrievalDiagnostics
         ? {
             provider: scan.result.retrievalDiagnostics.provider,

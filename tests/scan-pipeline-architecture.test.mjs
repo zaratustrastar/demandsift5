@@ -23,6 +23,11 @@ test("active scan orders discovery before triage before enrichment before deep q
   assert.ok(enrichment < qualification);
 });
 
+test("the acquisition scan uses a 30-day baseline while monitoring stays incremental", () => {
+  assert.match(source, /const lookbackDays = previousResult \? 7 : 30/);
+  assert.match(source, /lookbackDays \* 86_400_000/);
+});
+
 test("active scan does not use embeddings or legacy deterministic ranking", () => {
   assert.equal(source.includes("embedTextsWithOpenAi"), false);
   assert.equal(source.includes(".embed("), false);

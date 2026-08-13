@@ -611,7 +611,14 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     }
     await setStage(scan, "understanding", "complete", `Built a source-backed context pack for ${profile.name}.`);
 
-    const since = new Date(Date.parse(scan.createdAt) - 7 * 86_400_000).toISOString();
+    const previousScan = await repository.getLatestScan(scan.workspaceId);
+    const previousResult = previousScan?.result && sameWebsite(previousScan.websiteUrl, scan.websiteUrl)
+      ? previousScan.result
+      : null;
+    // The acquisition scan establishes a real demand baseline. Recurring scans
+    // remain incremental and search only the latest seven-day window.
+    const lookbackDays = previousResult ? 7 : 30;
+    const since = new Date(Date.parse(scan.createdAt) - lookbackDays * 86_400_000).toISOString();
     await setStage(scan, "discovery", "active");
     const discovery = await redditProvider.discover({
       queries: {
@@ -659,10 +666,6 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       `${discovery.diagnostics.fetchedCandidates} public candidates retrieved; ${cleaned.survivors.length} credible recent records remained after deterministic cleaning.`,
     );
 
-    const previousScan = await repository.getLatestScan(scan.workspaceId);
-    const previousResult = previousScan?.result && sameWebsite(previousScan.websiteUrl, scan.websiteUrl)
-      ? previousScan.result
-      : null;
     const previousStates = new Map(
       (previousResult?.processedRedditState ?? []).map((state) => [`${state.provider}:${state.externalId}`, state]),
     );
@@ -1143,6 +1146,9 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       requestedForEnrichment: enrichment.diagnostics.requested,
       enrichedSuccessfully: enrichment.diagnostics.enriched,
       enrichmentFailures: enrichment.diagnostics.failed,
+      ...(enrichment.diagnostics.failureReason
+        ? { enrichmentFailureReason: enrichment.diagnostics.failureReason }
+        : {}),
       submittedForDeepQualification: conversationsNeedingDeep.length,
       deepQualificationsReturned: deepReturned,
       deepQualificationMissing: 0,

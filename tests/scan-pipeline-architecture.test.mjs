@@ -41,11 +41,12 @@ test("long-running scans start durably and are observed through short polling re
 });
 
 test("running scan polling does not invoke completed-report presentation", () => {
-  const statusGuard = scanStatusRoute.indexOf("if (!scan.result)");
+  const statusGuard = scanStatusRoute.indexOf("if (statusOnly || !scan.result)");
   const presenter = scanStatusRoute.indexOf("await presentScan(scan)");
   assert.ok(statusGuard >= 0);
   assert.ok(presenter > statusGuard);
   assert.match(scanStatusRoute, /report: null/);
+  assert.match(scanStatusRoute, /searchParams\.get\("statusOnly"\) === "1"/);
 });
 
 test("the acquisition scan uses a 30-day baseline while monitoring stays incremental", () => {

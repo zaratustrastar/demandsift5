@@ -160,7 +160,7 @@ jobs:
           for attempt in $(seq 1 150); do
             curl --fail-with-body --silent --show-error \
               --cookie "$cookie_jar" \
-              "$APP_URL/api/scans/$scan_id" > "$latest_json"
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest_json"
 
             status="$(python3 - "$latest_json" <<'PY'
           import json, sys
@@ -176,14 +176,10 @@ jobs:
               curl --fail-with-body --silent --show-error \
                 --cookie "$cookie_jar" \
                 "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
-              python3 - "$latest_json" "$diagnostics_json" <<'PY'
+              python3 - "$diagnostics_json" <<'PY'
           import json, sys
-          payload = json.load(open(sys.argv[1]))
-          aggregate = json.load(open(sys.argv[2]))
-          report = payload.get("report") or {}
-          scan = payload.get("scan") or {}
-          stored = report.get("storedCounts") or {}
-          potential = report.get("potentialCustomers") or {}
+          aggregate = json.load(open(sys.argv[1]))
+          scan = aggregate.get("scan") or {}
           output = aggregate.get("output") or {}
           diagnostics = aggregate.get("diagnostics") or {}
           retrieval = aggregate.get("retrieval") or {}
@@ -201,15 +197,11 @@ jobs:
               enrichment_failure_category = "actor_error"
           print("acceptance_result=complete")
           print("website=" + str(scan.get("websiteUrl") or ""))
-          print("data_mode=" + str(report.get("dataMode") or ""))
-          print("opportunities=" + str(len(report.get("opportunities") or [])))
-          print("potential_customers=" + str(potential.get("total") or 0))
-          print("insights=" + str(len(report.get("insights") or [])))
-          print("replies=" + str(len(report.get("replies") or [])))
-          print("stored_opportunities=" + str(stored.get("opportunities") or 0))
-          print("stored_insights=" + str(stored.get("insights") or 0))
-          print("stored_competitor_signals=" + str(stored.get("competitorSignals") or 0))
-          print("stored_replies=" + str(stored.get("replies") or 0))
+          print("opportunities=" + str(output.get("opportunities") or 0))
+          print("potential_customers=" + str(output.get("potentialCustomers") or 0))
+          print("insights=" + str(output.get("insights") or 0))
+          print("competitor_signals=" + str(output.get("competitorSignals") or 0))
+          print("replies=" + str(output.get("replies") or 0))
           safe_funnel = {
               "retrieved": diagnostics.get("retrieved", 0),
               "normalized": diagnostics.get("normalized", 0),

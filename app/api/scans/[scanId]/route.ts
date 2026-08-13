@@ -10,7 +10,8 @@ export async function GET(request: Request, context: RouteContext) {
     const actor = await requireWorkspace(request);
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
-    if (!scan.result) {
+    const statusOnly = new URL(request.url).searchParams.get("statusOnly") === "1";
+    if (statusOnly || !scan.result) {
       return Response.json(
         {
           scan: {

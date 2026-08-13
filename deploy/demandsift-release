@@ -149,7 +149,7 @@ build_candidate() {
   /usr/bin/docker build --pull -f "$REPOSITORY/deploy/Dockerfile.worker" -t "$worker_image" "$REPOSITORY"
 
   /usr/bin/docker run --rm --network none --entrypoint node "$web_image" \
-    -e 'const fs=require("node:fs"); for (const file of ["server.js","package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
+    -e 'const fs=require("node:fs"); for (const file of ["dist/standalone/server.js","dist/standalone/package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
   /usr/bin/docker run --rm --network none --entrypoint node "$worker_image" \
     --check scripts/background-worker.mjs
 

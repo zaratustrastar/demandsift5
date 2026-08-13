@@ -37,7 +37,7 @@ ENV NODE_ENV=production \
 # Vinext produces a self-contained server bundle. Copy only that runtime
 # artifact so production images do not retain source files, build tooling, or
 # the full development dependency tree.
-COPY --from=build --chown=node:node /app/dist/standalone /app
+COPY --from=build --chown=node:node /app/dist/standalone /app/dist/standalone
 
 USER node
 
@@ -46,4 +46,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || '8080') + '/').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
 
-CMD ["node", "server.js"]
+CMD ["node", "dist/standalone/server.js"]

@@ -1,6 +1,7 @@
-name: Apply DemandSift MVP stabilization
+name: One-shot sanitized Apify run diagnostic
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feature/reddit-intelligence-pipeline
@@ -8,190 +9,98 @@ on:
       - .github/workflows/vps-readonly-diagnostic.yml
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-and-verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
     steps:
-      - name: Check out feature branch
-        uses: actions/checkout@v4
-        with:
-          ref: feature/reddit-intelligence-pipeline
-          fetch-depth: 0
-
-      - name: Apply bounded retrieval and restoration fixes
+      - name: Inspect recent Trudax run metadata without source content or secrets
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 <<'PY'
-          from pathlib import Path
+          token_file=/home/demandsift-dev/actions-runner/.diagnostic-secrets/apify-token
+          test -s "$token_file"
+          APIFY_DIAGNOSTIC_TOKEN="$(tr -d '\r\n' < "$token_file")" node <<'NODE'
+          const fs = require("node:fs");
 
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
-              p.write_text(text.replace(old, new, 1))
+          const token = process.env.APIFY_DIAGNOSTIC_TOKEN;
+          delete process.env.APIFY_DIAGNOSTIC_TOKEN;
+          const actorId = "oAuCIx3ItNrs2okjQ";
+          const earliest = Date.parse("2026-08-13T15:04:00Z");
+          const headers = { authorization: `Bearer ${token}` };
 
-          reddit = "lib/providers/reddit.server.ts"
+          async function json(url) {
+            const response = await fetch(url, { headers });
+            if (!response.ok) throw new Error(`Apify diagnostic HTTP ${response.status}`);
+            return response.json();
+          }
 
-          replace_once(
-              reddit,
-              '''  const problems = cleanUnique(request.queries.customerProblems, 8);\n  const jobs = cleanUnique(request.queries.jobsToBeDone ?? [], 10);''',
-              '''  const problems = cleanUnique(request.queries.customerProblems, 8);\n  const genericProblemTokens = new Set([\n    "better", "business", "difficult", "hard", "help", "manage", "managing",\n    "need", "needs", "problem", "problems", "process", "solution", "team",\n    "tool", "tools", "work", "workflow",\n  ]);\n  const problemSpecificityScore = (value: string): number => {\n    const tokens = problemTokens(value).slice(0, 8);\n    const specific = tokens.filter((token) => !genericProblemTokens.has(token));\n    return (specific.length * 4) + Math.min(tokens.length, 6);\n  };\n  const rankedProblems = [...problems].sort((left, right) =>\n    problemSpecificityScore(right) - problemSpecificityScore(left),\n  );\n  const jobs = cleanUnique(request.queries.jobsToBeDone ?? [], 10);''',
-          )
+          function cleanMessage(value) {
+            return String(value || "")
+              .replace(/https?:\/\/\S+/gi, "[url]")
+              .replace(/apify_api_[A-Za-z0-9_-]+/g, "[redacted]")
+              .replace(/[?&](token|apiKey|key)=[^&\s]+/gi, "$1=[redacted]")
+              .slice(0, 500);
+          }
 
-          replace_once(
-              reddit,
-              '''    problems[0] ??\n    productTerms[0] ??''',
-              '''    rankedProblems[0] ??\n    productTerms[0] ??''',
-          )
+          (async () => {
+            const listing = await json("https://api.apify.com/v2/actor-runs?desc=1&limit=30");
+            const items = (listing.data?.items || [])
+              .filter((run) => run.actId === actorId && Date.parse(run.startedAt) >= earliest)
+              .slice(0, 4);
+            console.log(`matching_run_count=${items.length}`);
 
-          replace_once(
-              reddit,
-              '''  for (const seed of [...problems, ...jobs].slice(0, 8)) {''',
-              '''  for (const seed of [...rankedProblems, ...jobs].slice(0, 8)) {''',
-          )
+            for (const [index, run] of items.entries()) {
+              const detail = (await json(`https://api.apify.com/v2/actor-runs/${encodeURIComponent(run.id)}`)).data || {};
+              const inputResponse = await fetch(
+                `https://api.apify.com/v2/key-value-stores/${encodeURIComponent(detail.defaultKeyValueStoreId)}/records/INPUT`,
+                { headers },
+              );
+              const input = inputResponse.ok ? await inputResponse.json() : {};
+              const dataset = detail.defaultDatasetId
+                ? (await json(`https://api.apify.com/v2/datasets/${encodeURIComponent(detail.defaultDatasetId)}`)).data || {}
+                : {};
+              const started = Date.parse(detail.startedAt || run.startedAt);
+              const finished = Date.parse(detail.finishedAt || run.finishedAt);
+              const mode = Array.isArray(input.startUrls) && input.startUrls.length > 0 ? "enrichment" : "discovery";
 
-          replace_once(
-              reddit,
-              '''  for (const seed of problems.slice(0, 8)) {''',
-              '''  for (const seed of rankedProblems.slice(0, 8)) {''',
-          )
+              console.log(JSON.stringify({
+                index,
+                mode,
+                status: detail.status || run.status,
+                statusMessage: cleanMessage(detail.statusMessage || run.statusMessage),
+                durationSeconds: Number.isFinite(started) && Number.isFinite(finished)
+                  ? Math.round((finished - started) / 1000)
+                  : null,
+                datasetItems: Number(dataset.itemCount || 0),
+                inputShape: {
+                  startUrlCount: Array.isArray(input.startUrls) ? input.startUrls.length : 0,
+                  searchCount: Array.isArray(input.searches) ? input.searches.length : 0,
+                  maxItems: Number(input.maxItems || 0),
+                  maxPostCount: Number(input.maxPostCount || 0),
+                  maxComments: Number(input.maxComments || 0),
+                  searchPosts: Boolean(input.searchPosts),
+                  searchComments: Boolean(input.searchComments),
+                  skipComments: Boolean(input.skipComments),
+                },
+              }));
 
-          replace_once(
-              reddit,
-              '''  const quotas: Array<[DemandLane, number]> = [\n    ["direct_buying_intent", 2],\n    ["problem_pain", 2],\n    ["competitor_switching", 1],\n    ["category_recommendation", 1],\n    ["brand_competitor_mentions", 1],\n    ["workaround", 1],\n    ["timing", 1],\n  ];''',
-              '''  // Primary quota is intentionally demand-heavy. Category/brand searches are\n  // fallback coverage only, so they cannot crowd out concrete customer pain.\n  const quotas: Array<[DemandLane, number]> = [\n    ["direct_buying_intent", 2],\n    ["problem_pain", 3],\n    ["competitor_switching", 1],\n    ["workaround", 1],\n    ["timing", 1],\n  ];''',
-          )
-
-          replace_once(
-              reddit,
-              '''  const laneOrder: DemandLane[] = [\n    "direct_buying_intent",\n    "problem_pain",\n    "competitor_switching",\n    "category_recommendation",\n    "brand_competitor_mentions",\n    "workaround",\n    "timing",\n  ];''',
-              '''  const laneOrder: DemandLane[] = [\n    "problem_pain",\n    "direct_buying_intent",\n    "competitor_switching",\n    "workaround",\n    "timing",\n    "category_recommendation",\n    "brand_competitor_mentions",\n  ];''',
-          )
-
-          replace_once(
-              reddit,
-              '''  const matches = searchPlanMatches(title, body, plan);\n  if (plan.length > 0 && matches.length === 0) return { reason: "query_mismatch" };\n  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];''',
-              '''  // The provider already retrieved this record for one of our searches. Local\n  // token matching is useful attribution evidence, but it must never become a\n  // semantic rejection gate before the high-recall AI triage stage.\n  const matches = searchPlanMatches(title, body, plan);\n  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];''',
-          )
-
-          replace_once(
-              reddit,
-              '''      searchPosts: true,\n      searchComments: false,''',
-              '''      searchPosts: true,\n      // Search matching comments as lightweight discovery records too.\n      // skipComments remains true so we do not crawl full comment trees here;\n      // full context is reserved for the enrichment stage.\n      searchComments: true,''',
-          )
-
-          tests = "tests/apify-reddit-provider.test.mjs"
-          replace_once(
-              tests,
-              '''  assert.deepEqual(counts, {\n    direct_buying_intent: 2,\n    problem_pain: 2,\n    competitor_switching: 1,\n    category_recommendation: 1,\n    brand_competitor_mentions: 1,\n    workaround: 1,\n    timing: 1,\n  });''',
-              '''  assert.ok(counts.direct_buying_intent >= 2, JSON.stringify(plan));\n  assert.ok(counts.problem_pain >= 2, JSON.stringify(plan));\n  assert.ok(counts.competitor_switching >= 1, JSON.stringify(plan));\n  assert.ok(counts.workaround >= 1, JSON.stringify(plan));\n  assert.ok(counts.timing >= 1, JSON.stringify(plan));\n  assert.ok(\n    counts.category_recommendation + counts.brand_competitor_mentions <= 1,\n    "secondary category/brand searches must not crowd out demand lanes",\n  );''',
-          )
-
-          replace_once(
-              tests,
-              '''  assert.equal(\n    plan.filter((entry) => entry.lane === "category_recommendation").length,\n    1,\n  );\n\n  assert.equal(\n    plan.filter((entry) => entry.lane === "brand_competitor_mentions").length,\n    1,\n  );''',
-              '''  assert.equal(\n    plan.filter((entry) => entry.lane === "problem_pain").length,\n    3,\n  );\n\n  assert.equal(\n    plan.filter((entry) =>\n      entry.lane === "category_recommendation" ||\n      entry.lane === "brand_competitor_mentions"\n    ).length,\n    0,\n  );''',
-          )
-
-          replace_once(
-              tests,
-              '''test("rejects observed broad-query noise while retaining concrete Basecamp demand", async () => {''',
-              '''test("keeps provider results for AI triage instead of using fuzzy local matching as a rejection gate", async () => {''',
-          )
-
-          replace_once(
-              tests,
-              '''  assert.deepEqual(\n    result.candidates.map((candidate) => candidate.externalId).sort(),\n    ["buyingpm", "scatteredwork", "teamworkapps"],\n  );\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 3);''',
-              '''  assert.deepEqual(\n    result.candidates.map((candidate) => candidate.externalId).sort(),\n    ["alienstasks", "buyingpm", "offlineapps", "scatteredwork", "starwars", "teamworkapps"],\n  );\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);\n  assert.ok(\n    result.candidates.find((candidate) => candidate.externalId === "buyingpm")?.matchedQueries.length,\n    "local matching should still preserve attribution when it can verify a match",\n  );''',
-          )
-
-          replace_once(
-              tests,
-              '''  assert.equal(result.candidates.length, 2);\n  assert.equal(result.candidates[0].externalId, "abc123");\n  assert.equal(result.candidates[0].createdAt, documentedActorItem.createdAt);\n  assert.equal(result.candidates[0].sourceMode, "apify-test");\n  assert.equal(result.candidates[1].externalId, "switch123");\n  assert.deepEqual(\n    new Set(result.candidates[1].discoveryLanes),\n    new Set(["competitor_switching", "brand_competitor_mentions"]),\n  );\n  assert.equal(result.diagnostics.fetchedCandidates, 4);\n  assert.equal(result.diagnostics.verifiedRecentCandidates, 2);\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 2);''',
-              '''  assert.equal(result.candidates.length, 4);\n  assert.equal(result.candidates[0].externalId, "abc123");\n  assert.equal(result.candidates[0].createdAt, documentedActorItem.createdAt);\n  assert.equal(result.candidates[0].sourceMode, "apify-test");\n  const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");\n  assert.ok(switching);\n  assert.ok(switching.discoveryLanes.includes("competitor_switching"));\n  assert.equal(result.diagnostics.fetchedCandidates, 4);\n  assert.equal(result.diagnostics.verifiedRecentCandidates, 4);\n  assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);''',
-          )
-
-          replace_once(
-              tests,
-              '''  assert.equal(discovery.searchPosts, true);\n  assert.equal(discovery.searchComments, false);''',
-              '''  assert.equal(discovery.searchPosts, true);\n  assert.equal(discovery.searchComments, true);''',
-          )
-
-          repository = "lib/server/repository.ts"
-          replace_once(
-              repository,
-              '''  getLatestScan(workspaceId: string): Promise<ScanRecord | null>;\n  beginScanRun''',
-              '''  getLatestScan(workspaceId: string): Promise<ScanRecord | null>;\n  getLatestWorkspaceScan(workspaceId: string): Promise<ScanRecord | null>;\n  beginScanRun''',
-          )
-          replace_once(
-              repository,
-              '''  async getLatestScan(workspaceId: string) {\n    return [...getStore().scans.values()]\n      .filter((scan) => scan.workspaceId === workspaceId && scan.status === "complete")\n      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;\n  }\n\n  async beginScanRun''',
-              '''  async getLatestScan(workspaceId: string) {\n    return [...getStore().scans.values()]\n      .filter((scan) => scan.workspaceId === workspaceId && scan.status === "complete")\n      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;\n  }\n\n  async getLatestWorkspaceScan(workspaceId: string) {\n    return [...getStore().scans.values()]\n      .filter((scan) => scan.workspaceId === workspaceId)\n      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;\n  }\n\n  async beginScanRun''',
-          )
-          replace_once(
-              repository,
-              '''  async getLatestScan(workspaceId: string) {\n    const [row] = await getDb()\n      .select({ record: runtimeScans.record })\n      .from(runtimeScans)\n      .where(and(eq(runtimeScans.workspaceId, workspaceId), eq(runtimeScans.status, "complete")))\n      .orderBy(desc(runtimeScans.createdAt))\n      .limit(1);\n    return row?.record ?? null;\n  }\n\n  async beginScanRun''',
-              '''  async getLatestScan(workspaceId: string) {\n    const [row] = await getDb()\n      .select({ record: runtimeScans.record })\n      .from(runtimeScans)\n      .where(and(eq(runtimeScans.workspaceId, workspaceId), eq(runtimeScans.status, "complete")))\n      .orderBy(desc(runtimeScans.createdAt))\n      .limit(1);\n    return row?.record ?? null;\n  }\n\n  async getLatestWorkspaceScan(workspaceId: string) {\n    const [row] = await getDb()\n      .select({ record: runtimeScans.record })\n      .from(runtimeScans)\n      .where(eq(runtimeScans.workspaceId, workspaceId))\n      .orderBy(desc(runtimeScans.createdAt))\n      .limit(1);\n    return row?.record ?? null;\n  }\n\n  async beginScanRun''',
-          )
-
-          route = "app/api/scans/latest/route.ts"
-          replace_once(
-              route,
-              '''    const scan = await getStateRepository().getLatestScan(actor.workspaceId);\n    if (!scan) throw new ApiError("No completed Market Scan is available yet.", 404, "scan_not_found");''',
-              '''    const scan = await getStateRepository().getLatestWorkspaceScan(actor.workspaceId);\n    if (!scan) throw new ApiError("No Market Scan is available yet.", 404, "scan_not_found");''',
-          )
-
-          ui = "components/ThreadlineExperience.tsx"
-          replace_once(
-              ui,
-              '''    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">''',
-              '''    <a className={styles.brand} aria-label="Threadline home" href="/">''',
-          )
-          replace_once(
-              ui,
-              '''          const latest = (await response.json()) as ApiScanResponse;\n          if (!response.ok || cancelled || latest.scan.status !== "complete" || !latest.report) return;\n          setUrl(latest.scan.websiteUrl);\n          setScanResponse(latest);\n          setScanProgress(latest.scan.progress);\n          setAccessLevel(effectiveAccessLevel(latest.access));\n          setView("report");''',
-              '''          const latest = (await response.json()) as ApiScanResponse;\n          if (!response.ok || cancelled || !latest.scan?.id) return;\n          setUrl(latest.scan.websiteUrl);\n          setScanResponse(latest);\n          setScanProgress(latest.scan.progress);\n          setAccessLevel(effectiveAccessLevel(latest.access));\n          if (latest.scan.status === "failed") {\n            setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");\n            setView("error");\n            return;\n          }\n          if (latest.scan.status === "complete" && latest.report) {\n            setView("report");\n          }''',
-          )
-
-          ci = ".github/workflows/ci.yml"
-          replace_once(
-              ci,
-              '''          print("stored_replies=" + str(stored.get("replies") or 0))\n          PY\n              exit 0''',
-              '''          print("stored_replies=" + str(stored.get("replies") or 0))\n          potential_total = int(potential.get("total") or 0)\n          reply_total = len(report.get("replies") or [])\n          if potential_total < 1 or reply_total < 1:\n              print("acceptance_quality=failed")\n              print("acceptance_quality_reason=Basecamp must yield at least one qualified potential customer and one grounded reply")\n              raise SystemExit(2)\n          print("acceptance_quality=passed")\n          PY\n              exit 0''',
-          )
-
-          Path("tests/latest-scan-restoration.test.mjs").write_text('''import assert from "node:assert/strict";\nimport { readFile } from "node:fs/promises";\nimport test from "node:test";\n\nconst repository = await readFile(new URL("../lib/server/repository.ts", import.meta.url), "utf8");\nconst latestRoute = await readFile(new URL("../app/api/scans/latest/route.ts", import.meta.url), "utf8");\nconst experience = await readFile(new URL("../components/ThreadlineExperience.tsx", import.meta.url), "utf8");\n\ntest("workspace restoration considers the newest scan regardless of completion status", () => {\n  assert.match(repository, /getLatestWorkspaceScan\\(workspaceId: string\\)/);\n  assert.match(latestRoute, /getLatestWorkspaceScan\\(actor\\.workspaceId\\)/);\n  assert.doesNotMatch(latestRoute, /getLatestScan\\(actor\\.workspaceId\\)/);\n});\n\ntest("a failed latest scan is surfaced instead of silently showing an older completed report", () => {\n  const restore = experience.indexOf("async function restoreLatestWorkspace");\n  const failed = experience.indexOf('latest.scan.status === "failed"', restore);\n  const report = experience.indexOf('latest.scan.status === "complete" && latest.report', restore);\n  assert.ok(restore >= 0 && failed > restore && report > failed);\n  assert.match(experience, /setErrorMessage\\(latest\\.scan\\.error/);\n});\n\ntest("production navigation no longer links to temporary acceptance diagnostics", () => {\n  assert.doesNotMatch(experience, /acceptance-ai-diagnostics/);\n});\n''')
-          PY
-
-          rm -f app/acceptance-ai-diagnostics/route.ts app/acceptance-diagnostics/route.ts
-          git rm -f .github/workflows/vps-readonly-diagnostic.yml
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run focused regression tests
-        run: |
-          node --test tests/apify-reddit-provider.test.mjs tests/latest-scan-restoration.test.mjs tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs
-
-      - name: Verify build and lint
-        run: |
-          npm run build
-          npm run lint
-
-      - name: Commit verified patch
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git diff --check
-          git status --short
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Stabilize Reddit retrieval and latest scan restoration"
-          git push origin HEAD:feature/reddit-intelligence-pipeline
+              const logResponse = await fetch(
+                `https://api.apify.com/v2/logs/${encodeURIComponent(run.id)}`,
+                { headers },
+              );
+              if (logResponse.ok) {
+                const lines = (await logResponse.text()).split(/\r?\n/)
+                  .filter((line) => /\b(ERROR|WARN|invalid|failed|timeout|timed out)\b/i.test(line))
+                  .slice(-8)
+                  .map(cleanMessage);
+                for (const line of lines) console.log(`run_${index}_diagnostic=${line}`);
+              }
+            }
+          })().catch((error) => {
+            console.error(cleanMessage(error?.message || error));
+            process.exit(1);
+          });
+          NODE

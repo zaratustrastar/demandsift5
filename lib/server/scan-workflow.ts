@@ -899,7 +899,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       previousOpportunities: previousResult?.opportunities ?? [],
       scanId: scan.id,
       windowEndedAt: scan.createdAt,
-      windowDays: 7,
+      windowDays: lookbackDays,
     });
     const opportunities = discovery.sourceMode === "mock" ? rawOpportunities : aggregated.opportunities;
     const deepBySourceId = new Map(deepRows.map((row) => [row.conversation.provenance.id, row]));

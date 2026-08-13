@@ -1217,7 +1217,8 @@ export class ApifyRedditTestProvider implements RedditProvider {
         }
       }
 
-      if (status !== "SUCCEEDED") {
+      const usablePartialDataset = status === "TIMED-OUT" && Boolean(datasetId);
+      if (status !== "SUCCEEDED" && !usablePartialDataset) {
         throw new Error(
           `The Apify Reddit test run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`,
         );
@@ -1242,6 +1243,15 @@ export class ApifyRedditTestProvider implements RedditProvider {
       const payload = await readJson(datasetResponse, 5_000_000);
       if (!Array.isArray(payload)) {
         throw new Error("The Apify Reddit test provider returned an invalid dataset.");
+      }
+      if (usablePartialDataset && payload.length === 0) {
+        throw new Error("The timed-out Apify Reddit test run did not retain any usable records.");
+      }
+      if (usablePartialDataset) {
+        console.warn("Using bounded partial Apify Reddit results after Actor timeout", {
+          actorStatus: status,
+          datasetItems: payload.length,
+        });
       }
       return payload;
     } catch (error) {

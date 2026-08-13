@@ -522,6 +522,43 @@ test("Actor timeout stays below the client budget so terminal status can be obse
   assert.equal(redditModule.apifyActorTimeoutSeconds(20_000), 20);
 });
 
+test("discovery uses real bounded records retained by a timed-out Actor run", async () => {
+  const calls = [];
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token: "private-apify-token",
+    fetchImpl: async (url, init = {}) => {
+      const parsedUrl = new URL(url);
+      calls.push({ url: parsedUrl, init });
+
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        return new Response(JSON.stringify({
+          data: {
+            id: "run-partial-timeout",
+            status: "TIMED-OUT",
+            statusMessage: "Crawled 32/50 pages, 0 failed requests.",
+            defaultDatasetId: "dataset-partial-timeout",
+          },
+        }), { status: 201 });
+      }
+
+      if (parsedUrl.pathname.includes("/datasets/dataset-partial-timeout/items")) {
+        return new Response(JSON.stringify([documentedActorItem]), { status: 200 });
+      }
+
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  const result = await provider.discover(searchRequest);
+
+  assert.equal(calls.length, 2);
+  assert.equal(result.diagnostics.fetchedCandidates, 1);
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].externalId, "abc123");
+  assert.equal(result.candidates[0].permalink, documentedActorItem.url);
+});
+
 test("discovery rejects unverified timestamps instead of inventing recency", async () => {
   const calls = [];
 

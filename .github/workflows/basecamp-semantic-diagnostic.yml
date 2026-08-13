@@ -1,0 +1,96 @@
+name: Basecamp semantic diagnostic
+
+on:
+  push:
+    branches:
+      - diagnostic/basecamp-semantic
+    paths:
+      - .github/workflows/basecamp-semantic-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.actor == 'zaratustrastar'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Print sanitized semantic evidence for the completed acceptance scan
+        shell: bash
+        env:
+          SCAN_ID: scan_dc95db8b54a74f2f8fc8f417b1ffc471
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          raw="$(mktemp)"
+          trap 'rm -f "$raw"' EXIT
+
+          db="$(sudo -n docker ps \
+            --filter label=com.docker.compose.project=demandsift2 \
+            --filter label=com.docker.compose.service=database \
+            --format '{{.ID}}' | head -n 1)"
+          test -n "$db"
+
+          sudo -n docker exec -e TARGET_SCAN_ID="$SCAN_ID" "$db" sh -lc \
+            'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -v ON_ERROR_STOP=1 -v scan_id="$TARGET_SCAN_ID" -c "SELECT record::text FROM runtime_scans WHERE id = :'"'"'scan_id'"'"';"' \
+            > "$raw"
+          test -s "$raw"
+
+          python3 - "$raw" <<'PY'
+          import json, sys
+
+          scan = json.load(open(sys.argv[1]))
+          result = scan.get("result") or {}
+          profile = result.get("profile") or {}
+          diagnostics = result.get("diagnostics") or {}
+          retrieval = result.get("retrievalDiagnostics") or {}
+          states = result.get("processedRedditState") or []
+
+          print("scan_id=" + str(scan.get("id") or ""))
+          print("status=" + str(scan.get("status") or ""))
+          print("website=" + str(scan.get("websiteUrl") or ""))
+          print("analysis_mode=" + str(result.get("analysisMode") or ""))
+          print("data_mode=" + str(result.get("dataMode") or ""))
+          print("profile=" + json.dumps({
+              "name": profile.get("name"),
+              "category": profile.get("productCategory"),
+              "audience": profile.get("targetAudience"),
+              "problems": profile.get("problemsSolved"),
+              "jobs": profile.get("jobsToBeDone"),
+              "workarounds": profile.get("likelyWorkarounds"),
+              "triggers": profile.get("triggerEvents"),
+              "competitors": profile.get("competitors"),
+          }, ensure_ascii=False, separators=(",", ":")))
+          print("search_plan=" + json.dumps(retrieval.get("searchPlan") or [], ensure_ascii=False, separators=(",", ":")))
+          print("diagnostics=" + json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")))
+          print("retrieval_counts=" + json.dumps({
+              "queryCount": retrieval.get("queryCount"),
+              "fetched": retrieval.get("fetchedCandidates"),
+              "normalized": retrieval.get("normalizedCandidates"),
+              "matchedByLane": retrieval.get("matchedCandidatesByLane"),
+              "matchedByQuery": retrieval.get("matchedCandidatesByQuery"),
+              "worthByLane": retrieval.get("worthEnrichingByLane"),
+              "worthByQuery": retrieval.get("worthEnrichingByQuery"),
+          }, ensure_ascii=False, separators=(",", ":")))
+          print("candidate_count=" + str(len(states)))
+
+          for index, state in enumerate(states[:50], 1):
+              triage = state.get("triage") or {}
+              deep = state.get("deepQualification")
+              row = {
+                  "n": index,
+                  "id": state.get("externalId"),
+                  "subreddit": state.get("subreddit"),
+                  "author": state.get("author"),
+                  "title": (state.get("title") or "")[:240],
+                  "excerpt": (state.get("excerpt") or "")[:500],
+                  "url": state.get("canonicalPermalink"),
+                  "matchedQueries": state.get("matchedQueries"),
+                  "lanes": state.get("discoveryLanes"),
+                  "triage": triage,
+                  "deepQualification": deep,
+                  "replyStatus": state.get("replyStatus"),
+              }
+              print("candidate=" + json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+          PY

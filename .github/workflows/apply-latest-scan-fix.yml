@@ -82,11 +82,14 @@ jobs:
         run: |
           node --test tests/latest-scan-restoration.test.mjs tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs tests/apify-reddit-provider.test.mjs
 
-      - name: Verify build, lint and whitespace
-        run: |
-          npm run build
-          npm run lint
-          git diff --check
+      - name: Verify build
+        run: npm run build
+
+      - name: Verify lint
+        run: npm run lint
+
+      - name: Verify whitespace
+        run: git diff --check
 
       - name: Commit verified fix
         shell: bash

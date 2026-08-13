@@ -26,105 +26,28 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-
           provider = Path('lib/providers/reddit.server.ts')
           text = provider.read_text()
-          old = '''      if (!response.ok) {
-        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
-      }
-      try {
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-'''
-          new = '''      if (!response.ok) {
-        if (response.status === 402) {
-          let billingEvidence = "";
-          try {
-            const payload = raw ? JSON.parse(raw) : {};
-            if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-              const error = (payload as { error?: unknown }).error;
-              if (error && typeof error === "object" && !Array.isArray(error)) {
-                const row = error as { type?: unknown; message?: unknown };
-                billingEvidence = `${stringValue(row.type, 120)} ${stringValue(row.message, 500)}`.toLowerCase();
-              }
-            }
-          } catch {
-            billingEvidence = "";
-          }
-          if (/max(?:imum)?[^a-z0-9]{0,20}(?:total[^a-z0-9]{0,10})?charge|maxTotalChargeUsd/i.test(billingEvidence)) {
-            throw new Error("Apify Reddit discovery is blocked because the configured per-run charge ceiling is too low.");
-          }
-          if (/credit|balance|billing|payment|spend|usage[^a-z0-9]{0,10}limit|prepaid/.test(billingEvidence)) {
-            throw new Error("Apify Reddit discovery is blocked because the Apify account has insufficient credit or a billing usage limit.");
-          }
-          if (/subscription|rental|rent[^a-z]|purchase[^a-z]|access[^a-z].*(?:actor|store)/.test(billingEvidence)) {
-            throw new Error("Apify Reddit discovery is blocked because this Actor requires account access or a subscription.");
-          }
-          throw new Error("Apify Reddit discovery is blocked by an account billing restriction (HTTP 402).");
-        }
-        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
-      }
-      try {
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-'''
-          if old not in text:
-              if 'account billing restriction (HTTP 402)' not in text:
-                  raise SystemExit('Expected Apify HTTP error block not found')
-          else:
+          old = "      if (!response.ok) {\n        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);\n      }\n      try {\n        return raw ? JSON.parse(raw) : {};\n      } catch {\n"
+          new = "      if (!response.ok) {\n        if (response.status === 402) {\n          let billingEvidence = \"\";\n          try {\n            const payload = raw ? JSON.parse(raw) : {};\n            if (payload && typeof payload === \"object\" && !Array.isArray(payload)) {\n              const error = (payload as { error?: unknown }).error;\n              if (error && typeof error === \"object\" && !Array.isArray(error)) {\n                const row = error as { type?: unknown; message?: unknown };\n                billingEvidence = `${stringValue(row.type, 120)} ${stringValue(row.message, 500)}`.toLowerCase();\n              }\n            }\n          } catch {\n            billingEvidence = \"\";\n          }\n          if (/max(?:imum)?[^a-z0-9]{0,20}(?:total[^a-z0-9]{0,10})?charge|maxtotalchargeusd/i.test(billingEvidence)) {\n            throw new Error(\"Apify Reddit discovery is blocked because the configured per-run charge ceiling is too low.\");\n          }\n          if (/credit|balance|billing|payment|spend|usage[^a-z0-9]{0,10}limit|prepaid/.test(billingEvidence)) {\n            throw new Error(\"Apify Reddit discovery is blocked because the Apify account has insufficient credit or a billing usage limit.\");\n          }\n          if (/subscription|rental|rent[^a-z]|purchase[^a-z]|access[^a-z].*(?:actor|store)/.test(billingEvidence)) {\n            throw new Error(\"Apify Reddit discovery is blocked because this Actor requires account access or a subscription.\");\n          }\n          throw new Error(\"Apify Reddit discovery is blocked by an account billing restriction (HTTP 402).\");\n        }\n        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);\n      }\n      try {\n        return raw ? JSON.parse(raw) : {};\n      } catch {\n"
+          if old in text:
               text = text.replace(old, new, 1)
+          elif 'account billing restriction (HTTP 402)' not in text:
+              raise SystemExit('Expected Apify HTTP error block not found')
           provider.write_text(text)
-
           tests = Path('tests/apify-reddit-provider.test.mjs')
           t = tests.read_text()
           marker = 'classifies Apify 402 billing restrictions without leaking provider details'
+          addition = "\n\ntest(\"classifies Apify 402 billing restrictions without leaking provider details\", async () => {\n  const cases = [\n    { message: \"maxTotalChargeUsd is lower than the maximum total charge required for this Actor run\", expected: /per-run charge ceiling is too low/i },\n    { message: \"Your account has insufficient credit balance to start this run\", expected: /insufficient credit or a billing usage limit/i },\n    { message: \"An active subscription is required to access this Actor\", expected: /requires account access or a subscription/i },\n  ];\n  for (const row of cases) {\n    const provider = new redditModule.ApifyRedditTestProvider({\n      actorId: \"trudax/reddit-scraper-lite\",\n      token: \"private-apify-token\",\n      fetchImpl: async () => new Response(JSON.stringify({ error: { type: \"payment-required\", message: row.message } }), { status: 402, headers: { \"content-type\": \"application/json\" } }),\n    });\n    await assert.rejects(provider.discover(searchRequest), (error) => {\n      assert.match(error.message, row.expected);\n      assert.doesNotMatch(error.message, /private-apify-token/i);\n      assert.doesNotMatch(error.message, /payment-required/i);\n      return true;\n    });\n  }\n});\n"
           if marker not in t:
-              t += r'''
-
-test("classifies Apify 402 billing restrictions without leaking provider details", async () => {
-  const cases = [
-    {
-      message: "maxTotalChargeUsd is lower than the maximum total charge required for this Actor run",
-      expected: /per-run charge ceiling is too low/i,
-    },
-    {
-      message: "Your account has insufficient credit balance to start this run",
-      expected: /insufficient credit or a billing usage limit/i,
-    },
-    {
-      message: "An active subscription is required to access this Actor",
-      expected: /requires account access or a subscription/i,
-    },
-  ];
-
-  for (const row of cases) {
-    const provider = new redditModule.ApifyRedditTestProvider({
-      actorId: "trudax/reddit-scraper-lite",
-      token: "private-apify-token",
-      fetchImpl: async () => new Response(JSON.stringify({
-        error: { type: "payment-required", message: row.message },
-      }), { status: 402, headers: { "content-type": "application/json" } }),
-    });
-
-    await assert.rejects(
-      provider.discover(searchRequest),
-      (error) => {
-        assert.match(error.message, row.expected);
-        assert.doesNotMatch(error.message, /private-apify-token/i);
-        assert.doesNotMatch(error.message, /payment-required/i);
-        return true;
-      },
-    );
-  }
-});
-'''
+              t += addition
           tests.write_text(t)
       - run: npm ci
       - run: npm run build
       - run: npm run lint
       - run: node --test tests/apify-reddit-provider.test.mjs
       - run: npm test
-      - name: Commit source and test changes
+      - name: Commit source and tests only
         shell: bash
         run: |
           set -Eeuo pipefail

@@ -1,4 +1,5 @@
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/http";
+import { OpenAiProviderError } from "@/lib/providers/openai.server";
 import { getStateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
 
@@ -55,7 +56,19 @@ export async function POST(request: Request, context: RouteContext) {
     if (scan.status === "complete") {
       return Response.json({ jobId: job.id, scanId: scan.id, status: "complete", duplicate: true });
     }
-    const completed = await runScan(scan.id);
+    let completed;
+    try {
+      completed = await runScan(scan.id);
+    } catch (error) {
+      if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
+        throw new ApiError(
+          "The AI provider could not produce valid structured output after bounded recovery attempts.",
+          502,
+          "openai_structured_output_failed",
+        );
+      }
+      throw error;
+    }
     if (completed.status === "running") {
       throw new ApiError(
         "The scan is currently running in another request.",

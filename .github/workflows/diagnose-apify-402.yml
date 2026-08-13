@@ -11,79 +11,13 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Inspect sanitized Apify billing response
+      - name: Inspect sanitized Apify billing response from worker
         shell: bash
         run: |
           set -Eeuo pipefail
-          ENV_FILE=/opt/demandsift5/deploy/vps.env
-          test -f "$ENV_FILE"
-          set -a
-          # shellcheck disable=SC1090
-          source "$ENV_FILE"
-          set +a
-          : "${APIFY_TOKEN:?APIFY_TOKEN missing}"
-          : "${APIFY_REDDIT_ACTOR_ID:?APIFY_REDDIT_ACTOR_ID missing}"
+          script='const token=process.env.APIFY_TOKEN||""; const rawActor=process.env.APIFY_REDDIT_ACTOR_ID||""; if(!token||!rawActor){console.error("missing_apify_runtime_config");process.exit(2)} const actor=rawActor.replace("/","~"); console.log("actor_id="+actor); const headers={Authorization:`Bearer ${token}`,"Content-Type":"application/json"}; async function body(r){const t=await r.text();try{return JSON.parse(t)}catch{return {raw:t.slice(0,1000)}}} (async()=>{ let r=await fetch(`https://api.apify.com/v2/acts/${encodeURIComponent(actor)}`,{headers}); let p=await body(r); console.log("actor_metadata_http="+r.status); const d=p.data||{}; console.log("actor_metadata="+JSON.stringify({id:d.id,name:d.name,username:d.username,pricingInfos:d.pricingInfos,isDeprecated:d.isDeprecated}).slice(0,4000)); const input={searches:["looking for project management software"],ignoreStartUrls:true,skipComments:true,skipUserPosts:true,skipCommunity:true,includeMediaLinks:false,searchPosts:true,searchComments:true,searchCommunities:false,searchUsers:false,searchMedia:false,sort:"relevance",time:"week",includeNSFW:false,maxItems:1,maxPostCount:1,maxComments:0,maxCommunitiesCount:0,maxUserCount:0,scrollTimeout:20,navigationTimeout:30,debugMode:false,proxy:{useApifyProxy:true,apifyProxyGroups:["RESIDENTIAL"]}}; r=await fetch(`https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/runs?waitForFinish=1&timeout=30&maxItems=1&maxTotalChargeUsd=0.50`,{method:"POST",headers,body:JSON.stringify(input)}); p=await body(r); console.log("test_run_http="+r.status); const x=p.data||{}; const err=p.error?{type:p.error.type,message:p.error.message}:undefined; console.log("test_run="+JSON.stringify({id:x.id,status:x.status,statusMessage:x.statusMessage,usageTotalUsd:x.usageTotalUsd,pricingInfo:x.pricingInfo,error:err}).slice(0,4000)); })().catch(e=>{console.error("diagnostic_error="+(e&&e.message?e.message:String(e)));process.exit(1)})'
 
-          actor_id="${APIFY_REDDIT_ACTOR_ID/\//~}"
-          echo "actor_id=$actor_id"
-
-          tmp_body="$(mktemp)"
-          trap 'rm -f "$tmp_body"' EXIT
-
-          status="$(curl --silent --show-error \
-            -o "$tmp_body" -w '%{http_code}' \
-            -H "Authorization: Bearer $APIFY_TOKEN" \
-            "https://api.apify.com/v2/acts/${actor_id}")"
-          echo "actor_metadata_http=$status"
-          python3 - "$tmp_body" <<'PY'
-          import json, sys
-          raw = open(sys.argv[1], errors='replace').read()
-          try:
-              payload = json.loads(raw)
-          except Exception:
-              print('actor_metadata_body=' + raw[:500].replace('\n',' '))
-              raise SystemExit
-          data = payload.get('data') or {}
-          safe = {
-              'id': data.get('id'),
-              'name': data.get('name'),
-              'username': data.get('username'),
-              'pricingInfos': data.get('pricingInfos'),
-              'isDeprecated': data.get('isDeprecated'),
-          }
-          print('actor_metadata=' + json.dumps(safe, separators=(',',':'))[:4000])
-          PY
-
-          cat > "$tmp_body.input" <<'JSON'
-          {"searches":["looking for project management software"],"ignoreStartUrls":true,"skipComments":true,"skipUserPosts":true,"skipCommunity":true,"includeMediaLinks":false,"searchPosts":true,"searchComments":true,"searchCommunities":false,"searchUsers":false,"searchMedia":false,"sort":"relevance","time":"week","includeNSFW":false,"maxItems":1,"maxPostCount":1,"maxComments":0,"maxCommunitiesCount":0,"maxUserCount":0,"scrollTimeout":20,"navigationTimeout":30,"debugMode":false,"proxy":{"useApifyProxy":true,"apifyProxyGroups":["RESIDENTIAL"]}}
-          JSON
-          status="$(curl --silent --show-error \
-            -o "$tmp_body" -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer $APIFY_TOKEN" \
-            -H 'Content-Type: application/json' \
-            --data-binary "@$tmp_body.input" \
-            "https://api.apify.com/v2/acts/${actor_id}/runs?waitForFinish=1&timeout=30&maxItems=1&maxTotalChargeUsd=0.50")"
-          rm -f "$tmp_body.input"
-          echo "test_run_http=$status"
-          python3 - "$tmp_body" <<'PY'
-          import json, re, sys
-          raw = open(sys.argv[1], errors='replace').read()
-          raw = re.sub(r'(?i)(token|authorization)[^,}\n]*', r'\1=[REDACTED]', raw)
-          try:
-              payload = json.loads(raw)
-          except Exception:
-              print('test_run_body=' + raw[:1500].replace('\n',' '))
-              raise SystemExit
-          data = payload.get('data') or {}
-          safe = {
-              'id': data.get('id'),
-              'status': data.get('status'),
-              'statusMessage': data.get('statusMessage'),
-              'usageTotalUsd': data.get('usageTotalUsd'),
-              'pricingInfo': data.get('pricingInfo'),
-          }
-          if payload.get('error'):
-              safe['error'] = payload.get('error')
-          print('test_run=' + json.dumps(safe, separators=(',',':'))[:4000])
-          PY
+          if docker exec demandsift2-worker-1 node -e "$script"; then
+            exit 0
+          fi
+          sudo -n /usr/bin/docker exec demandsift2-worker-1 node -e "$script"

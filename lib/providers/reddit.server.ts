@@ -73,7 +73,7 @@ type ApifySearchActorInput = {
   skipCommunity: true;
   includeMediaLinks: false;
   searchPosts: true;
-  searchComments: false;
+  searchComments: true;
   searchCommunities: false;
   searchUsers: false;
   searchMedia: false;
@@ -1208,7 +1208,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
       skipCommunity: true,
       includeMediaLinks: false,
       searchPosts: true,
-      searchComments: false,
+      searchComments: true,
       searchCommunities: false,
       searchUsers: false,
       searchMedia: false,

@@ -450,6 +450,7 @@ test("discovery is lightweight and does not perform enrichment", async () => {
       if (parsedUrl.pathname.includes("/datasets/dataset-discovery/items")) {
         return new Response(JSON.stringify([
           documentedActorItem,
+          documentedComment,
           unrelatedActorItem,
           competitorMentionOnly,
           competitorSwitchingItem,
@@ -469,12 +470,14 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   });
 
   assert.equal(calls.length, 2);
-  assert.equal(result.candidates.length, 4);
+  assert.equal(result.candidates.length, 5);
   const documented = result.candidates.find((candidate) => candidate.externalId === "abc123");
+  const comment = result.candidates.find((candidate) => candidate.externalId === "reply456");
   const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");
   const noise = result.candidates.find((candidate) => candidate.externalId === "noise123");
   const mention = result.candidates.find((candidate) => candidate.externalId === "mention123");
-  assert.ok(documented && switching && noise && mention);
+  assert.ok(documented && comment && switching && noise && mention);
+  assert.equal(comment.kind, "comment");
   assert.equal(documented.createdAt, documentedActorItem.createdAt);
   assert.equal(documented.sourceMode, "apify-test");
   assert.deepEqual(
@@ -483,8 +486,8 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   );
   assert.deepEqual(noise.discoveryLanes, []);
   assert.deepEqual(mention.discoveryLanes, []);
-  assert.equal(result.diagnostics.fetchedCandidates, 4);
-  assert.equal(result.diagnostics.verifiedRecentCandidates, 4);
+  assert.equal(result.diagnostics.fetchedCandidates, 5);
+  assert.equal(result.diagnostics.verifiedRecentCandidates, 5);
   assert.equal(result.diagnostics.rejectedByReason.query_mismatch, 0);
 
   const startCall = calls[0];
@@ -496,7 +499,7 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   assert.equal(startCall.init.headers.authorization, "Bearer private-apify-token");
 
   assert.equal(discovery.searchPosts, true);
-  assert.equal(discovery.searchComments, false);
+  assert.equal(discovery.searchComments, true);
   assert.equal(discovery.skipComments, true);
   assert.equal(discovery.includeMediaLinks, false);
   assert.equal(discovery.maxComments, 0);

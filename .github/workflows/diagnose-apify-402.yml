@@ -1,8 +1,9 @@
 name: Apply sanitized Apify 402 handling
-# one-shot funded-account rerun
 
 on:
   push:
+    paths:
+      - .github/workflows/diagnose-apify-402.yml
     branches:
       - feature/reddit-intelligence-pipeline
   workflow_dispatch:

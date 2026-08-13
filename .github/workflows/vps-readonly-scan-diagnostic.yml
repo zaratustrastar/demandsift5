@@ -14,13 +14,14 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Inspect sanitized runtime state after acceptance failure
+      - name: Inspect sanitized current scan state
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "inspection=post-acceptance-500"
+          echo "inspection=current-scan-after-status-500"
           date -u
-          uptime
-          df -h /
-          free -h
           sudo -n /usr/local/sbin/demandsift-release inspect
+          echo "scan_status_begin"
+          sudo -n /usr/local/sbin/demandsift-release scan-status scan_1c9c1cebed0a4b879728cbabc5e9c40f || true
+          echo "scan_diagnostics_begin"
+          sudo -n /usr/local/sbin/demandsift-release diagnose scan_1c9c1cebed0a4b879728cbabc5e9c40f || true

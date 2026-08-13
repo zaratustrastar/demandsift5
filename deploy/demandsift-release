@@ -74,6 +74,41 @@ inspect_release() {
   compose ps
 }
 
+diagnose_release() {
+  [ "$#" -eq 1 ] || fail "diagnose requires exactly one scan ID"
+  local scan_id=$1
+  [[ $scan_id =~ ^scan_[0-9a-z]{16,80}$ ]] || fail "invalid scan ID"
+  require_fixed_layout
+
+  # Emit only aggregate pipeline diagnostics for the requested scan. This
+  # deliberately excludes source text, authors, permalinks, environment values,
+  # API credentials, and unrelated workspace/customer records.
+  compose exec -T database sh -lc '
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --no-align --tuples-only --field-separator="|" \
+      -v scan_id="$1" -c "
+        SELECT
+          id,
+          status,
+          COALESCE(record #>> ''{result,retrievalDiagnostics,queryCount}'', ''0''),
+          COALESCE(record #>> ''{result,retrievalDiagnostics,fetchedCandidates}'', ''0''),
+          COALESCE(record #>> ''{result,retrievalDiagnostics,normalizedCandidates}'', ''0''),
+          COALESCE(record #>> ''{result,retrievalDiagnostics,locallyMatchedCandidates}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,submittedForTriage}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,triageReturned}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,worthEnriching}'', ''0''),
+          COALESCE(record #>> ''{result,retrievalDiagnostics,enrichmentAttempts}'', ''0''),
+          COALESCE(record #>> ''{result,retrievalDiagnostics,enrichedConversations}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,submittedForDeepQualification}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,potentialCustomerConversations}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,uniquePotentialCustomers}'', ''0''),
+          COALESCE(record #>> ''{result,diagnostics,repliesGenerated}'', ''0'')
+        FROM runtime_scans
+        WHERE id = :'"'"'scan_id'"'"';
+      "
+  ' sh "$scan_id"
+}
+
 build_candidate() {
   [ "$#" -eq 1 ] || fail "build requires exactly one commit SHA"
   local expected_sha=$1
@@ -95,7 +130,7 @@ build_candidate() {
   /usr/bin/docker build --pull -f "$REPOSITORY/deploy/Dockerfile.worker" -t "$worker_image" "$REPOSITORY"
 
   /usr/bin/docker run --rm --network none --entrypoint node "$web_image" \
-    -e 'const fs=require("node:fs"); for (const file of ["dist/standalone/server.js","package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
+    -e 'const fs=require("node:fs"); for (const file of ["server.js","package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
   /usr/bin/docker run --rm --network none --entrypoint node "$worker_image" \
     --check scripts/background-worker.mjs
 
@@ -182,8 +217,9 @@ fi
 
 case "$command_name" in
   inspect) inspect_release "$@" ;;
+  diagnose) diagnose_release "$@" ;;
   build) build_candidate "$@" ;;
   deploy) deploy_candidate "$@" ;;
   rollback) rollback_release "$@" ;;
-  *) fail "allowed commands: inspect, build <feature-tip-sha>, deploy, rollback" ;;
+  *) fail "allowed commands: inspect, diagnose <scan-id>, build <feature-tip-sha>, deploy, rollback" ;;
 esac

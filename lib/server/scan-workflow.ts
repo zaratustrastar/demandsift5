@@ -731,22 +731,11 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       candidates: selectedForEnrichment,
       maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
     });
-    if (selectedForEnrichment.length > 0 && enrichment.conversations.length === 0) {
-      const failed = Math.max(enrichment.diagnostics.failed, selectedForEnrichment.length);
-      const technicalReason = enrichment.diagnostics.failureReason
-        ? ` Technical reason: ${enrichment.diagnostics.failureReason}`
-        : "";
-      throw new ApiError(
-        `Reddit enrichment failed: selected ${selectedForEnrichment.length}, enriched 0, failed ${failed}.${technicalReason}`,
-        502,
-        "reddit_enrichment_failed",
-      );
-    }
     await setStage(
       scan,
       "enrichment",
       "complete",
-      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} enriched; ${enrichment.diagnostics.failed} failure${enrichment.diagnostics.failed === 1 ? "" : "s"} recorded.`,
+      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} enriched; ${enrichment.diagnostics.fallbackUsed} verified discovery fallback${enrichment.diagnostics.fallbackUsed === 1 ? "" : "s"} used.`,
     );
 
     await setStage(scan, "qualification", "active");

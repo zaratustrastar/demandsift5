@@ -506,7 +506,7 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   assert.equal(discovery.maxItems, 36);
   assert.equal(discovery.maxPostCount, 4);
   assert.equal(startCall.url.searchParams.get("maxItems"), "36");
-  assert.equal(startCall.url.searchParams.get("timeout"), "480");
+  assert.equal(startCall.url.searchParams.get("timeout"), "570");
   assert.equal(discovery.time, "week");
   assert.equal(Object.hasOwn(discovery, "postDateLimit"), false);
   assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);
@@ -514,6 +514,12 @@ test("discovery is lightweight and does not perform enrichment", async () => {
 
   assert.equal(calls[1].init.method, "GET");
   assert.match(calls[1].url.pathname, /\/datasets\/dataset-discovery\/items$/);
+});
+
+test("Actor timeout stays below the client budget so terminal status can be observed", () => {
+  assert.equal(redditModule.apifyActorTimeoutSeconds(600_000), 570);
+  assert.equal(redditModule.apifyActorTimeoutSeconds(480_000), 450);
+  assert.equal(redditModule.apifyActorTimeoutSeconds(20_000), 20);
 });
 
 test("discovery rejects unverified timestamps instead of inventing recency", async () => {
@@ -764,7 +770,7 @@ test("enrichment only opens the candidates selected by the workflow", async () =
   );
 });
 
-test("enrichment failure is recorded and never silently promoted", async () => {
+test("enrichment failure preserves only the verified discovery record", async () => {
   let actorRun = 0;
 
   const provider = new redditModule.ApifyRedditTestProvider({
@@ -805,10 +811,20 @@ test("enrichment failure is recorded and never silently promoted", async () => {
     candidates: discovery.candidates,
   });
 
-  assert.deepEqual(result.conversations, []);
+  assert.equal(result.conversations.length, 1);
+  assert.equal(result.conversations[0].externalId, discovery.candidates[0].externalId);
+  assert.equal(result.conversations[0].body, discovery.candidates[0].body);
+  assert.deepEqual(result.conversations[0].structuredContext.replies, []);
+  assert.deepEqual(result.conversations[0].structuredContext.surroundingComments, []);
+  assert.equal(result.conversations[0].provenance.metadata.enriched, false);
+  assert.equal(
+    result.conversations[0].provenance.metadata.enrichmentFallback,
+    "verified_discovery_record",
+  );
   assert.equal(result.diagnostics.requested, 1);
   assert.equal(result.diagnostics.enriched, 0);
   assert.equal(result.diagnostics.failed, 1);
+  assert.equal(result.diagnostics.fallbackUsed, 1);
   assert.match(result.diagnostics.failureReason, /^actor_error:.*HTTP 503/i);
 });
 
@@ -869,8 +885,15 @@ test("enrichment reports actor-success mapping failures without inventing contex
   };
 
   const result = await provider.enrich({ candidates: [candidate] });
-  assert.deepEqual(result.conversations, []);
+  assert.equal(result.conversations.length, 1);
+  assert.equal(result.conversations[0].externalId, candidate.externalId);
+  assert.deepEqual(result.conversations[0].structuredContext.parentChain, []);
+  assert.deepEqual(result.conversations[0].structuredContext.replies, []);
+  assert.deepEqual(result.conversations[0].structuredContext.surroundingComments, []);
+  assert.equal(result.conversations[0].provenance.metadata.enriched, false);
+  assert.equal(result.diagnostics.enriched, 0);
   assert.equal(result.diagnostics.failed, 1);
+  assert.equal(result.diagnostics.fallbackUsed, 1);
   assert.match(
     result.diagnostics.failureReason,
     /^actor_succeeded_mapping_failure:unmatched=1;invalid=0;payload_items=1$/,

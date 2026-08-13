@@ -52,13 +52,9 @@ test("paid Reddit discovery failures surface a terminal machine-readable error",
   assert.ok(source.includes("Reddit discovery failed: ${message}"));
 });
 
-test("requested enrichment with zero usable conversations fails explicitly", () => {
-  const guard = position("selectedForEnrichment.length > 0 && enrichment.conversations.length === 0");
-  const errorCode = position('"reddit_enrichment_failed"');
-  const completedStage = source.indexOf('"enrichment",\n      "complete"', guard);
-  assert.ok(errorCode > guard);
-  assert.ok(completedStage > errorCode, "enrichment must fail before the stage can be marked complete");
-  assert.ok(source.includes("selected ${selectedForEnrichment.length}, enriched 0, failed ${failed}"));
+test("optional Reddit thread expansion cannot abort a verified discovery scan", () => {
+  assert.equal(source.includes('"reddit_enrichment_failed"'), false);
+  assert.equal(source.includes("enrichment.diagnostics.fallbackUsed"), true);
 });
 
 test("deep qualification is reused only after source and structured context are verified unchanged", () => {

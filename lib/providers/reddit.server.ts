@@ -976,6 +976,69 @@ function enrichedConversation(
   };
 }
 
+/**
+ * Preserve a verified discovery record when the optional thread-opening call
+ * fails. This does not invent replies or surrounding context: deep
+ * qualification receives only the selected author's already verified words.
+ */
+function discoveryFallbackConversation(
+  candidate: RedditDiscoveryCandidate,
+  provider: string,
+): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    provider,
+    sourceMode: candidate.sourceMode,
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    parentExternalId: candidate.parentExternalId,
+    subreddit: candidate.subreddit,
+    title: candidate.title,
+    body: candidate.body,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+    author: candidate.author,
+    permalink: candidate.permalink,
+    createdAt: candidate.createdAt,
+    metrics: candidate.metrics,
+    matchedQuery: candidate.matchedQuery,
+    matchedQueries: candidate.matchedQueries,
+    discoveryLanes: candidate.discoveryLanes,
+    provenance: {
+      ...candidate.provenance,
+      provider,
+      observedAt: new Date().toISOString(),
+      metadata: {
+        ...(candidate.provenance.metadata ?? {}),
+        enriched: false,
+        enrichmentFallback: "verified_discovery_record",
+      },
+    },
+  };
+}
+
+/**
+ * Give the Actor a shorter runtime budget than the client request. That lets
+ * us observe a terminal Actor status instead of aborting the HTTP poll at the
+ * exact instant the remote timeout is reached.
+ */
+export function apifyActorTimeoutSeconds(clientTimeoutMs: number): number {
+  const boundedClientMs = Math.max(20_000, Math.trunc(clientTimeoutMs));
+  return Math.max(20, Math.floor((boundedClientMs - 30_000) / 1_000));
+}
+
 function positiveInteger(
   value: string | undefined,
   fallback: number,
@@ -1103,13 +1166,17 @@ export class ApifyRedditTestProvider implements RedditProvider {
       return data as Record<string, unknown>;
     };
 
+    let runId = "";
+    let status = "NOT_STARTED";
+    let pollCount = 0;
+
     try {
       const startEndpoint = new URL(
         `/v2/actors/${encodeURIComponent(this.actorId)}/runs`,
         "https://api.apify.com",
       );
       startEndpoint.searchParams.set("waitForFinish", "60");
-      startEndpoint.searchParams.set("timeout", String(Math.ceil(timeoutMs / 1_000)));
+      startEndpoint.searchParams.set("timeout", String(apifyActorTimeoutSeconds(timeoutMs)));
       startEndpoint.searchParams.set("maxItems", String(Math.min(100, actorInput.maxItems)));
       startEndpoint.searchParams.set("maxTotalChargeUsd", "0.50");
 
@@ -1120,8 +1187,8 @@ export class ApifyRedditTestProvider implements RedditProvider {
         signal: controller.signal,
       });
       const started = runData(await readJson(startResponse, 1_000_000));
-      const runId = stringValue(started.id, 120);
-      let status = stringValue(started.status, 40).toUpperCase();
+      runId = stringValue(started.id, 120);
+      status = stringValue(started.status, 40).toUpperCase();
       let statusMessage = stringValue(started.statusMessage, 500);
       let datasetId = stringValue(started.defaultDatasetId, 120);
       if (!runId || !status) {
@@ -1130,6 +1197,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
 
       const terminalStatuses = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
       while (!terminalStatuses.has(status)) {
+        pollCount += 1;
         const statusEndpoint = new URL(
           `/v2/actor-runs/${encodeURIComponent(runId)}`,
           "https://api.apify.com",
@@ -1178,7 +1246,10 @@ export class ApifyRedditTestProvider implements RedditProvider {
       return payload;
     } catch (error) {
       if (controller.signal.aborted) {
-        throw new Error("The Apify Reddit test run timed out.");
+        throw new Error(
+          `The Apify Reddit test run timed out after ${Math.ceil(timeoutMs / 1_000)} seconds ` +
+          `(actor status ${status || "UNKNOWN"}, polls ${pollCount}, run ${runId || "not-started"}).`,
+        );
       }
       throw error;
     } finally {
@@ -1232,7 +1303,11 @@ export class ApifyRedditTestProvider implements RedditProvider {
         : {}),
     };
 
-    const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 480_000));
+    // Nine bounded searches with a residential proxy can legitimately run
+    // longer than the old eight-minute client budget. Items and per-run charge
+    // remain capped; the remote Actor receives a 570-second budget and the
+    // client gets 30 seconds to observe its terminal status and dataset.
+    const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 600_000));
     const payload = await this.runActor(discoveryInput, discoveryTimeoutMs);
     const rejectedByReason = emptyProviderRejections();
     const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
@@ -1333,13 +1408,15 @@ export class ApifyRedditTestProvider implements RedditProvider {
       console.error("Apify Reddit thread enrichment failed", error);
       const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";
       return {
-        conversations: [],
+        conversations: candidates.map((candidate) =>
+          discoveryFallbackConversation(candidate, `apify:${this.actorId}`),
+        ),
         sourceMode: this.sourceMode,
         diagnostics: {
           requested: candidates.length,
           enriched: 0,
           failed: candidates.length,
-          fallbackUsed: 0,
+          fallbackUsed: candidates.length,
           failureReason: `actor_error:${message.slice(0, 500)}`,
         },
       };
@@ -1353,13 +1430,13 @@ export class ApifyRedditTestProvider implements RedditProvider {
       if (!enriched) {
         failed += 1;
         unmatched += 1;
-        return [];
+        return [discoveryFallbackConversation(candidate, `apify:${this.actorId}`)];
       }
       const conversation = enrichedConversation(candidate, enriched, payload, `apify:${this.actorId}`);
       if (!conversation) {
         failed += 1;
         invalidConversation += 1;
-        return [];
+        return [discoveryFallbackConversation(candidate, `apify:${this.actorId}`)];
       }
       return [conversation];
     });
@@ -1368,9 +1445,9 @@ export class ApifyRedditTestProvider implements RedditProvider {
       sourceMode: this.sourceMode,
       diagnostics: {
         requested: candidates.length,
-        enriched: conversations.length,
+        enriched: conversations.length - failed,
         failed,
-        fallbackUsed: 0,
+        fallbackUsed: failed,
         ...(failed > 0
           ? {
               failureReason:

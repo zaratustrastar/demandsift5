@@ -24,6 +24,15 @@ test("release wrapper exposes only sanitized aggregate scan diagnostics", async 
   assert.doesNotMatch(source, /canonicalPermalink/);
 });
 
+test("release wrapper reclaims only unused Docker build artifacts", async () => {
+  const source = await readFile(wrapperUrl, "utf8");
+
+  assert.match(source, /reclaim_build_space\(\)/);
+  assert.match(source, /docker image prune --force/);
+  assert.match(source, /docker builder prune --all --force/);
+  assert.doesNotMatch(source, /docker (?:system|volume|container) prune/);
+});
+
 test("production web image contains only the Vinext standalone runtime", async () => {
   const source = await readFile(webDockerfileUrl, "utf8");
 

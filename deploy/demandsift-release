@@ -54,6 +54,23 @@ git_at_release() {
   /usr/bin/git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" "$@"
 }
 
+reclaim_build_space() {
+  local image
+  while IFS= read -r image; do
+    case "$image" in
+      demandsift2-web:candidate-*|demandsift2-worker:candidate-*)
+        /usr/bin/docker image rm "$image" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < <(/usr/bin/docker image ls --format '{{.Repository}}:{{.Tag}}')
+
+  # Candidate, latest, rollback, and running images remain referenced. Only
+  # dangling images and unused builder cache are reclaimed; volumes and
+  # containers are deliberately outside this cleanup boundary.
+  /usr/bin/docker image prune --force >/dev/null
+  /usr/bin/docker builder prune --all --force >/dev/null
+}
+
 read_candidate_state() {
   [ -f "$CANDIDATE_STATE" ] || fail "no tested candidate image is staged"
   # This file is created only by this root-owned script from validated values.
@@ -121,6 +138,8 @@ build_candidate() {
   fetched_sha=$(git_at_release rev-parse FETCH_HEAD)
   [ "$fetched_sha" = "$expected_sha" ] || fail "requested commit is not the current feature branch tip"
   git_at_release checkout --detach "$fetched_sha"
+
+  reclaim_build_space
 
   local short_sha=${fetched_sha:0:12}
   local web_image="demandsift2-web:candidate-$short_sha"

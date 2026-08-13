@@ -478,11 +478,11 @@ async function fetchWithValidatedRedirects(
 }
 
 async function readLimitedText(response: Response, byteLimit: number): Promise<{ text: string; bytes: number }> {
-  const declaredLength = Number.parseInt(response.headers.get("content-length") ?? "0", 10);
-  if (Number.isFinite(declaredLength) && declaredLength > byteLimit) {
-    await response.body?.cancel("Response exceeded crawler byte limit.");
-    throw new Error(`Page exceeds the ${byteLimit}-byte response limit.`);
-  }
+  // Large marketing pages often include several megabytes of hydration data,
+  // images encoded in markup, or localization payloads after the useful public
+  // copy. Read only a bounded prefix instead of rejecting the whole page from
+  // Content-Length. The byte limit remains a hard memory/network boundary: the
+  // stream is cancelled as soon as the prefix is full.
   if (!response.body) return { text: "", bytes: 0 };
 
   const reader = response.body.getReader();
@@ -491,11 +491,16 @@ async function readLimitedText(response: Response, byteLimit: number): Promise<{
   while (true) {
     const result = await reader.read();
     if (result.done) break;
-    bytes += result.value.byteLength;
-    if (bytes > byteLimit) {
+    const remaining = byteLimit - bytes;
+    if (result.value.byteLength >= remaining) {
+      if (remaining > 0) {
+        chunks.push(result.value.slice(0, remaining));
+        bytes += remaining;
+      }
       await reader.cancel("Response exceeded crawler byte limit.");
-      throw new Error(`Page exceeds the ${byteLimit}-byte response limit.`);
+      break;
     }
+    bytes += result.value.byteLength;
     chunks.push(result.value);
   }
   const body = new Uint8Array(bytes);

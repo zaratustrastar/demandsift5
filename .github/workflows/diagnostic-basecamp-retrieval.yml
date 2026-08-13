@@ -1,4 +1,4 @@
-name: Diagnostic Basecamp retrieval
+name: Diagnostic unrelated-company retrieval
 
 on:
   push:
@@ -17,11 +17,10 @@ jobs:
     env:
       APP_URL: https://demandsift.143-244-154-139.sslip.io
     steps:
-      - name: Run isolated Basecamp scan and print owned acceptance diagnostics
+      - name: Run isolated Buffer scan and print acceptance evidence
         shell: bash
         run: |
           set -Eeuo pipefail
-          # Diagnostic rerun for the currently deployed retrieval candidate.
           umask 077
           cookie_jar="$(mktemp)"
           created_json="$(mktemp)"
@@ -33,7 +32,7 @@ jobs:
             --cookie-jar "$cookie_jar" \
             -H 'content-type: application/json' \
             -X POST \
-            --data '{"websiteUrl":"https://basecamp.com","defer":true}' \
+            --data '{"websiteUrl":"https://buffer.com","defer":true}' \
             "$APP_URL/api/scans" > "$created_json"
 
           scan_id="$(python3 - "$created_json" <<'PY'
@@ -60,13 +59,15 @@ jobs:
               curl --fail-with-body --silent --show-error \
                 --cookie "$cookie_jar" \
                 "$APP_URL/acceptance-diagnostics" > "$diagnostics_html"
-              python3 - "$diagnostics_html" <<'PY'
+              python3 - "$diagnostics_html" "$latest_json" <<'PY'
           import html, json, re, sys
           raw = open(sys.argv[1], encoding='utf-8').read()
           match = re.search(r'<pre>(.*)</pre>', raw, re.S)
           if not match:
               raise SystemExit('diagnostic payload missing')
           payload = json.loads(html.unescape(match.group(1)))
+          scan_payload = json.load(open(sys.argv[2]))
+          report = scan_payload.get('report') or {}
           print('===SCAN===')
           print(json.dumps(payload.get('scan', {}), indent=2, sort_keys=True))
           print('===DIAGNOSTICS===')
@@ -76,6 +77,10 @@ jobs:
           print('===PROCESSED===')
           for row in payload.get('processedRedditState', []):
               print(json.dumps(row, sort_keys=True))
+          print('===REPORT_POTENTIAL_CUSTOMERS===')
+          print(json.dumps(report.get('potentialCustomers', [])[:5], indent=2, sort_keys=True))
+          print('===REPORT_REPLIES===')
+          print(json.dumps(report.get('replies', [])[:3], indent=2, sort_keys=True))
           print('===OUTPUT===')
           print(json.dumps(payload.get('output', {}), indent=2, sort_keys=True))
           PY

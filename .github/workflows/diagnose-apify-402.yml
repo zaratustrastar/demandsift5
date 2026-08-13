@@ -1,4 +1,4 @@
-name: Diagnose Apify 402
+name: Apply sanitized Apify 402 handling
 
 on:
   push:
@@ -6,18 +6,134 @@ on:
       - feature/reddit-intelligence-pipeline
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  diagnose:
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Inspect sanitized Apify billing response from worker
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Add sanitized Apify billing diagnostics
+        shell: python
+        run: |
+          from pathlib import Path
+
+          provider = Path('lib/providers/reddit.server.ts')
+          text = provider.read_text()
+          old = '''      if (!response.ok) {
+        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
+      }
+      try {
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+'''
+          new = '''      if (!response.ok) {
+        if (response.status === 402) {
+          let billingEvidence = "";
+          try {
+            const payload = raw ? JSON.parse(raw) : {};
+            if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+              const error = (payload as { error?: unknown }).error;
+              if (error && typeof error === "object" && !Array.isArray(error)) {
+                const row = error as { type?: unknown; message?: unknown };
+                billingEvidence = `${stringValue(row.type, 120)} ${stringValue(row.message, 500)}`.toLowerCase();
+              }
+            }
+          } catch {
+            billingEvidence = "";
+          }
+          if (/max(?:imum)?[^a-z0-9]{0,20}(?:total[^a-z0-9]{0,10})?charge|maxTotalChargeUsd/i.test(billingEvidence)) {
+            throw new Error("Apify Reddit discovery is blocked because the configured per-run charge ceiling is too low.");
+          }
+          if (/credit|balance|billing|payment|spend|usage[^a-z0-9]{0,10}limit|prepaid/.test(billingEvidence)) {
+            throw new Error("Apify Reddit discovery is blocked because the Apify account has insufficient credit or a billing usage limit.");
+          }
+          if (/subscription|rental|rent[^a-z]|purchase[^a-z]|access[^a-z].*(?:actor|store)/.test(billingEvidence)) {
+            throw new Error("Apify Reddit discovery is blocked because this Actor requires account access or a subscription.");
+          }
+          throw new Error("Apify Reddit discovery is blocked by an account billing restriction (HTTP 402).");
+        }
+        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
+      }
+      try {
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+'''
+          if old not in text:
+              if 'account billing restriction (HTTP 402)' not in text:
+                  raise SystemExit('Expected Apify HTTP error block not found')
+          else:
+              text = text.replace(old, new, 1)
+          provider.write_text(text)
+
+          tests = Path('tests/apify-reddit-provider.test.mjs')
+          t = tests.read_text()
+          marker = 'classifies Apify 402 billing restrictions without leaking provider details'
+          if marker not in t:
+              t += r'''
+
+test("classifies Apify 402 billing restrictions without leaking provider details", async () => {
+  const cases = [
+    {
+      message: "maxTotalChargeUsd is lower than the maximum total charge required for this Actor run",
+      expected: /per-run charge ceiling is too low/i,
+    },
+    {
+      message: "Your account has insufficient credit balance to start this run",
+      expected: /insufficient credit or a billing usage limit/i,
+    },
+    {
+      message: "An active subscription is required to access this Actor",
+      expected: /requires account access or a subscription/i,
+    },
+  ];
+
+  for (const row of cases) {
+    const provider = new redditModule.ApifyRedditTestProvider({
+      actorId: "trudax/reddit-scraper-lite",
+      token: "private-apify-token",
+      fetchImpl: async () => new Response(JSON.stringify({
+        error: { type: "payment-required", message: row.message },
+      }), { status: 402, headers: { "content-type": "application/json" } }),
+    });
+
+    await assert.rejects(
+      provider.discover(searchRequest),
+      (error) => {
+        assert.match(error.message, row.expected);
+        assert.doesNotMatch(error.message, /private-apify-token/i);
+        assert.doesNotMatch(error.message, /payment-required/i);
+        return true;
+      },
+    );
+  }
+});
+'''
+          tests.write_text(t)
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - run: node --test tests/apify-reddit-provider.test.mjs
+      - run: npm test
+      - name: Commit source and test changes
         shell: bash
         run: |
           set -Eeuo pipefail
-          script='const token=process.env.APIFY_TOKEN||""; const rawActor=process.env.APIFY_REDDIT_ACTOR_ID||""; if(!token||!rawActor){console.error("missing_apify_runtime_config");process.exit(2)} const actor=rawActor.replace("/","~"); console.log("actor_id="+actor); const headers={Authorization:`Bearer ${token}`,"Content-Type":"application/json"}; async function body(r){const t=await r.text();try{return JSON.parse(t)}catch{return {raw:t.slice(0,1000)}}} (async()=>{ let r=await fetch(`https://api.apify.com/v2/acts/${encodeURIComponent(actor)}`,{headers}); let p=await body(r); console.log("actor_metadata_http="+r.status); const d=p.data||{}; console.log("actor_metadata="+JSON.stringify({id:d.id,name:d.name,username:d.username,pricingInfos:d.pricingInfos,isDeprecated:d.isDeprecated}).slice(0,4000)); const input={searches:["looking for project management software"],ignoreStartUrls:true,skipComments:true,skipUserPosts:true,skipCommunity:true,includeMediaLinks:false,searchPosts:true,searchComments:true,searchCommunities:false,searchUsers:false,searchMedia:false,sort:"relevance",time:"week",includeNSFW:false,maxItems:1,maxPostCount:1,maxComments:0,maxCommunitiesCount:0,maxUserCount:0,scrollTimeout:20,navigationTimeout:30,debugMode:false,proxy:{useApifyProxy:true,apifyProxyGroups:["RESIDENTIAL"]}}; r=await fetch(`https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/runs?waitForFinish=1&timeout=30&maxItems=1&maxTotalChargeUsd=0.50`,{method:"POST",headers,body:JSON.stringify(input)}); p=await body(r); console.log("test_run_http="+r.status); const x=p.data||{}; const err=p.error?{type:p.error.type,message:p.error.message}:undefined; console.log("test_run="+JSON.stringify({id:x.id,status:x.status,statusMessage:x.statusMessage,usageTotalUsd:x.usageTotalUsd,pricingInfo:x.pricingInfo,error:err}).slice(0,4000)); })().catch(e=>{console.error("diagnostic_error="+(e&&e.message?e.message:String(e)));process.exit(1)})'
-
-          if docker exec demandsift2-worker-1 node -e "$script"; then
+          if git diff --quiet -- lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs; then
+            echo 'Sanitized 402 handling already present.'
             exit 0
           fi
-          sudo -n /usr/bin/docker exec demandsift2-worker-1 node -e "$script"
+          git config user.name 'demandsift-ci'
+          git config user.email 'actions@users.noreply.github.com'
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git commit -m 'Classify Apify billing failures safely'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

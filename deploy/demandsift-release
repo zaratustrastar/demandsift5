@@ -15,10 +15,17 @@ readonly STATE_DIRECTORY=/var/lib/demandsift-release
 readonly REPOSITORY="$STATE_DIRECTORY/repository"
 readonly CANDIDATE_STATE="$STATE_DIRECTORY/candidate"
 readonly DEPLOYED_STATE="$STATE_DIRECTORY/deployed"
+readonly RELEASE_LOCK="$STATE_DIRECTORY/release.lock"
 
 fail() {
   echo "demandsift-release: $*" >&2
   exit 1
+}
+
+acquire_release_lock() {
+  install -d -m 0700 -o root -g root "$STATE_DIRECTORY"
+  exec 9>"$RELEASE_LOCK"
+  /usr/bin/flock --nonblock 9 || fail "another release operation is already running"
 }
 
 source_git() {
@@ -55,7 +62,22 @@ git_at_release() {
 }
 
 reclaim_build_space() {
-  local image
+  local container command project image
+
+  # A cancelled legacy Docker build can leave its failed RUN container behind,
+  # pinning every intermediate layer. Remove only stopped, non-Compose
+  # containers whose command is the DemandSift web build; production Compose
+  # containers (including the exited migration job) are never selected.
+  while IFS= read -r container; do
+    [ -n "$container" ] || continue
+    project=$(/usr/bin/docker inspect --format '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}' "$container" 2>/dev/null || true)
+    [ -z "$project" ] || continue
+    command=$(/usr/bin/docker inspect --format '{{json .Config.Cmd}}' "$container" 2>/dev/null || true)
+    case "$command" in
+      *"npm run build:node"*) /usr/bin/docker container rm "$container" >/dev/null 2>&1 || true ;;
+    esac
+  done < <(/usr/bin/docker container ls --all --quiet --filter status=exited)
+
   while IFS= read -r image; do
     case "$image" in
       demandsift2-web:candidate-*|demandsift2-worker:candidate-*)
@@ -69,6 +91,13 @@ reclaim_build_space() {
   # containers are deliberately outside this cleanup boundary.
   /usr/bin/docker image prune --force >/dev/null
   /usr/bin/docker builder prune --all --force >/dev/null
+}
+
+reclaim_release() {
+  [ "$#" -eq 0 ] || fail "reclaim accepts no arguments"
+  require_fixed_layout
+  reclaim_build_space
+  /usr/bin/df -h / | /usr/bin/tail -n 1
 }
 
 read_candidate_state() {
@@ -145,8 +174,8 @@ build_candidate() {
   local web_image="demandsift2-web:candidate-$short_sha"
   local worker_image="demandsift2-worker:candidate-$short_sha"
 
-  /usr/bin/docker build --pull -f "$REPOSITORY/deploy/Dockerfile.web" -t "$web_image" "$REPOSITORY"
-  /usr/bin/docker build --pull -f "$REPOSITORY/deploy/Dockerfile.worker" -t "$worker_image" "$REPOSITORY"
+  /usr/bin/docker build --pull --force-rm -f "$REPOSITORY/deploy/Dockerfile.web" -t "$web_image" "$REPOSITORY"
+  /usr/bin/docker build --pull --force-rm -f "$REPOSITORY/deploy/Dockerfile.worker" -t "$worker_image" "$REPOSITORY"
 
   /usr/bin/docker run --rm --network none --entrypoint node "$web_image" \
     -e 'const fs=require("node:fs"); for (const file of ["dist/standalone/server.js","dist/standalone/package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
@@ -234,11 +263,14 @@ if [ "$#" -gt 0 ]; then
   shift
 fi
 
+acquire_release_lock
+
 case "$command_name" in
   inspect) inspect_release "$@" ;;
   diagnose) diagnose_release "$@" ;;
   build) build_candidate "$@" ;;
   deploy) deploy_candidate "$@" ;;
+  reclaim) reclaim_release "$@" ;;
   rollback) rollback_release "$@" ;;
-  *) fail "allowed commands: inspect, diagnose <scan-id>, build <feature-tip-sha>, deploy, rollback" ;;
+  *) fail "allowed commands: inspect, diagnose <scan-id>, build <feature-tip-sha>, deploy, reclaim, rollback" ;;
 esac

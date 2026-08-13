@@ -10,7 +10,11 @@ on:
 
 concurrency:
   group: demandsift-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Never interrupt a Docker release build on the small self-hosted VPS. A
+  # cancelled legacy build can retain its intermediate container and exhaust
+  # disk. The feature-tip guard below still prevents a queued stale candidate
+  # from being deployed.
+  cancel-in-progress: false
 
 jobs:
   source-tests:
@@ -73,6 +77,22 @@ jobs:
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      - name: Reclaim artifacts from an interrupted legacy build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for container in $(docker container ls --all --quiet --filter status=exited); do
+            project="$(docker inspect --format '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}' "$container" 2>/dev/null || true)"
+            [ -z "$project" ] || continue
+            command="$(docker inspect --format '{{json .Config.Cmd}}' "$container" 2>/dev/null || true)"
+            case "$command" in
+              *"npm run build:node"*) docker container rm "$container" >/dev/null ;;
+            esac
+          done
+          docker image prune --force >/dev/null
+          docker builder prune --all --force >/dev/null
+          df -h /
+
       - name: Build tested candidate images
         run: sudo -n /usr/local/sbin/demandsift-release build "$EXPECTED_SHA"
 

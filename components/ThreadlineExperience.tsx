@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   ProductDashboard,
   type RedditConnectionStatus,
@@ -97,14 +98,14 @@ async function copyText(value: string): Promise<boolean> {
 
 function Brand() {
   return (
-    <a className={styles.brand} aria-label="Threadline home" href="/">
+    <Link className={styles.brand} aria-label="Threadline home" href="/">
       <span className={styles.brandMark} aria-hidden="true">
         <i />
         <i />
         <i />
       </span>
       <span>threadline</span>
-    </a>
+    </Link>
   );
 }
 

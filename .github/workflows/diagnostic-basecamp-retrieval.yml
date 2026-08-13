@@ -17,7 +17,7 @@ jobs:
     env:
       APP_URL: https://demandsift.143-244-154-139.sslip.io
     steps:
-      - name: Run isolated Buffer scan and print acceptance evidence
+      - name: Run isolated MailerLite scan and print acceptance evidence
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -32,7 +32,7 @@ jobs:
             --cookie-jar "$cookie_jar" \
             -H 'content-type: application/json' \
             -X POST \
-            --data '{"websiteUrl":"https://buffer.com","defer":true}' \
+            --data '{"websiteUrl":"https://mailerlite.com","defer":true}' \
             "$APP_URL/api/scans" > "$created_json"
 
           scan_id="$(python3 - "$created_json" <<'PY'

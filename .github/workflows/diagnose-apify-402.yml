@@ -1,6 +1,12 @@
 name: Apply sanitized Apify 402 handling
+# single trigger
 
 on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/diagnose-apify-402.yml
   workflow_dispatch:
 
 permissions:

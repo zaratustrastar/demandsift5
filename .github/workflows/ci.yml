@@ -77,20 +77,13 @@ jobs:
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - name: Reclaim artifacts from an interrupted legacy build
+      - name: Reclaim runner-owned caches before the Docker build
         shell: bash
         run: |
           set -Eeuo pipefail
-          for container in $(docker container ls --all --quiet --filter status=exited); do
-            project="$(docker inspect --format '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}' "$container" 2>/dev/null || true)"
-            [ -z "$project" ] || continue
-            command="$(docker inspect --format '{{json .Config.Cmd}}' "$container" 2>/dev/null || true)"
-            case "$command" in
-              *"npm run build:node"*) docker container rm "$container" >/dev/null ;;
-            esac
-          done
-          docker image prune --force >/dev/null
-          docker builder prune --all --force >/dev/null
+          rm -rf "$HOME/.npm/_cacache" "$HOME/.cache"
+          find "$HOME/actions-runner/_diag" -type f -mtime +2 -delete 2>/dev/null || true
+          find "$HOME/actions-runner/_work/_temp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf -- {} + 2>/dev/null || true
           df -h /
 
       - name: Build tested candidate images

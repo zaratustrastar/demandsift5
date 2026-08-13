@@ -45,13 +45,13 @@ test("release wrapper serializes builds and deployments on the VPS", async () =>
   assert.match(source, /another release operation is already running/);
 });
 
-test("CI queues releases and reclaims only interrupted DemandSift build containers", async () => {
+test("CI queues releases and reclaims only runner-owned caches before Docker work", async () => {
   const source = await readFile(workflowUrl, "utf8");
 
   assert.match(source, /cancel-in-progress: false/);
-  assert.match(source, /status=exited/);
-  assert.match(source, /com\.docker\.compose\.project/);
-  assert.match(source, /npm run build:node/);
+  assert.match(source, /\$HOME\/\.npm\/_cacache/);
+  assert.match(source, /actions-runner\/_diag/);
+  assert.doesNotMatch(source, /docker container rm/);
   assert.doesNotMatch(source, /docker (?:system|volume|container) prune/);
 });
 

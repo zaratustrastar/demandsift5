@@ -6,6 +6,10 @@ const source = await readFile(
   new URL("../lib/server/scan-workflow.ts", import.meta.url),
   "utf8",
 );
+const executorRoute = await readFile(
+  new URL("../app/api/internal/jobs/[jobId]/execute/route.ts", import.meta.url),
+  "utf8",
+);
 
 function position(fragment) {
   const index = source.indexOf(fragment);
@@ -21,6 +25,17 @@ test("active scan orders discovery before triage before enrichment before deep q
   assert.ok(discovery < triage);
   assert.ok(triage < enrichment);
   assert.ok(enrichment < qualification);
+});
+
+test("long-running internal scans stream heartbeats before awaiting completion", () => {
+  assert.match(executorRoute, /new ReadableStream<Uint8Array>/);
+  assert.match(executorRoute, /EXECUTOR_HEARTBEAT_MS = 15_000/);
+  assert.match(executorRoute, /controller\.enqueue\(encoder\.encode\("\\n"\)\)/);
+  assert.match(executorRoute, /"x-accel-buffering": "no"/);
+  assert.ok(
+    executorRoute.indexOf("return streamScanExecution(job, scan.id)") >
+      executorRoute.indexOf('scan.status === "complete"'),
+  );
 });
 
 test("the acquisition scan uses a 30-day baseline while monitoring stays incremental", () => {

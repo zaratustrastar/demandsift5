@@ -129,30 +129,61 @@ diagnose_release() {
   # Emit only aggregate pipeline diagnostics for the requested scan. This
   # deliberately excludes source text, authors, permalinks, environment values,
   # API credentials, and unrelated workspace/customer records.
-  compose exec -T database sh -lc '
-    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-      --no-align --tuples-only --field-separator="|" \
-      -v scan_id="$1" -c "
-        SELECT
-          id,
-          status,
-          COALESCE(record #>> ''{result,retrievalDiagnostics,queryCount}'', ''0''),
-          COALESCE(record #>> ''{result,retrievalDiagnostics,fetchedCandidates}'', ''0''),
-          COALESCE(record #>> ''{result,retrievalDiagnostics,normalizedCandidates}'', ''0''),
-          COALESCE(record #>> ''{result,retrievalDiagnostics,locallyMatchedCandidates}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,submittedForTriage}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,triageReturned}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,worthEnriching}'', ''0''),
-          COALESCE(record #>> ''{result,retrievalDiagnostics,enrichmentAttempts}'', ''0''),
-          COALESCE(record #>> ''{result,retrievalDiagnostics,enrichedConversations}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,submittedForDeepQualification}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,potentialCustomerConversations}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,uniquePotentialCustomers}'', ''0''),
-          COALESCE(record #>> ''{result,diagnostics,repliesGenerated}'', ''0'')
-        FROM runtime_scans
-        WHERE id = :'"'"'scan_id'"'"';
-      "
-  ' sh "$scan_id"
+  compose exec -T database sh -c '
+    exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --no-align --tuples-only --field-separator="|" -v scan_id="$1"
+  ' sh "$scan_id" <<'SQL'
+SELECT
+  id,
+  status,
+  COALESCE(record #>> '{result,retrievalDiagnostics,queryCount}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,fetchedCandidates}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,normalizedCandidates}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,locallyMatchedCandidates}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForTriage}', '0'),
+  COALESCE(record #>> '{result,diagnostics,triageReturned}', '0'),
+  COALESCE(record #>> '{result,diagnostics,worthEnriching}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,enrichmentAttempts}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,enrichedConversations}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForDeepQualification}', '0'),
+  COALESCE(record #>> '{result,diagnostics,potentialCustomerConversations}', '0'),
+  COALESCE(record #>> '{result,diagnostics,uniquePotentialCustomers}', '0'),
+  COALESCE(record #>> '{result,diagnostics,repliesGenerated}', '0')
+FROM runtime_scans
+WHERE id = :'scan_id';
+SQL
+}
+
+scan_status_release() {
+  [ "$#" -eq 1 ] || fail "scan-status requires exactly one scan ID"
+  local scan_id=$1
+  [[ $scan_id =~ ^scan_[0-9a-z]{16,80}$ ]] || fail "invalid scan ID"
+  require_fixed_layout
+
+  # Read only status, stage states, and aggregate counters. No source content,
+  # authors, permalinks, customer text, or environment values leave the VPS.
+  compose exec -T database sh -c '
+    exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --no-align --tuples-only --field-separator="|" -v scan_id="$1"
+  ' sh "$scan_id" <<'SQL'
+SELECT
+  id,
+  status,
+  COALESCE(record->>'error', ''),
+  COALESCE(record #>> '{result,retrievalDiagnostics,fetchedCandidates}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForTriage}', '0'),
+  COALESCE(record #>> '{result,diagnostics,requestedForEnrichment}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForDeepQualification}', '0'),
+  COALESCE(record #>> '{result,diagnostics,uniquePotentialCustomers}', '0'),
+  COALESCE(record #>> '{result,diagnostics,repliesGenerated}', '0')
+FROM runtime_scans
+WHERE id = :'scan_id';
+
+SELECT stage->>'id', stage->>'status'
+FROM runtime_scans
+CROSS JOIN LATERAL jsonb_array_elements(record->'progress') AS stage
+WHERE id = :'scan_id';
+SQL
 }
 
 build_candidate() {
@@ -268,9 +299,10 @@ acquire_release_lock
 case "$command_name" in
   inspect) inspect_release "$@" ;;
   diagnose) diagnose_release "$@" ;;
+  scan-status) scan_status_release "$@" ;;
   build) build_candidate "$@" ;;
   deploy) deploy_candidate "$@" ;;
   reclaim) reclaim_release "$@" ;;
   rollback) rollback_release "$@" ;;
-  *) fail "allowed commands: inspect, diagnose <scan-id>, build <feature-tip-sha>, deploy, reclaim, rollback" ;;
+  *) fail "allowed commands: inspect, diagnose <scan-id>, scan-status <scan-id>, build <feature-tip-sha>, deploy, reclaim, rollback" ;;
 esac

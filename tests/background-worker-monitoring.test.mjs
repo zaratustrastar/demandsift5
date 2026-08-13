@@ -5,7 +5,9 @@ import test from "node:test";
 import {
   claimJob,
   createMonitoringScanRecord,
+  assertSuccessfulExecutorPayload,
   isMonitoringCandidateDue,
+  jobExecutionConfiguration,
   jobFailureDisposition,
   monitoringConfiguration,
   monitoringDedupeKey,
@@ -300,6 +302,20 @@ test("job claiming never reclaims a job at its maximum attempt count", async () 
   assert.match(query, /attempts < max_attempts/u);
 });
 
+test("scan execution timeout and stale-lock windows cannot overlap", () => {
+  assert.deepEqual(jobExecutionConfiguration({}), {
+    timeoutSeconds: 1_200,
+    staleSeconds: 1_500,
+  });
+  assert.deepEqual(jobExecutionConfiguration({
+    BACKGROUND_JOB_TIMEOUT_SECONDS: "480",
+    BACKGROUND_JOB_STALE_SECONDS: "600",
+  }), {
+    timeoutSeconds: 1_200,
+    staleSeconds: 1_500,
+  });
+});
+
 test("long worker execution helper uses the configured timeout rather than fetch defaults", async () => {
   const server = createServer((request, response) => {
     let body = "";
@@ -353,6 +369,50 @@ test("long worker execution helper fails explicitly on its own timeout", async (
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
+});
+
+test("executor heartbeats keep a request alive until the final JSON payload", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    const heartbeat = setInterval(() => response.write("\n"), 20);
+    setTimeout(() => {
+      clearInterval(heartbeat);
+      response.end(JSON.stringify({ ok: true, scanId: "scan_heartbeat" }));
+    }, 110);
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  try {
+    const result = await postJsonWithLongTimeout(
+      `http://127.0.0.1:${address.port}/execute`,
+      {
+        body: {},
+        signal: AbortSignal.timeout(1_000),
+        timeoutMs: 40,
+      },
+    );
+    assert.deepEqual(result, { ok: true, scanId: "scan_heartbeat" });
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("streamed executor errors retain machine-readable retry disposition", () => {
+  assert.throws(
+    () => assertSuccessfulExecutorPayload({
+      ok: false,
+      executorStatus: 502,
+      error: {
+        code: "openai_structured_output_failed",
+        message: "The provider exhausted bounded recovery.",
+      },
+    }),
+    (error) => {
+      assert.equal(error.status, 502);
+      assert.equal(error.code, "openai_structured_output_failed");
+      return true;
+    },
+  );
 });
 
 test("reddit enrichment failure is terminal and cannot restart discovery", async () => {

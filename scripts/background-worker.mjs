@@ -577,11 +577,27 @@ async function runMonitoringScheduler(sql, signal) {
   log("info", "monitor_scheduler_stopped");
 }
 
+export function jobExecutionConfiguration(environment = process.env) {
+  const timeoutSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_TIMEOUT_SECONDS,
+    1_200,
+    1_200,
+    1_800,
+  );
+  const configuredStaleSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_STALE_SECONDS,
+    timeoutSeconds + 300,
+    60,
+    3_600,
+  );
+  return {
+    timeoutSeconds,
+    staleSeconds: Math.max(configuredStaleSeconds, timeoutSeconds + 300),
+  };
+}
+
 export async function claimJob(sql, workerIdValue) {
-  const staleSeconds = Number(process.env.BACKGROUND_JOB_STALE_SECONDS ?? 1200);
-  const boundedStaleSeconds = Number.isFinite(staleSeconds)
-    ? Math.max(60, Math.min(staleSeconds, 3_600))
-    : 1200;
+  const { staleSeconds: boundedStaleSeconds } = jobExecutionConfiguration();
   const staleBefore = new Date(Date.now() - boundedStaleSeconds * 1_000);
   const rows = await sql`
     WITH candidate AS (
@@ -626,6 +642,7 @@ async function completeJob(sql, job) {
 const TERMINAL_SCAN_ERROR_CODES = new Set([
   "reddit_enrichment_failed",
   "openai_structured_output_failed",
+  "scan_execution_timeout",
 ]);
 
 function executorErrorCode(responseText) {
@@ -645,6 +662,25 @@ export class WorkerExecutorHttpError extends Error {
     this.status = status;
     this.code = executorErrorCode(responseText);
   }
+}
+
+export class WorkerExecutorTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`Web executor timed out after ${timeoutMs}ms.`);
+    this.name = "WorkerExecutorTimeoutError";
+    this.code = "scan_execution_timeout";
+  }
+}
+
+export function assertSuccessfulExecutorPayload(payload) {
+  if (payload?.ok === false && payload?.error) {
+    const status = Number(payload.executorStatus);
+    throw new WorkerExecutorHttpError(
+      Number.isInteger(status) && status >= 400 ? status : 500,
+      JSON.stringify({ error: payload.error }),
+    );
+  }
+  return payload;
 }
 
 export function isRetryableJobError(error) {
@@ -747,7 +783,7 @@ export function postJsonWithLongTimeout(urlValue, options) {
     });
     request.once("error", finishReject);
     request.setTimeout(options.timeoutMs, () => {
-      request.destroy(new Error(`Web executor timed out after ${options.timeoutMs}ms.`));
+      request.destroy(new WorkerExecutorTimeoutError(options.timeoutMs));
     });
     request.end(body);
   });
@@ -758,26 +794,31 @@ export async function executeScanJob(job, signal) {
   if (workerSecret.length < 32) {
     throw new Error("BACKGROUND_WORKER_SECRET must contain at least 32 characters.");
   }
-  const timeoutSeconds = Number(process.env.BACKGROUND_JOB_TIMEOUT_SECONDS ?? 900);
-  const boundedTimeoutSeconds = Number.isFinite(timeoutSeconds)
-    ? Math.max(30, Math.min(timeoutSeconds, 900))
-    : 900;
+  const { timeoutSeconds: boundedTimeoutSeconds } = jobExecutionConfiguration();
   const timeout = AbortSignal.timeout(boundedTimeoutSeconds * 1_000);
   const combinedSignal = AbortSignal.any([signal, timeout]);
-  return postJsonWithLongTimeout(
-    `${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`,
-    {
-      headers: {
-        authorization: `Bearer ${workerSecret}`,
-        "content-type": "application/json",
-        accept: "application/json",
+  try {
+    const payload = await postJsonWithLongTimeout(
+      `${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`,
+      {
+        headers: {
+          authorization: `Bearer ${workerSecret}`,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: { workerId },
+        signal: combinedSignal,
+        timeoutMs: boundedTimeoutSeconds * 1_000,
+        maxResponseBytes: 1_000_000,
       },
-      body: { workerId },
-      signal: combinedSignal,
-      timeoutMs: boundedTimeoutSeconds * 1_000,
-      maxResponseBytes: 1_000_000,
-    },
-  );
+    );
+    return assertSuccessfulExecutorPayload(payload);
+  } catch (error) {
+    if (timeout.aborted && !signal.aborted) {
+      throw new WorkerExecutorTimeoutError(boundedTimeoutSeconds * 1_000);
+    }
+    throw error;
+  }
 }
 
 async function runQueueWorker(databaseUrl, signal) {

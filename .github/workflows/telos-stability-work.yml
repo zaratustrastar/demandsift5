@@ -1,0 +1,96 @@
+name: DemandSift telos stability work
+
+on:
+  push:
+    branches:
+      - work/telos-stability
+    paths:
+      - .github/workflows/telos-stability-work.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/telos-stability
+          fetch-depth: 0
+
+      - name: Fix latest-scan restoration and remove diagnostic navigation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          repository = "lib/server/repository.ts"
+          replace_once(
+              repository,
+              '''  getLatestScan(workspaceId: string): Promise<ScanRecord | null>;\n  beginScanRun''',
+              '''  getLatestScan(workspaceId: string): Promise<ScanRecord | null>;\n  getLatestWorkspaceScan(workspaceId: string): Promise<ScanRecord | null>;\n  beginScanRun''',
+          )
+          replace_once(
+              repository,
+              '''  async getLatestScan(workspaceId: string) {\n    return [...getStore().scans.values()]\n      .filter((scan) => scan.workspaceId === workspaceId && scan.status === "complete")\n      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;\n  }\n\n  async beginScanRun''',
+              '''  async getLatestScan(workspaceId: string) {\n    return [...getStore().scans.values()]\n      .filter((scan) => scan.workspaceId === workspaceId && scan.status === "complete")\n      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;\n  }\n\n  async getLatestWorkspaceScan(workspaceId: string) {\n    return [...getStore().scans.values()]\n      .filter((scan) => scan.workspaceId === workspaceId)\n      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;\n  }\n\n  async beginScanRun''',
+          )
+          replace_once(
+              repository,
+              '''  async getLatestScan(workspaceId: string) {\n    const [row] = await getDb()\n      .select({ record: runtimeScans.record })\n      .from(runtimeScans)\n      .where(and(eq(runtimeScans.workspaceId, workspaceId), eq(runtimeScans.status, "complete")))\n      .orderBy(desc(runtimeScans.createdAt))\n      .limit(1);\n    return row?.record ?? null;\n  }\n\n  async beginScanRun''',
+              '''  async getLatestScan(workspaceId: string) {\n    const [row] = await getDb()\n      .select({ record: runtimeScans.record })\n      .from(runtimeScans)\n      .where(and(eq(runtimeScans.workspaceId, workspaceId), eq(runtimeScans.status, "complete")))\n      .orderBy(desc(runtimeScans.createdAt))\n      .limit(1);\n    return row?.record ?? null;\n  }\n\n  async getLatestWorkspaceScan(workspaceId: string) {\n    const [row] = await getDb()\n      .select({ record: runtimeScans.record })\n      .from(runtimeScans)\n      .where(eq(runtimeScans.workspaceId, workspaceId))\n      .orderBy(desc(runtimeScans.createdAt))\n      .limit(1);\n    return row?.record ?? null;\n  }\n\n  async beginScanRun''',
+          )
+
+          route = "app/api/scans/latest/route.ts"
+          replace_once(
+              route,
+              '''    const scan = await getStateRepository().getLatestScan(actor.workspaceId);\n    if (!scan) throw new ApiError("No completed Market Scan is available yet.", 404, "scan_not_found");''',
+              '''    const scan = await getStateRepository().getLatestWorkspaceScan(actor.workspaceId);\n    if (!scan) throw new ApiError("No Market Scan is available yet.", 404, "scan_not_found");''',
+          )
+
+          ui = "components/ThreadlineExperience.tsx"
+          replace_once(
+              ui,
+              '''    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">''',
+              '''    <a className={styles.brand} aria-label="Threadline home" href="/">''',
+          )
+          replace_once(
+              ui,
+              '''          const latest = (await response.json()) as ApiScanResponse;\n          if (!response.ok || cancelled || latest.scan.status !== "complete" || !latest.report) return;\n          setUrl(latest.scan.websiteUrl);\n          setScanResponse(latest);\n          setScanProgress(latest.scan.progress);\n          setAccessLevel(effectiveAccessLevel(latest.access));\n          setView("report");''',
+              '''          const latest = (await response.json()) as ApiScanResponse;\n          if (!response.ok || cancelled || !latest.scan?.id) return;\n          setUrl(latest.scan.websiteUrl);\n          setScanResponse(latest);\n          setScanProgress(latest.scan.progress);\n          setAccessLevel(effectiveAccessLevel(latest.access));\n          if (latest.scan.status === "failed") {\n            setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");\n            setView("error");\n            return;\n          }\n          if (latest.scan.status === "complete" && latest.report) {\n            setView("report");\n          }''',
+          )
+
+          Path("tests/latest-scan-restoration.test.mjs").write_text('''import assert from "node:assert/strict";\nimport { readFile } from "node:fs/promises";\nimport test from "node:test";\n\nconst repository = await readFile(new URL("../lib/server/repository.ts", import.meta.url), "utf8");\nconst latestRoute = await readFile(new URL("../app/api/scans/latest/route.ts", import.meta.url), "utf8");\nconst experience = await readFile(new URL("../components/ThreadlineExperience.tsx", import.meta.url), "utf8");\n\ntest("workspace restoration reads the newest scan regardless of completion status", () => {\n  assert.match(repository, /getLatestWorkspaceScan\\(workspaceId: string\\)/);\n  assert.match(latestRoute, /getLatestWorkspaceScan\\(actor\\.workspaceId\\)/);\n  assert.doesNotMatch(latestRoute, /getLatestScan\\(actor\\.workspaceId\\)/);\n});\n\ntest("a failed newest scan is surfaced instead of restoring an older completed report", () => {\n  const restore = experience.indexOf("async function restoreLatestWorkspace");\n  const failed = experience.indexOf('latest.scan.status === "failed"', restore);\n  const report = experience.indexOf('latest.scan.status === "complete" && latest.report', restore);\n  assert.ok(restore >= 0 && failed > restore && report > failed);\n  assert.match(experience, /setErrorMessage\\(latest\\.scan\\.error/);\n});\n\ntest("production navigation does not expose the temporary acceptance diagnostics", () => {\n  assert.doesNotMatch(experience, /href="\\/acceptance-ai-diagnostics"/);\n});\n''')
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused and full verification
+        run: |
+          node --test tests/latest-scan-restoration.test.mjs tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs
+          npm test
+          npm run build
+          npm run lint
+          git diff --check
+
+      - name: Commit verified patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/server/repository.ts app/api/scans/latest/route.ts components/ThreadlineExperience.tsx tests/latest-scan-restoration.test.mjs
+          git commit -m "Fix latest scan restoration semantics"
+          git push origin HEAD:work/telos-stability

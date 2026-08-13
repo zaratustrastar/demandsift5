@@ -97,7 +97,7 @@ async function copyText(value: string): Promise<boolean> {
 
 function Brand() {
   return (
-    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">
+    <a className={styles.brand} aria-label="Threadline home" href="/">
       <span className={styles.brandMark} aria-hidden="true">
         <i />
         <i />
@@ -375,12 +375,19 @@ export function ThreadlineExperience() {
           const response = await fetch("/api/scans/latest", { cache: "no-store" });
           if (response.status === 401 || response.status === 404) return;
           const latest = (await response.json()) as ApiScanResponse;
-          if (!response.ok || cancelled || latest.scan.status !== "complete" || !latest.report) return;
+          if (!response.ok || cancelled || !latest.scan?.id) return;
           setUrl(latest.scan.websiteUrl);
           setScanResponse(latest);
           setScanProgress(latest.scan.progress);
           setAccessLevel(effectiveAccessLevel(latest.access));
-          setView("report");
+          if (latest.scan.status === "failed") {
+            setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");
+            setView("error");
+            return;
+          }
+          if (latest.scan.status === "complete" && latest.report) {
+            setView("report");
+          }
         } catch {
           // The acquisition page remains usable if a prior private workspace
           // cannot be restored; no claims or access are inferred client-side.

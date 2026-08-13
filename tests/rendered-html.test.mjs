@@ -88,3 +88,13 @@ test("keeps claims, access, and provider boundaries explicit", async () => {
   assert.doesNotMatch(dashboard, /verifiedClaims\.length.*claims source-checked/);
   assert.match(fromScan, /disclosureRequired: opportunity\.disclosureRequired/);
 });
+
+test("dashboard evidence labels preserve website and Reddit provenance", async () => {
+  const mapper = await readFile(
+    new URL("../components/demand-intelligence/from-scan.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(mapper, /source\.kind === "website"/);
+  assert.match(mapper, /Verified business website evidence/);
+  assert.match(mapper, /Public Reddit evidence via Apify test source/);
+});

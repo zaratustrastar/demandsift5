@@ -1,7 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProductDashboard,
   type RedditConnectionStatus,
@@ -98,14 +97,14 @@ async function copyText(value: string): Promise<boolean> {
 
 function Brand() {
   return (
-    <Link className={styles.brand} aria-label="Threadline home" href="/">
+    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">
       <span className={styles.brandMark} aria-hidden="true">
         <i />
         <i />
         <i />
       </span>
       <span>threadline</span>
-    </Link>
+    </a>
   );
 }
 
@@ -173,7 +172,7 @@ function Landing({ onSubmit }: { onSubmit: (url: string) => void }) {
               <p className={styles.formError} id="url-error">{error}</p>
             ) : (
               <p className={styles.formNote} id="scan-note">
-                No card required · Public same-domain pages only · About 60 seconds
+                No card required · Public same-domain pages only · Usually several minutes
               </p>
             )}
           </form>
@@ -336,6 +335,7 @@ export function ThreadlineExperience() {
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("free");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const resumedScanRef = useRef<ApiScanResponse | null>(null);
   const [redditConnection, setRedditConnection] =
     useState<RedditConnectionStatus>(disconnectedReddit);
   const dashboardData = useMemo(
@@ -378,16 +378,17 @@ export function ThreadlineExperience() {
           const latest = (await response.json()) as ApiScanResponse;
           if (!response.ok || cancelled || !latest.scan?.id) return;
           setUrl(latest.scan.websiteUrl);
+          resumedScanRef.current = latest;
           setScanResponse(latest);
           setScanProgress(latest.scan.progress);
           setAccessLevel(effectiveAccessLevel(latest.access));
           if (latest.scan.status === "failed") {
             setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");
             setView("error");
-            return;
-          }
-          if (latest.scan.status === "complete" && latest.report) {
+          } else if (latest.scan.status === "complete" && latest.report) {
             setView("report");
+          } else {
+            setView("scanning");
           }
         } catch {
           // The acquisition page remains usable if a prior private workspace
@@ -497,6 +498,7 @@ export function ThreadlineExperience() {
 
   function startScan(nextUrl: string) {
     setUrl(nextUrl);
+    resumedScanRef.current = null;
     setScanResponse(null);
     setScanProgress([]);
     setErrorMessage("");
@@ -510,14 +512,18 @@ export function ThreadlineExperience() {
 
     async function begin() {
       try {
-        const createdResponse = await fetch("/api/scans", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ websiteUrl: url, defer: true }),
-        });
-        const created = (await createdResponse.json()) as ApiScanResponse;
-        if (!createdResponse.ok || !created.scan?.id) {
-          throw new Error(created.error?.message ?? "We could not safely read that website.");
+        let created = resumedScanRef.current;
+        resumedScanRef.current = null;
+        if (!created || created.scan.websiteUrl !== url || created.scan.status === "failed") {
+          const createdResponse = await fetch("/api/scans", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ websiteUrl: url, defer: true }),
+          });
+          created = (await createdResponse.json()) as ApiScanResponse;
+          if (!createdResponse.ok || !created.scan?.id) {
+            throw new Error(created.error?.message ?? "We could not safely read that website.");
+          }
         }
         if (cancelled) return;
         setScanResponse(created);

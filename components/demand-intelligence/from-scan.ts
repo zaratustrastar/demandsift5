@@ -187,9 +187,10 @@ function redditProviderLabel(dataMode: ApiReport["dataMode"]): string {
   return "approved-reddit-provider";
 }
 
-function conversationEvidenceLabel(dataMode: ApiReport["dataMode"]): string {
+function sourceEvidenceLabel(source: ApiSource, dataMode: ApiReport["dataMode"]): string {
+  if (source.kind === "website") return "Verified business website evidence";
   if (dataMode === "mock") return "Mock provider evidence";
-  if (dataMode === "apify-test") return "Apify test-source evidence";
+  if (dataMode === "apify-test") return "Public Reddit evidence via Apify test source";
   return "Public conversation evidence";
 }
 
@@ -370,7 +371,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
         return source
           ? [{
               quote: source.excerpt,
-              sourceLabel: conversationEvidenceLabel(report.dataMode),
+              sourceLabel: sourceEvidenceLabel(source, report.dataMode),
               provenanceId: sourceId,
             }]
           : [];
@@ -394,7 +395,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
           return source
             ? [{
                 quote: source.excerpt,
-                sourceLabel: conversationEvidenceLabel(report.dataMode),
+                sourceLabel: sourceEvidenceLabel(source, report.dataMode),
                 provenanceId: sourceId,
               }]
             : [];

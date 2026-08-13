@@ -122,7 +122,8 @@ jobs:
           cookie_jar="$(mktemp)"
           created_json="$(mktemp)"
           latest_json="$(mktemp)"
-          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json"' EXIT
+          diagnostics_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$diagnostics_json"' EXIT
 
           curl --fail-with-body --silent --show-error \
             --cookie-jar "$cookie_jar" \
@@ -159,13 +160,20 @@ jobs:
             echo "acceptance_poll=$attempt status=$status queued_polls=$queued_polls running_polls=$running_polls"
 
             if [ "$status" = "complete" ]; then
-              python3 - "$latest_json" <<'PY'
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+              python3 - "$latest_json" "$diagnostics_json" <<'PY'
           import json, sys
           payload = json.load(open(sys.argv[1]))
+          aggregate = json.load(open(sys.argv[2]))
           report = payload.get("report") or {}
           scan = payload.get("scan") or {}
           stored = report.get("storedCounts") or {}
           potential = report.get("potentialCustomers") or {}
+          output = aggregate.get("output") or {}
+          diagnostics = aggregate.get("diagnostics") or {}
+          retrieval = aggregate.get("retrieval") or {}
           print("acceptance_result=complete")
           print("website=" + str(scan.get("websiteUrl") or ""))
           print("data_mode=" + str(report.get("dataMode") or ""))
@@ -177,6 +185,31 @@ jobs:
           print("stored_insights=" + str(stored.get("insights") or 0))
           print("stored_competitor_signals=" + str(stored.get("competitorSignals") or 0))
           print("stored_replies=" + str(stored.get("replies") or 0))
+          safe_funnel = {
+              "retrieved": diagnostics.get("retrieved", 0),
+              "normalized": diagnostics.get("normalized", 0),
+              "deterministicSurvivors": diagnostics.get("deterministicSurvivors", 0),
+              "submittedForTriage": diagnostics.get("submittedForTriage", 0),
+              "triageReturned": diagnostics.get("triageReturned", 0),
+              "worthEnriching": diagnostics.get("worthEnriching", 0),
+              "requestedForEnrichment": diagnostics.get("requestedForEnrichment", 0),
+              "enrichedSuccessfully": diagnostics.get("enrichedSuccessfully", 0),
+              "enrichmentFailures": diagnostics.get("enrichmentFailures", 0),
+              "submittedForDeepQualification": diagnostics.get("submittedForDeepQualification", 0),
+              "deepQualificationsReturned": diagnostics.get("deepQualificationsReturned", 0),
+              "potentialCustomerConversations": diagnostics.get("potentialCustomerConversations", 0),
+              "uniquePotentialCustomers": diagnostics.get("uniquePotentialCustomers", 0),
+              "repliesGenerated": diagnostics.get("repliesGenerated", 0),
+              "queryCount": retrieval.get("queryCount", 0),
+              "queryCountsByLane": retrieval.get("queryCountsByLane", {}),
+              "matchedCandidatesByLane": retrieval.get("matchedCandidatesByLane", {}),
+              "worthEnrichingByLane": retrieval.get("worthEnrichingByLane", {}),
+          }
+          print("acceptance_funnel=" + json.dumps(safe_funnel, separators=(",", ":"), sort_keys=True))
+          if int(output.get("potentialCustomers") or 0) < 1:
+              raise SystemExit("Acceptance failed: no qualified potential customer was stored.")
+          if int(output.get("replies") or 0) < 1:
+              raise SystemExit("Acceptance failed: no grounded suggested reply was stored.")
           PY
               exit 0
             fi

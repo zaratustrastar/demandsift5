@@ -1,13 +1,6 @@
 import { apiErrorResponse, ApiError, requireWorkspace } from "@/lib/server/http";
 import { getStateRepository } from "@/lib/server/repository";
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
 export async function GET(request: Request) {
   try {
     const actor = await requireWorkspace(request);
@@ -26,41 +19,41 @@ export async function GET(request: Request) {
         websiteUrl: scan.websiteUrl,
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt,
-        progress: scan.progress,
+        progress: scan.progress.map((stage) => ({ id: stage.id, status: stage.status })),
       },
       diagnostics: scan.result.diagnostics,
-      retrievalDiagnostics: scan.result.retrievalDiagnostics,
-      processedRedditState: scan.result.processedRedditState.map((state) => ({
-        externalId: state.externalId,
-        author: state.author,
-        title: state.title,
-        excerpt: state.excerpt,
-        subreddit: state.subreddit,
-        sourceCreatedAt: state.sourceCreatedAt,
-        canonicalPermalink: state.canonicalPermalink,
-        matchedQueries: state.matchedQueries,
-        discoveryLanes: state.discoveryLanes,
-        triage: state.triage,
-        deepQualification: state.deepQualification,
-        replyStatus: state.replyStatus,
-      })),
+      retrieval: scan.result.retrievalDiagnostics
+        ? {
+            provider: scan.result.retrievalDiagnostics.provider,
+            queryCount: scan.result.retrievalDiagnostics.queryCount,
+            queryCountsByLane: scan.result.retrievalDiagnostics.queryCountsByLane,
+            matchedCandidatesByLane: scan.result.retrievalDiagnostics.matchedCandidatesByLane,
+            worthEnrichingByLane: scan.result.retrievalDiagnostics.worthEnrichingByLane,
+            fetchedCandidates: scan.result.retrievalDiagnostics.fetchedCandidates,
+            normalizedCandidates: scan.result.retrievalDiagnostics.normalizedCandidates,
+            locallyMatchedCandidates: scan.result.retrievalDiagnostics.locallyMatchedCandidates,
+            enrichmentAttempts: scan.result.retrievalDiagnostics.enrichmentAttempts,
+            enrichedConversations: scan.result.retrievalDiagnostics.enrichedConversations,
+            enrichmentFallbacks: scan.result.retrievalDiagnostics.enrichmentFallbacks,
+            qualifiedOpportunities: scan.result.retrievalDiagnostics.qualifiedOpportunities,
+          }
+        : null,
       output: {
         opportunities: scan.result.opportunities.length,
+        potentialCustomers: scan.result.potentialCustomers.total,
+        insights: scan.result.insights.length,
+        competitorSignals: scan.result.competitorWeakness.verified ? 1 : 0,
         marketIntelligence: scan.result.marketIntelligence.length,
-        replies: scan.result.replies.length,
+        replies: scan.result.replies.filter((reply) => reply.content.trim().length > 0).length,
       },
     };
 
-    return new Response(
-      `<!doctype html><html><head><meta charset="utf-8"><title>Acceptance diagnostics</title></head><body><pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre></body></html>`,
-      {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store",
-          "X-Robots-Tag": "noindex, nofollow",
-        },
+    return Response.json(payload, {
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Robots-Tag": "noindex, nofollow",
       },
-    );
+    });
   } catch (error) {
     return apiErrorResponse(error);
   }

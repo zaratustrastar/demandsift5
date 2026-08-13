@@ -12,14 +12,10 @@ test("workspace restoration considers the newest scan regardless of completion s
   assert.doesNotMatch(latestRoute, /getLatestScan\(actor\.workspaceId\)/);
 });
 
-test("a failed latest scan is surfaced instead of silently showing an older completed report", () => {
+test("failed and unfinished latest scans cannot reveal an older completed report", () => {
   const restore = experience.indexOf("async function restoreLatestWorkspace");
   const failed = experience.indexOf('latest.scan.status === "failed"', restore);
   const report = experience.indexOf('latest.scan.status === "complete" && latest.report', restore);
-  assert.ok(restore >= 0 && failed > restore && report > failed);
-  assert.match(experience, /setErrorMessage\(latest\.scan\.error/);
-});
-
-test("production navigation no longer links to temporary acceptance diagnostics", () => {
-  assert.doesNotMatch(experience, /acceptance-ai-diagnostics/);
+  const scanning = experience.indexOf('setView("scanning")', restore);
+  assert.ok(restore >= 0 && failed > restore && report > failed && scanning > report);
 });

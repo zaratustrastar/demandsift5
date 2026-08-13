@@ -3,7 +3,7 @@ name: VPS read-only scan diagnostic
 on:
   push:
     branches:
-      - diagnostic/vps-scan-state
+      - diagnostics/runtime-readonly
 
 permissions:
   contents: read

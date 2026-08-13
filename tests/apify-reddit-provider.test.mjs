@@ -504,7 +504,12 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   assert.equal(discovery.includeMediaLinks, false);
   assert.equal(discovery.maxComments, 0);
   assert.equal(discovery.maxItems, 36);
-  assert.equal(discovery.maxPostCount, 4);
+  assert.equal(discovery.maxPostCount, 36);
+  assert.equal(
+    discovery.maxPostCount,
+    discovery.maxItems,
+    "the Actor-wide post cap must not be divided by the number of searches",
+  );
   assert.equal(startCall.url.searchParams.get("maxItems"), "36");
   assert.equal(startCall.url.searchParams.get("timeout"), "570");
   assert.equal(discovery.time, "week");

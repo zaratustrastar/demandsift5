@@ -1289,7 +1289,6 @@ export class ApifyRedditTestProvider implements RedditProvider {
     const subreddit = request.subreddits?.length === 1
       ? request.subreddits[0]?.replace(/^r\//i, "").trim()
       : undefined;
-    const postsPerSearch = Math.max(2, Math.min(4, Math.ceil(maxItems / searches.length)));
     const discoveryInput: ApifySearchActorInput = {
       searches,
       ignoreStartUrls: true,
@@ -1306,7 +1305,11 @@ export class ApifyRedditTestProvider implements RedditProvider {
       time: boundedSearchTime(this.timeRange, request.since),
       includeNSFW: false,
       maxItems,
-      maxPostCount: postsPerSearch,
+      // Trudax applies maxPostCount across the whole Actor run, not once per
+      // search phrase. Dividing this by the query count silently starves a
+      // nine-lane scan to only a handful of posts before AI triage can run.
+      // Keep it aligned with the already-bounded global item budget.
+      maxPostCount: maxItems,
       maxComments: 0,
       maxCommunitiesCount: 0,
       maxUserCount: 0,

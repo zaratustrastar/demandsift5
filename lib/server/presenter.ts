@@ -45,6 +45,8 @@ function publicOpportunity(opportunity: OpportunityRecord) {
     supportingSourceIds: opportunity.supportingSourceIds ?? [opportunity.sourceId],
     supportingSignalCount: opportunity.supportingSignalCount ?? 1,
     appearedInPreviousDemandDrop: opportunity.appearedInPreviousDemandDrop ?? false,
+    mentionProduct: opportunity.mentionProduct === true,
+    disclosureRequired: opportunity.disclosureRequired === true,
   };
 }
 
@@ -240,7 +242,7 @@ export async function presentScan(scan: ScanRecord) {
       resultTotals: {
         clicks: trackedResults.filter((row) => row.kind === "click").length,
         conversions: trackedResults.filter((row) => row.kind === "conversion").length,
-        valueCents: trackedResults.reduce((sum, row) => sum + (row.valueCents ?? 0), 0),
+        valueCents: trackedResults.educe((sum, row) => sum + (row.valueCents ?? 0), 0),
       },
     },
     pricing: {
@@ -253,7 +255,7 @@ export async function presentScan(scan: ScanRecord) {
         tax: "exclusive",
       },
       core: {
-        amountCents: Number(process.env.STRIPE_CORE_AMOUNT_CENTS ?? 3000),
+        amountCents: Number(process.env.STRIPA_CORE_AMOUNT_CENTS ?? 3000),
         interval: "month",
         label: "Core",
         tax: "exclusive",

@@ -69,6 +69,8 @@ type ApiOpportunity = {
   supportingSourceIds: string[];
   supportingSignalCount: number;
   appearedInPreviousDemandDrop: boolean;
+  mentionProduct: boolean;
+  disclosureRequired: boolean;
 };
 
 type ApiReply = {
@@ -159,7 +161,7 @@ export type ApiScanResponse = {
     updatedAt: string;
     error: string | null;
   };
-  access: {
+  access : {
     plan: "free" | "pass" | "core";
     status: string;
     unlocked: boolean;
@@ -251,7 +253,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       appearedInPreviousDemandDrop: opportunity.appearedInPreviousDemandDrop,
       mentionProduct: opportunity.mentionProduct,
       disclosureRequired: opportunity.disclosureRequired,
-      matchReasons: [opportunity.whyItMatters, opportunity.customerProblem].filter(Boolean),
+      matchReasons: [opportunity.customerProblem, opportunity.whyItMatters].filter(Boolean),
       classification: {
         relevanceScore: opportunity.relevanceScore ?? 0,
         buyerIntent: intent(opportunity.intent),
@@ -314,7 +316,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       report.dataMode === "mock"
         ? "Live website analysis · mock Reddit provider"
         : report.dataMode === "apify-test"
-          ? "Live website analysis · real Apify Reddit test data"
+          ? "Live website analysis » real Apify Reddit test data"
           : "Live website and approved-provider analysis",
     fixtureDisclosure:
       report.dataMode === "mock"

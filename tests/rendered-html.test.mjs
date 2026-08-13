@@ -87,6 +87,12 @@ test("keeps claims, access, and provider boundaries explicit", async () => {
   assert.match(dashboard, /Keeps the product out unless it helps/);
   assert.doesNotMatch(dashboard, /verifiedClaims\.length.*claims source-checked/);
   assert.match(fromScan, /disclosureRequired: opportunity\.disclosureRequired/);
+  assert.match(presenter, /mentionProduct: opportunity\.mentionProduct === true/);
+  assert.match(presenter, /disclosureRequired: opportunity\.disclosureRequired === true/);
+  assert.match(
+    fromScan,
+    /matchReasons: \[opportunity\.customerProblem, opportunity\.whyItMatters\]/,
+  );
 });
 
 test("dashboard evidence labels preserve website and Reddit provenance", async () => {

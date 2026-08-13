@@ -37,6 +37,7 @@ test("production web image contains only the Vinext standalone runtime", async (
   const source = await readFile(webDockerfileUrl, "utf8");
 
   assert.match(source, /COPY --from=build --chown=node:node \/app\/dist\/standalone \/app\/dist\/standalone/);
+  assert.match(source, /\/app\/dist\/standalone\/package\.json \/app\/package\.json/);
   assert.match(source, /CMD \["node", "dist\/standalone\/server\.js"\]/);
   assert.doesNotMatch(source, /COPY --from=build --chown=node:node \/app \/app/);
 });

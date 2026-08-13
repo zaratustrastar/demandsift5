@@ -1,0 +1,108 @@
+name: Apply bounded comment search
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: demandsift-comment-search-patch
+  cancel-in-progress: false
+
+jobs:
+  patch-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Apply bounded discovery comment search
+        shell: python
+        run: |
+          from pathlib import Path
+
+          provider = Path('lib/providers/reddit.server.ts')
+          text = provider.read_text()
+          old_type = '  searchComments: false;\n'
+          old_input = '      searchComments: false,\n'
+          if old_type in text:
+              text = text.replace(old_type, '  searchComments: true;\n', 1)
+          if old_input in text:
+              text = text.replace(old_input, '      searchComments: true,\n', 1)
+          if '  searchComments: true;\n' not in text or '      searchComments: true,\n' not in text:
+              raise SystemExit('Expected discovery searchComments locations were not found')
+          provider.write_text(text)
+
+          tests = Path('tests/apify-reddit-provider.test.mjs')
+          text = tests.read_text()
+          text = text.replace(
+              '          documentedActorItem,\n          unrelatedActorItem,',
+              '          documentedActorItem,\n          documentedComment,\n          unrelatedActorItem,',
+              1,
+          )
+          text = text.replace('  assert.equal(result.candidates.length, 4);', '  assert.equal(result.candidates.length, 5);', 1)
+          text = text.replace(
+              '  const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");',
+              '  const comment = result.candidates.find((candidate) => candidate.externalId === "reply456");\n  const switching = result.candidates.find((candidate) => candidate.externalId === "switch123");',
+              1,
+          )
+          text = text.replace(
+              '  assert.ok(documented && switching && noise && mention);',
+              '  assert.ok(documented && comment && switching && noise && mention);\n  assert.equal(comment.kind, "comment");',
+              1,
+          )
+          text = text.replace('  assert.equal(result.diagnostics.fetchedCandidates, 4);', '  assert.equal(result.diagnostics.fetchedCandidates, 5);', 1)
+          text = text.replace('  assert.equal(result.diagnostics.verifiedRecentCandidates, 4);', '  assert.equal(result.diagnostics.verifiedRecentCandidates, 5);', 1)
+          text = text.replace('  assert.equal(discovery.searchComments, false);', '  assert.equal(discovery.searchComments, true);', 1)
+          required = [
+              'assert.equal(comment.kind, "comment")',
+              'assert.equal(discovery.searchComments, true)',
+              'assert.equal(discovery.skipComments, true)',
+              'assert.equal(discovery.maxComments, 0)',
+          ]
+          if not all(value in text for value in required):
+              raise SystemExit('Expected bounded comment-search assertions were not produced')
+          tests.write_text(text)
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run Reddit provider tests
+        run: node --test tests/apify-reddit-provider.test.mjs
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Commit source and tests only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if git diff --quiet -- lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs; then
+            echo 'Source already contains bounded comment-search patch.'
+            exit 0
+          fi
+          git config user.name 'demandsift-ci'
+          git config user.email 'actions@users.noreply.github.com'
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git commit -m 'Enable bounded Reddit comment search'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

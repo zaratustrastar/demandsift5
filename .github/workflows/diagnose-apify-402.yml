@@ -1,12 +1,6 @@
 name: Apply sanitized Apify 402 handling
-# funded-account classifier trigger
 
 on:
-  push:
-    paths:
-      - .github/workflows/diagnose-apify-402.yml
-    branches:
-      - feature/reddit-intelligence-pipeline
   workflow_dispatch:
 
 permissions:

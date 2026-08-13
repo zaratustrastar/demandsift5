@@ -10,6 +10,10 @@ const executorRoute = await readFile(
   new URL("../app/api/internal/jobs/[jobId]/execute/route.ts", import.meta.url),
   "utf8",
 );
+const scanStatusRoute = await readFile(
+  new URL("../app/api/scans/[scanId]/route.ts", import.meta.url),
+  "utf8",
+);
 
 function position(fragment) {
   const index = source.indexOf(fragment);
@@ -34,6 +38,14 @@ test("long-running scans start durably and are observed through short polling re
   assert.match(executorRoute, /scan\.status === "running" \? 202 : 200/);
   assert.match(executorRoute, /export async function GET/);
   assert.match(executorRoute, /executionSnapshot\(job, scan\)/);
+});
+
+test("running scan polling does not invoke completed-report presentation", () => {
+  const statusGuard = scanStatusRoute.indexOf("if (!scan.result)");
+  const presenter = scanStatusRoute.indexOf("await presentScan(scan)");
+  assert.ok(statusGuard >= 0);
+  assert.ok(presenter > statusGuard);
+  assert.match(scanStatusRoute, /report: null/);
 });
 
 test("the acquisition scan uses a 30-day baseline while monitoring stays incremental", () => {

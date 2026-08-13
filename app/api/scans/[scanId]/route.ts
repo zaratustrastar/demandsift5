@@ -10,6 +10,23 @@ export async function GET(request: Request, context: RouteContext) {
     const actor = await requireWorkspace(request);
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
+    if (!scan.result) {
+      return Response.json(
+        {
+          scan: {
+            id: scan.id,
+            status: scan.status,
+            websiteUrl: scan.websiteUrl,
+            progress: scan.progress,
+            createdAt: scan.createdAt,
+            updatedAt: scan.updatedAt,
+            error: scan.error,
+          },
+          report: null,
+        },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    }
     return Response.json(await presentScan(scan), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return apiErrorResponse(error);

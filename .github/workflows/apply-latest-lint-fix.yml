@@ -1,0 +1,66 @@
+name: Apply latest restoration lint fix
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-latest-lint-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Fix internal home navigation and remove lint diagnostic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path("components/ThreadlineExperience.tsx")
+          text = p.read_text()
+          old_import = 'import { FormEvent, useEffect, useMemo, useState } from "react";\n'
+          if 'import Link from "next/link";' not in text:
+              if text.count(old_import) != 1:
+                  raise SystemExit("unexpected React import shape")
+              text = text.replace(old_import, old_import + 'import Link from "next/link";\n', 1)
+          old = '''    <a className={styles.brand} aria-label="Threadline home" href="/">\n      <span className={styles.brandMark} aria-hidden="true">\n        <i />\n        <i />\n        <i />\n      </span>\n      <span>threadline</span>\n    </a>'''
+          new = '''    <Link className={styles.brand} aria-label="Threadline home" href="/">\n      <span className={styles.brandMark} aria-hidden="true">\n        <i />\n        <i />\n        <i />\n      </span>\n      <span>threadline</span>\n    </Link>'''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected Brand shape")
+          p.write_text(text.replace(old, new, 1))
+          report = Path("eslint-report.json")
+          if report.exists():
+              report.unlink()
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - run: node --test tests/latest-scan-restoration.test.mjs tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs tests/apify-reddit-provider.test.mjs
+      - run: git diff --check
+
+      - name: Commit verified lint fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add components/ThreadlineExperience.tsx
+          git add -u eslint-report.json
+          git commit -m "Fix latest restoration navigation lint"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

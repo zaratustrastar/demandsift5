@@ -24,25 +24,11 @@ jobs:
           df -h /
           free -h
 
-          echo "=== containers ==="
-          docker ps --format 'container={{.Names}} status={{.Status}} project={{.Label "com.docker.compose.project"}} service={{.Label "com.docker.compose.service"}}'
+          echo "=== release ==="
+          sudo -n /usr/local/sbin/demandsift-release inspect
 
-          echo "=== scan aggregate ==="
+          echo "=== scan status ==="
           sudo -n /usr/local/sbin/demandsift-release scan-status scan_6deef75d0b58478bb565f1bf75cfad27 || true
 
-          echo "=== scan job ==="
-          docker exec demandsift2-database-1 sh -c '
-            exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"               --no-align --tuples-only --field-separator="|"
-          ' <<'SQL'
-          SELECT type, status, attempts, max_attempts,
-                 COALESCE(error, ''),
-                 COALESCE(to_char(run_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-                 COALESCE(to_char(locked_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), ''),
-                 COALESCE(to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
-          FROM background_jobs
-          WHERE payload ->> 'scanId' = 'scan_6deef75d0b58478bb565f1bf75cfad27';
-          SQL
-
-          echo "=== recent sanitized service events ==="
-          docker logs --since 30m demandsift2-worker-1 2>&1             | sed -E 's/(Bearer|token|key|secret|password)[=: ][^ ,}"]+/\1=[REDACTED]/Ig'             | tail -n 100
-          docker logs --since 30m demandsift2-web-1 2>&1             | sed -E 's/(Bearer|token|key|secret|password)[=: ][^ ,}"]+/\1=[REDACTED]/Ig'             | grep -E 'scan_|Reddit retrieval|OpenAI|error|failed|completed'             | tail -n 160 || true
+          echo "=== completed diagnostics if available ==="
+          sudo -n /usr/local/sbin/demandsift-release diagnose scan_6deef75d0b58478bb565f1bf75cfad27 || true

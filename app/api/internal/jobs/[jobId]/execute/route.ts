@@ -1,20 +1,12 @@
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/http";
 import { OpenAiProviderError } from "@/lib/providers/openai.server";
-import { getStateRepository } from "@/lib/server/repository";
+import { getStateRepository, type StateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
+import type { ScanRecord } from "@/lib/server/contracts";
 
 type RouteContext = { params: Promise<{ jobId: string }> | { jobId: string } };
 type ExecuteBody = { workerId?: unknown };
-type ExecutorSuccess = {
-  ok: true;
-  jobId: string;
-  scanId: string;
-  status: string;
-  duplicate: boolean;
-};
-type ClaimedScanJob = { id: string };
-
-const EXECUTOR_HEARTBEAT_MS = 15_000;
+type ClaimedJob = NonNullable<Awaited<ReturnType<StateRepository["getJob"]>>>;
 
 function safeEqual(left: string, right: string): boolean {
   const length = Math.max(left.length, right.length);
@@ -40,93 +32,66 @@ function requireWorker(request: Request) {
   }
 }
 
-async function executeClaimedScan(
-  job: ClaimedScanJob,
-  scanId: string,
-): Promise<ExecutorSuccess> {
-  let completed;
-  try {
-    completed = await runScan(scanId);
-  } catch (error) {
-    if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
-      throw new ApiError(
-        "The AI provider could not produce valid structured output after bounded recovery attempts.",
-        502,
-        "openai_structured_output_failed",
-      );
-    }
-    throw error;
+async function requireClaimedScan(
+  jobId: string,
+  workerId: string,
+): Promise<{ job: ClaimedJob; scan: ScanRecord }> {
+  const repository = getStateRepository();
+  if (repository.kind !== "postgres") {
+    throw new ApiError("Persistent jobs require PostgreSQL.", 503, "worker_unavailable");
   }
-  if (completed.status === "running") {
-    throw new ApiError(
-      "The scan is currently running in another request.",
-      409,
-      "scan_already_running",
-    );
+  const job = await repository.getJob(jobId);
+  if (!job || job.type !== "scan.run") {
+    throw new ApiError("Job was not found.", 404, "job_not_found");
   }
+  if (job.status !== "running" || job.lockedBy !== workerId) {
+    throw new ApiError("Job is not claimed by this worker.", 409, "job_not_claimed");
+  }
+  const scan = await repository.getScan(job.payload.scanId);
+  if (!scan || scan.workspaceId !== job.payload.workspaceId) {
+    throw new ApiError("Job scan was not found.", 404, "scan_not_found");
+  }
+  return { job, scan };
+}
+
+function terminalScanFailure(scan: ScanRecord) {
+  const message = scan.error?.trim() || "The scan failed unexpectedly.";
+  const code = /structured (?:chat )?(?:json|output)/iu.test(message)
+    ? "openai_structured_output_failed"
+    : /reddit enrichment/iu.test(message)
+      ? "reddit_enrichment_failed"
+      : "scan_execution_failed";
   return {
-    ok: true,
-    jobId: job.id,
-    scanId: completed.id,
-    status: completed.status,
-    duplicate: false,
+    ok: false,
+    executorStatus: 502,
+    error: { code, message },
   };
 }
 
-function streamScanExecution(job: ClaimedScanJob, scanId: string) {
-  const encoder = new TextEncoder();
-  let cancelled = false;
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      // Send headers and one harmless JSON whitespace byte immediately. Further
-      // whitespace heartbeats keep every HTTP hop active while the durable scan
-      // advances in PostgreSQL. The worker parses the final object normally.
-      controller.enqueue(encoder.encode("\n"));
-      heartbeat = setInterval(() => {
-        if (!cancelled) controller.enqueue(encoder.encode("\n"));
-      }, EXECUTOR_HEARTBEAT_MS);
+async function executeClaimedScan(scanId: string): Promise<void> {
+  try {
+    await runScan(scanId);
+  } catch (error) {
+    // runScan durably records the failed scan before rejecting. The worker
+    // observes that terminal state through short polling requests, so this
+    // background task must never become an unhandled rejection.
+    if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
+      console.error("Background scan exhausted structured AI recovery.");
+      return;
+    }
+    console.error("Background scan execution failed.", error);
+  }
+}
 
-      void executeClaimedScan(job, scanId)
-        .then((payload) => {
-          if (!cancelled) {
-            controller.enqueue(encoder.encode(JSON.stringify(payload)));
-            controller.close();
-          }
-        })
-        .catch(async (error) => {
-          const response = apiErrorResponse(error);
-          const payload = await response.json().catch(() => ({
-            error: { code: "internal_error", message: "The scan could not be completed." },
-          }));
-          if (!cancelled) {
-            controller.enqueue(encoder.encode(JSON.stringify({
-              ok: false,
-              executorStatus: response.status,
-              ...payload,
-            })));
-            controller.close();
-          }
-        })
-        .finally(() => {
-          if (heartbeat) clearInterval(heartbeat);
-        });
-    },
-    cancel() {
-      cancelled = true;
-      if (heartbeat) clearInterval(heartbeat);
-      // The durable scan intentionally continues. A replacement worker can
-      // observe its completed state without executing discovery a second time.
-    },
-  });
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "cache-control": "no-store",
-      "content-type": "application/json; charset=utf-8",
-      "x-accel-buffering": "no",
-    },
-  });
+function executionSnapshot(job: ClaimedJob, scan: ScanRecord) {
+  if (scan.status === "failed") return terminalScanFailure(scan);
+  return {
+    ok: true,
+    jobId: job.id,
+    scanId: scan.id,
+    status: scan.status,
+    complete: scan.status === "complete",
+  };
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -137,31 +102,40 @@ export async function POST(request: Request, context: RouteContext) {
       throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
     const { jobId } = await context.params;
-    const repository = getStateRepository();
-    if (repository.kind !== "postgres") {
-      throw new ApiError("Persistent jobs require PostgreSQL.", 503, "worker_unavailable");
-    }
-    const job = await repository.getJob(jobId);
-    if (!job || job.type !== "scan.run") {
-      throw new ApiError("Job was not found.", 404, "job_not_found");
-    }
-    if (job.status !== "running" || job.lockedBy !== body.workerId) {
-      throw new ApiError("Job is not claimed by this worker.", 409, "job_not_claimed");
-    }
-    const scan = await repository.getScan(job.payload.scanId);
-    if (!scan || scan.workspaceId !== job.payload.workspaceId) {
-      throw new ApiError("Job scan was not found.", 404, "scan_not_found");
-    }
-    if (scan.status === "complete") {
-      return Response.json({
-        ok: true,
-        jobId: job.id,
-        scanId: scan.id,
-        status: "complete",
-        duplicate: true,
+    const { job, scan } = await requireClaimedScan(jobId, body.workerId);
+    if (scan.status === "complete" || scan.status === "failed" || scan.status === "running") {
+      return Response.json(executionSnapshot(job, scan), {
+        status: scan.status === "running" ? 202 : 200,
+        headers: { "cache-control": "no-store" },
       });
     }
-    return streamScanExecution(job, scan.id);
+
+    // The VPS is a persistent Node process, not a request-scoped serverless
+    // function. Start the durable scan and release the HTTP request immediately.
+    // Worker and browser status checks are then independent short requests, so
+    // no proxy/server timeout can terminate a long-running scan.
+    void executeClaimedScan(scan.id);
+    return Response.json(
+      { ok: true, jobId: job.id, scanId: scan.id, status: "starting", complete: false },
+      { status: 202, headers: { "cache-control": "no-store" } },
+    );
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    requireWorker(request);
+    const workerId = new URL(request.url).searchParams.get("workerId") ?? "";
+    if (workerId.length < 3 || workerId.length > 160) {
+      throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
+    }
+    const { jobId } = await context.params;
+    const { job, scan } = await requireClaimedScan(jobId, workerId);
+    return Response.json(executionSnapshot(job, scan), {
+      headers: { "cache-control": "no-store" },
+    });
   } catch (error) {
     return apiErrorResponse(error);
   }

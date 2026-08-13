@@ -13,6 +13,7 @@ import {
   monitoringDedupeKey,
   postJsonWithLongTimeout,
   scheduleMonitoringScans,
+  waitForScanExecution,
   WorkerExecutorHttpError,
 } from "../scripts/background-worker.mjs";
 
@@ -395,6 +396,42 @@ test("executor heartbeats keep a request alive until the final JSON payload", as
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
+});
+
+test("durable scan polling completes without one long-lived HTTP response", async () => {
+  let polls = 0;
+  const result = await waitForScanExecution({
+    signal: AbortSignal.timeout(1_000),
+    timeoutMs: 1_000,
+    pollMs: 1,
+    poll: async () => {
+      polls += 1;
+      return polls < 3
+        ? { ok: true, status: "running", complete: false }
+        : { ok: true, status: "complete", complete: true, scanId: "scan_durable" };
+    },
+  });
+  assert.equal(polls, 3);
+  assert.equal(result.scanId, "scan_durable");
+});
+
+test("durable scan polling preserves a terminal executor failure", async () => {
+  await assert.rejects(
+    waitForScanExecution({
+      signal: AbortSignal.timeout(1_000),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      poll: async () => ({
+        ok: false,
+        executorStatus: 502,
+        error: { code: "reddit_enrichment_failed", message: "Enrichment failed." },
+      }),
+    }),
+    (error) => {
+      assert.equal(error.code, "reddit_enrichment_failed");
+      return true;
+    },
+  );
 });
 
 test("streamed executor errors retain machine-readable retry disposition", () => {

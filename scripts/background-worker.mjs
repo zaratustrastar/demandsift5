@@ -683,6 +683,22 @@ export function assertSuccessfulExecutorPayload(payload) {
   return payload;
 }
 
+export async function waitForScanExecution(options) {
+  const startedAt = Date.now();
+  const pollMs = Math.max(250, Math.min(Number(options.pollMs ?? 2_000), 30_000));
+  while (!options.signal.aborted) {
+    if (Date.now() - startedAt >= options.timeoutMs) {
+      throw new WorkerExecutorTimeoutError(options.timeoutMs);
+    }
+    const payload = assertSuccessfulExecutorPayload(await options.poll());
+    if (payload?.complete === true || payload?.status === "complete") return payload;
+    await waitForNextPoll(options.signal, pollMs);
+  }
+  throw options.signal.reason instanceof Error
+    ? options.signal.reason
+    : new Error("Background scan execution was interrupted.");
+}
+
 export function isRetryableJobError(error) {
   return !(
     error &&
@@ -795,24 +811,42 @@ export async function executeScanJob(job, signal) {
     throw new Error("BACKGROUND_WORKER_SECRET must contain at least 32 characters.");
   }
   const { timeoutSeconds: boundedTimeoutSeconds } = jobExecutionConfiguration();
-  const timeout = AbortSignal.timeout(boundedTimeoutSeconds * 1_000);
+  const timeoutMs = boundedTimeoutSeconds * 1_000;
+  const timeout = AbortSignal.timeout(timeoutMs);
   const combinedSignal = AbortSignal.any([signal, timeout]);
+  const executeUrl = `${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`;
+  const headers = {
+    authorization: `Bearer ${workerSecret}`,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
   try {
-    const payload = await postJsonWithLongTimeout(
-      `${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`,
+    const started = assertSuccessfulExecutorPayload(await postJsonWithLongTimeout(
+      executeUrl,
       {
-        headers: {
-          authorization: `Bearer ${workerSecret}`,
-          "content-type": "application/json",
-          accept: "application/json",
-        },
+        headers,
         body: { workerId },
         signal: combinedSignal,
-        timeoutMs: boundedTimeoutSeconds * 1_000,
+        timeoutMs: 30_000,
         maxResponseBytes: 1_000_000,
       },
-    );
-    return assertSuccessfulExecutorPayload(payload);
+    ));
+    if (started?.complete === true || started?.status === "complete") return started;
+    return await waitForScanExecution({
+      signal: combinedSignal,
+      timeoutMs,
+      pollMs: Number(process.env.BACKGROUND_JOB_STATUS_POLL_MS ?? 2_000),
+      poll: () => postJsonWithLongTimeout(
+        executeUrl,
+        {
+          headers,
+          body: { workerId },
+          signal: combinedSignal,
+          timeoutMs: 30_000,
+          maxResponseBytes: 1_000_000,
+        },
+      ),
+    });
   } catch (error) {
     if (timeout.aborted && !signal.aborted) {
       throw new WorkerExecutorTimeoutError(boundedTimeoutSeconds * 1_000);

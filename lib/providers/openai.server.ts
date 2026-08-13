@@ -57,7 +57,7 @@ export interface OpenAiUsageEvent {
 }
 
 export interface OpenAiProviderDiagnosticEvent {
-  kind: "structured_chat_empty_retry";
+  kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry";
   operation: AiOperation;
   model: string;
   finishReason: "length" | "stop" | "content_filter" | "tool_calls" | "missing" | "other";
@@ -833,6 +833,11 @@ function parseStructuredText(text: string, requestId?: string): unknown {
   }
 }
 
+function isMalformedStructuredJson(error: unknown): error is OpenAiProviderError {
+  return error instanceof OpenAiProviderError
+    && error.message === "OpenAI returned malformed structured JSON.";
+}
+
 function apiErrorMessage(payload: unknown, status: number): string {
   try {
     const object = objectValue(payload, "error response");
@@ -1046,15 +1051,29 @@ export class OpenAiProvider implements AiProvider {
 
         const chatResult = chatText(payload, result.requestId);
         if (chatResult.state === "complete") {
-          const value = options.parse(parseStructuredText(chatResult.text, result.requestId));
-          return {
-            value,
-            model: options.model,
-            operation: options.operation,
-            usage: combineTokenUsage(attemptUsages),
-            estimatedCostUsd,
-            providerRequestId,
-          };
+          try {
+            const value = options.parse(parseStructuredText(chatResult.text, result.requestId));
+            return {
+              value,
+              model: options.model,
+              operation: options.operation,
+              usage: combineTokenUsage(attemptUsages),
+              estimatedCostUsd,
+              providerRequestId,
+            };
+          } catch (error) {
+            if (!isMalformedStructuredJson(error) || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) throw error;
+            await this.onDiagnostic?.({
+              kind: "structured_chat_malformed_retry",
+              operation: options.operation,
+              model: options.model,
+              finishReason: normalizedFinishReason(payload.choices?.[0]?.finish_reason),
+              outputTokens: usage.outputTokens,
+              requestedMaxTokens: maxTokens,
+              retryMaxTokens: maxTokens,
+            });
+            continue;
+          }
         }
 
         if (!chatResult.retryable || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) {

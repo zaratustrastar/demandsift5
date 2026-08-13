@@ -227,6 +227,48 @@ test("two length-limited empty string responses get a bounded 16000-token recove
   ]);
 });
 
+test("malformed structured chat JSON is retried without rerunning discovery", async () => {
+  const diagnostics = [];
+  let calls = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          id: "chat_malformed",
+          choices: [{ finish_reason: "stop", message: { content: '{"triage":[' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 4 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.value[0].externalId, "a");
+  assert.equal(result.usage.inputTokens, 20);
+  assert.equal(result.usage.outputTokens, 9);
+  assert.deepEqual(diagnostics, [{
+    kind: "structured_chat_malformed_retry",
+    operation: "conversation_triage",
+    model: openai.DEFAULT_OPENAI_MODELS.economyModel,
+    finishReason: "stop",
+    outputTokens: 4,
+    requestedMaxTokens: 4_000,
+    retryMaxTokens: 4_000,
+  }]);
+});
+
 test("persistent missing triage IDs fail explicitly instead of becoming irrelevant", async () => {
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",

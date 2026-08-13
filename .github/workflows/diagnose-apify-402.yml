@@ -1,4 +1,5 @@
 name: Apply sanitized Apify 402 handling
+# one-shot funded-account rerun
 
 on:
   push:

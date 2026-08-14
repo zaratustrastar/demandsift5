@@ -866,7 +866,14 @@ export async function runScan(
 
     const rawOpportunities: OpportunityRecord[] = deepRows.flatMap((row) => {
       const { conversation, qualification } = row;
-      if (qualification.leadStatus !== "potential_customer") return [];
+      // A public acquisition opportunity must be both a plausible customer and
+      // appropriate to answer. Non-replyable demand still contributes to the
+      // source-backed intelligence layer, but it must not become a lead card
+      // without the grounded reply promised by the product.
+      if (
+        qualification.leadStatus !== "potential_customer" ||
+        qualification.shouldReply !== true
+      ) return [];
       const score = opportunityRankScore(qualification);
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${conversation.title ?? ""}\n${conversation.body}`,
@@ -894,7 +901,7 @@ export async function runScan(
         commentCount: conversation.metrics.comments,
         whyItMatters: qualification.whyItMatters,
         intent: intentForQualification(qualification),
-        recommendedAction: qualification.shouldReply ? "reply" : "monitor",
+        recommendedAction: "reply",
         communityRisk: communityRiskForUi(qualification.communityRisk),
         competitorSignal: competitorEvidence.competitor,
         competitorComplaint: competitorEvidence.verified,
@@ -1054,12 +1061,10 @@ export async function runScan(
     const replyEligible = [...opportunities]
       .filter((opportunity) => opportunity.shouldReply === true)
       .sort((left, right) => right.score - left.score);
-    const strongest = replyEligible[0];
-
-    if (strongest) {
-      const row = qualifiedOpportunities.find((opportunity) => opportunity.id === strongest.id);
+    for (const opportunity of replyEligible) {
+      const row = qualifiedOpportunities.find((qualified) => qualified.id === opportunity.id);
       let content = "";
-      const previousOpportunity = previousBySource.get(strongest.sourceId);
+      const previousOpportunity = previousBySource.get(opportunity.sourceId);
       const previousReply = previousOpportunity ? previousReplies.get(previousOpportunity.id) : undefined;
       const state = previousStates.get(`${row?.conversation.sourceMode === "apify-test" ? "apify-test" : row?.conversation.provider}:${row?.conversation.externalId}`);
       const currentContextHash = row ? structuredContextHash(row.conversation) : null;
@@ -1085,11 +1090,11 @@ export async function runScan(
         content = fallbackReply(profile);
       }
       if (!content) {
-        throw new Error("The strongest reply-eligible opportunity did not produce a grounded reply.");
+        throw new Error("A reply-eligible opportunity did not produce a grounded reply.");
       }
       replies.push({
-        id: strongest.replyId,
-        opportunityId: strongest.id,
+        id: opportunity.replyId,
+        opportunityId: opportunity.id,
         workspaceId: scan.workspaceId,
         scanId: scan.id,
         content,
@@ -1103,32 +1108,14 @@ export async function runScan(
         redditCommentId: null,
       });
     }
-
-    // Create empty placeholders only for additional reply-eligible paid results.
-    // They make lazy/on-demand generation possible without pretending a draft exists.
-    for (const opportunity of replyEligible.slice(1)) {
-      replies.push({
-        id: opportunity.replyId,
-        opportunityId: opportunity.id,
-        workspaceId: scan.workspaceId,
-        scanId: scan.id,
-        content: "",
-        status: "draft",
-        generation: 0,
-        createdAt: now,
-        updatedAt: now,
-        publishedAt: null,
-        publishedUrl: null,
-        publishedVia: null,
-        redditCommentId: null,
-      });
-    }
     await Promise.all(replies.map((reply) => repository.saveReply(reply)));
     await setStage(
       scan,
       "replies",
       "complete",
-      strongest ? "One complete grounded reply prepared for the strongest appropriate opportunity." : "No conversation was appropriate for reply generation in this scan.",
+      replies.length > 0
+        ? `${replies.length} complete grounded repl${replies.length === 1 ? "y" : "ies"} prepared for ${replies.length === 1 ? "the qualified opportunity" : "all qualified opportunities"}.`
+        : "No conversation was appropriate for reply generation in this scan.",
     );
 
     const generatedReplyIds = new Set(replies.filter((reply) => reply.content.trim()).map((reply) => reply.opportunityId));

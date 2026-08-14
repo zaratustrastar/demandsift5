@@ -42,3 +42,14 @@ test("zero-result reporting states bounded qualification coverage and evidence l
   assert.match(dashboard, /View public source/);
   assert.match(presenter, /qualificationCoverage/);
 });
+
+test("every displayed acquisition opportunity is replyable and receives a complete draft", async () => {
+  const workflow = await source("lib/server/scan-workflow.ts");
+  assert.match(
+    workflow,
+    /qualification\.leadStatus !== "potential_customer" \|\|\s*qualification\.shouldReply !== true/,
+  );
+  assert.match(workflow, /for \(const opportunity of replyEligible\)/);
+  assert.doesNotMatch(workflow, /Create empty placeholders only for additional reply-eligible paid results/);
+  assert.match(workflow, /all qualified opportunities/);
+});

@@ -43,12 +43,18 @@ test("zero-result reporting states bounded qualification coverage and evidence l
   assert.match(presenter, /qualificationCoverage/);
 });
 
-test("every displayed acquisition opportunity is replyable and receives a complete draft", async () => {
-  const workflow = await source("lib/server/scan-workflow.ts");
-  assert.match(
-    workflow,
-    /qualification\.leadStatus !== "potential_customer" \|\|\s*qualification\.shouldReply !== true/,
-  );
+test("every displayed acquisition opportunity passes deterministic lead invariants and receives a complete draft", async () => {
+  const [workflow, pipeline] = await Promise.all([
+    source("lib/server/scan-workflow.ts"),
+    source("lib/intelligence/reddit-pipeline.ts"),
+  ]);
+  assert.match(workflow, /isQualifiedPotentialCustomer\(qualification\)/);
+  assert.match(pipeline, /export function isQualifiedPotentialCustomer/);
+  assert.match(pipeline, /qualification\.leadStatus === "potential_customer"/);
+  assert.match(pipeline, /qualification\.shouldReply === true/);
+  assert.match(pipeline, /qualification\.evidenceQuality === "high"/);
+  assert.match(pipeline, /qualification\.productFit === "medium" \|\| qualification\.productFit === "high"/);
+  assert.match(pipeline, /qualification\.replyability === "medium" \|\| qualification\.replyability === "high"/);
   assert.match(workflow, /for \(const opportunity of replyEligible\)/);
   assert.doesNotMatch(workflow, /Create empty placeholders only for additional reply-eligible paid results/);
   assert.match(workflow, /all qualified opportunities/);

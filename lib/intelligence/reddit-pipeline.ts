@@ -458,6 +458,32 @@ export function isRelevantMarketConversation(input: {
   return input.verifiedCompetitorSignal;
 }
 
+/**
+ * A model label is not sufficient by itself to create a public lead. Enforce
+ * the cross-field business invariants deterministically so contradictory
+ * output such as potential_customer + low product fit cannot reach the UI.
+ */
+export function isQualifiedPotentialCustomer(
+  qualification: DeepQualification,
+): boolean {
+  const hasMeaningfulFit =
+    qualification.productFit === "medium" || qualification.productFit === "high";
+  const hasReplyableFit =
+    qualification.replyability === "medium" || qualification.replyability === "high";
+  const hasActiveDemand = qualification.demandSignals.some((signal) => signal !== "none");
+  const hasCurrentTiming =
+    qualification.timing === "current" || qualification.timing === "near_term";
+
+  return qualification.leadStatus === "potential_customer" &&
+    qualification.shouldReply === true &&
+    qualification.evidenceQuality === "high" &&
+    hasMeaningfulFit &&
+    hasReplyableFit &&
+    hasActiveDemand &&
+    ACTIVE_DEMAND_INTENTS.has(qualification.intent) &&
+    hasCurrentTiming;
+}
+
 function fitScore(value: FitLevel): number {
   if (value === "high") return 1;
   if (value === "medium") return 0.65;

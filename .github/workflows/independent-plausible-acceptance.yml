@@ -110,6 +110,15 @@ jobs:
           if int(funnel.get("deepQualificationsReturned") or 0) != int(funnel.get("submittedForDeepQualification") or 0):
               raise SystemExit("Independent acceptance failed: deep qualification coverage incomplete.")
 
+          stored = report.get("storedCounts") or {}
+          stored_opportunities = int(stored.get("opportunities") or 0)
+          stored_replies = int(stored.get("replies") or 0)
+          if stored_replies != stored_opportunities:
+              raise SystemExit(
+                  "Independent acceptance failed: every actionable opportunity must have one complete reply "
+                  f"(opportunities={stored_opportunities}, replies={stored_replies})."
+              )
+
           print("independent_result=complete")
           print("elapsed_seconds=" + str(elapsed))
           print("website=" + str(scan.get("websiteUrl") or ""))

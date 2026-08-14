@@ -1,0 +1,52 @@
+name: Inspect production scan state after zero-result fix
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-production-scan-state.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Inspect recent Basecamp and TVCP scan states safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          test -n "$pid"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          for domain in basecamp.com tvcp.app; do
+            tmp="$(mktemp)"
+            curl --fail-with-body --silent --show-error --max-time 20 \
+              -H "Authorization: Bearer $secret" \
+              "$APP_URL/api/internal/diagnostics/recent-scans?domain=$domain" > "$tmp"
+            python3 - "$domain" "$tmp" <<'PY'
+          import json, sys
+          domain, path = sys.argv[1:]
+          payload = json.load(open(path))
+          print('domain=' + domain)
+          for scan in (payload.get('scans') or [])[:5]:
+              progress = scan.get('progress') or []
+              print(json.dumps({
+                  'id': scan.get('id'),
+                  'status': scan.get('status'),
+                  'createdAt': scan.get('createdAt'),
+                  'updatedAt': scan.get('updatedAt'),
+                  'windowDays': scan.get('windowDays'),
+                  'progress': [{'id': p.get('id'), 'status': p.get('status')} for p in progress],
+                  'diagnostics': scan.get('diagnostics'),
+                  'output': scan.get('output'),
+              }, separators=(',', ':'), sort_keys=True))
+          PY
+            rm -f "$tmp"
+          done

@@ -15,6 +15,8 @@ import {
   opportunityRankScore,
   potentialCustomerIntentFromQualification,
   selectCandidatesForEnrichment,
+  selectCandidatesForIntelligenceReview,
+  selectZeroResultAuditCandidates,
 } from "@/lib/intelligence/reddit-pipeline";
 import { contentFingerprint, isUsefulSearchPhrase } from "@/lib/intelligence/opportunity-ranking";
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
@@ -546,14 +548,17 @@ export async function enqueueScanRun(scan: ScanRecord) {
   return getStateRepository().enqueueScan(scan.id, scan.workspaceId);
 }
 
-export async function runScan(scanId: string): Promise<ScanRecord> {
+export async function runScan(
+  scanId: string,
+  options: { resumeRunning?: boolean } = {},
+): Promise<ScanRecord> {
   const repository = getStateRepository();
   const claim = await repository.beginScanRun(scanId);
   if (claim.state === "missing" || !claim.scan) {
     throw new ApiError("Scan was not found.", 404, "scan_not_found");
   }
   if (claim.state === "complete") return claim.scan;
-  if (claim.state === "running") return claim.scan;
+  if (claim.state === "running" && !options.resumeRunning) return claim.scan;
   const scan = claim.scan;
 
   try {
@@ -703,7 +708,14 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
 
     for (const candidate of cleaned.survivors) {
       const previous = previousStates.get(`${candidate.provider}:${candidate.externalId}`);
-      if (previous && previous.contentHash === candidate.provenance.contentHash) {
+      if (
+        previous &&
+        previous.contentHash === candidate.provenance.contentHash &&
+        previous.triage.worthEnriching === true
+      ) {
+        // Positive triage may be reused because it still flows into enrichment/deep
+        // qualification. Negative triage is intentionally re-run on repeat scans: a
+        // stale cheap false-negative must never become a permanent blind spot.
         triageById.set(candidate.externalId, previous.triage);
         reusedTriageOnly += 1;
         continue;
@@ -736,24 +748,47 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     const worthEnriching = cleaned.survivors.filter(
       (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
     );
-    await setStage(
-      scan,
-      "triage",
-      "complete",
-      `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`,
-    );
+    const zeroResultAuditCandidates = worthEnriching.length === 0
+      ? selectZeroResultAuditCandidates({
+          candidates: cleaned.survivors,
+          triageById,
+          // Acquisition gets a three-candidate audit. Incremental scans get one
+          // independent deep check so a cached/cheap triage false-negative cannot
+          // silently turn real demand into a valid-looking zero.
+          budget: Math.min(previousResult ? 2 : 3, enrichmentBudget()),
+        })
+      : [];
+    const triageDetail = zeroResultAuditCandidates.length > 0
+      ? `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; lightweight triage selected none, so ${zeroResultAuditCandidates.length} high-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for an independent full-context audit.`
+      : `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`;
+    await setStage(scan, "triage", "complete", triageDetail);
 
     await setStage(scan, "enrichment", "active");
-    const selectedForEnrichment = selectCandidatesForEnrichment({
-      candidates: cleaned.survivors,
+    const primaryEnrichmentCandidates = zeroResultAuditCandidates.length > 0
+      ? zeroResultAuditCandidates
+      : selectCandidatesForEnrichment({
+          candidates: worthEnriching,
+          triageById,
+          budget: enrichmentBudget(),
+        });
+    const primaryIds = new Set(primaryEnrichmentCandidates.map((candidate) => candidate.externalId));
+    const intelligenceReviewBudget = Math.max(
+      0,
+      Math.min(
+        minimumFullContextReviews(lookbackDays) - primaryEnrichmentCandidates.length,
+        enrichmentBudget() - primaryEnrichmentCandidates.length,
+      ),
+    );
+    const intelligenceReviewCandidates = selectCandidatesForIntelligenceReview({
+      candidates: cleaned.survivors.filter((candidate) => !primaryIds.has(candidate.externalId)),
       triageById,
-      budget: enrichmentBudget(),
-      minimumReviewCount: minimumFullContextReviews(lookbackDays),
+      budget: intelligenceReviewBudget,
     });
-    const triageSelectedIds = new Set(worthEnriching.map((candidate) => candidate.externalId));
-    const intelligenceCoverageReviews = selectedForEnrichment.filter(
-      (candidate) => !triageSelectedIds.has(candidate.externalId),
-    ).length;
+    const selectedForEnrichment = [
+      ...primaryEnrichmentCandidates,
+      ...intelligenceReviewCandidates,
+    ];
+    const intelligenceCoverageReviews = intelligenceReviewCandidates.length;
     const enrichment = await redditProvider.enrich({
       candidates: selectedForEnrichment,
       maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
@@ -1011,7 +1046,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
           deepRows.some((row) => {
             if (!signal.provenanceIds.includes(row.conversation.provenance.id)) return false;
             const verified = identifyVerifiedCompetitorSignal({
-              conversationText: `${row.conversation.title ?? ""}\n${row.conversation.body}`,
+              conversationText: (row.conversation.title ?? "") + "\n" + row.conversation.body,
               sourceMode: row.conversation.sourceMode,
               externalId: row.conversation.externalId,
               businessCompetitors: business.competitors.value.map((competitor) => competitor.name),
@@ -1051,7 +1086,6 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     const replyEligible = [...opportunities]
       .filter((opportunity) => opportunity.shouldReply === true)
       .sort((left, right) => right.score - left.score);
-
     for (const opportunity of replyEligible) {
       const row = qualifiedOpportunities.find((qualified) => qualified.id === opportunity.id);
       let content = "";
@@ -1184,6 +1218,7 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
       triageDuplicateIds: 0,
       triageUnknownIds: 0,
       worthEnriching: worthEnriching.length,
+      zeroResultAuditEscalated: zeroResultAuditCandidates.length,
       intelligenceCoverageReviews,
       requestedForEnrichment: enrichment.diagnostics.requested,
       enrichedSuccessfully: enrichment.diagnostics.enriched,

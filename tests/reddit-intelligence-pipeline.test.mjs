@@ -185,30 +185,67 @@ test("only AI-triaged worthEnriching candidates enter the enrichment budget", ()
   assert.equal(selected.some((row) => row.externalId === "b"), false);
 });
 
-test("bounded intelligence coverage reviews lane-diverse non-leads without changing their labels", () => {
+
+test("acquisition zero-result audit escalates only current demand signals", () => {
   const rows = [
-    candidate({ externalId: "lead", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "explicit", discoveryLanes: ["direct_buying_intent"] }),
     candidate({ externalId: "pain", discoveryLanes: ["problem_pain"] }),
-    candidate({ externalId: "competitor", discoveryLanes: ["brand_competitor_mentions"] }),
-    candidate({ externalId: "promo", discoveryLanes: ["category_recommendation"] }),
+    candidate({ externalId: "promo", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "noise", discoveryLanes: ["category_recommendation"] }),
   ];
   const triage = new Map([
-    ["lead", { externalId: "lead", relevant: true, intent: "actively_looking", demandSignal: "explicit_demand", productFit: "high", timing: "current", replyability: "high", worthEnriching: true, reason: "active request" }],
-    ["pain", { externalId: "pain", relevant: true, intent: "informational", demandSignal: "pain", productFit: "medium", timing: "current", replyability: "low", worthEnriching: false, reason: "useful pain evidence" }],
-    ["competitor", { externalId: "competitor", relevant: true, intent: "informational", demandSignal: "none", productFit: "medium", timing: "current", replyability: "low", worthEnriching: false, reason: "useful competitor evidence" }],
-    ["promo", { externalId: "promo", relevant: false, intent: "promotional", demandSignal: "none", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "self promotion" }],
+    ["explicit", { externalId: "explicit", relevant: true, intent: "actively_looking", demandSignal: "explicit_demand", productFit: "low", timing: "current", replyability: "medium", worthEnriching: false, reason: "short snippet leaves fit uncertain" }],
+    ["pain", { externalId: "pain", relevant: true, intent: "problem_aware", demandSignal: "pain", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "pain is real but fit needs context" }],
+    ["promo", { externalId: "promo", relevant: false, intent: "promotional", demandSignal: "none", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "promotion" }],
+    ["noise", { externalId: "noise", relevant: false, intent: "irrelevant", demandSignal: "none", productFit: "low", timing: "unknown", replyability: "low", worthEnriching: false, reason: "noise" }],
   ]);
 
-  const selected = pipeline.selectCandidatesForEnrichment({
+  const selected = pipeline.selectZeroResultAuditCandidates({
     candidates: rows,
     triageById: triage,
-    budget: 4,
-    minimumReviewCount: 3,
+    budget: 3,
+  });
+  assert.deepEqual(selected.map((row) => row.externalId), ["explicit", "pain"]);
+});
+
+test("zero-result audit independently checks a high-signal retrieval false negative", () => {
+  const rows = [
+    candidate({ externalId: "missed", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "promo2", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "weak", discoveryLanes: ["timing"] }),
+  ];
+  const triage = new Map([
+    ["missed", { externalId: "missed", relevant: false, intent: "irrelevant", demandSignal: "none", productFit: "unknown", timing: "unknown", replyability: "unknown", worthEnriching: false, reason: "cheap triage missed the signal" }],
+    ["promo2", { externalId: "promo2", relevant: false, intent: "promotional", demandSignal: "none", productFit: "unknown", timing: "current", replyability: "low", worthEnriching: false, reason: "promotion" }],
+    ["weak", { externalId: "weak", relevant: false, intent: "informational", demandSignal: "none", productFit: "unknown", timing: "unknown", replyability: "low", worthEnriching: false, reason: "weak timing-only retrieval" }],
+  ]);
+
+  const selected = pipeline.selectZeroResultAuditCandidates({ candidates: rows, triageById: triage, budget: 3 });
+  assert.deepEqual(selected.map((row) => row.externalId), ["missed"]);
+});
+
+
+test("bounded intelligence coverage reviews lane-diverse non-leads without changing labels", () => {
+  const rows = [
+    candidate({ externalId: "pain-intel", discoveryLanes: ["problem_pain"] }),
+    candidate({ externalId: "competitor-intel", discoveryLanes: ["brand_competitor_mentions"] }),
+    candidate({ externalId: "promo-intel", discoveryLanes: ["category_recommendation"] }),
+  ];
+  const triage = new Map([
+    ["pain-intel", { externalId: "pain-intel", relevant: true, intent: "informational", demandSignal: "pain", productFit: "medium", timing: "current", replyability: "low", worthEnriching: false, reason: "useful pain evidence" }],
+    ["competitor-intel", { externalId: "competitor-intel", relevant: true, intent: "informational", demandSignal: "none", productFit: "medium", timing: "current", replyability: "low", worthEnriching: false, reason: "useful competitor evidence" }],
+    ["promo-intel", { externalId: "promo-intel", relevant: false, intent: "promotional", demandSignal: "none", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "self promotion" }],
+  ]);
+
+  const selected = pipeline.selectCandidatesForIntelligenceReview({
+    candidates: rows,
+    triageById: triage,
+    budget: 3,
   });
 
-  assert.deepEqual(selected.map((row) => row.externalId), ["lead", "pain", "competitor"]);
-  assert.equal(triage.get("pain").worthEnriching, false);
-  assert.equal(triage.get("competitor").worthEnriching, false);
+  assert.deepEqual(selected.map((row) => row.externalId), ["pain-intel", "competitor-intel"]);
+  assert.equal(triage.get("pain-intel").worthEnriching, false);
+  assert.equal(triage.get("competitor-intel").worthEnriching, false);
 });
 
 test("ranking happens after categorical qualification and does not change leadStatus", () => {

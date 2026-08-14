@@ -3,15 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function source(path) {
-  return readFile(new URL(`../${path}`, import.meta.url), "utf8");
+  return readFile(new URL("../" + path, import.meta.url), "utf8");
 }
 
 test("negative deep qualification is re-evaluated instead of becoming sticky", async () => {
   const workflow = await source("lib/server/scan-workflow.ts");
-  assert.match(
-    workflow,
-    /previous\.deepQualification\.leadStatus !== "not_customer"/,
-  );
+  assert.match(workflow, /previous\.deepQualification\.leadStatus !== "not_customer"/);
 });
 
 test("demand claims are scoped to reviewed Reddit provenance", async () => {
@@ -20,14 +17,8 @@ test("demand claims are scoped to reviewed Reddit provenance", async () => {
     source("lib/server/scan-workflow.ts"),
     source("lib/server/contracts.ts"),
   ]);
-  const insightMethod = provider.slice(
-    provider.indexOf("async generateInsights"),
-    provider.indexOf("async generateReply"),
-  );
-  const allowedIdsBlock = insightMethod.slice(
-    insightMethod.indexOf("const allowedIds"),
-    insightMethod.indexOf("return this.structured"),
-  );
+  const insightMethod = provider.slice(provider.indexOf("async generateInsights"), provider.indexOf("async generateReply"));
+  const allowedIdsBlock = insightMethod.slice(insightMethod.indexOf("const allowedIds"), insightMethod.indexOf("return this.structured"));
   assert.doesNotMatch(allowedIdsBlock, /request\.business/);
   assert.match(workflow, /reviewedRedditSourceIds/);
   assert.match(workflow, /seenEvidenceSets/);
@@ -63,14 +54,15 @@ test("every displayed acquisition opportunity is replyable and receives a comple
   assert.match(workflow, /all qualified opportunities/);
 });
 
+
 test("market-intelligence review has a bounded full-context floor independent of lead triage", async () => {
   const [workflow, pipeline] = await Promise.all([
     source("lib/server/scan-workflow.ts"),
     source("lib/intelligence/reddit-pipeline.ts"),
   ]);
-  assert.match(workflow, /minimumReviewCount: minimumFullContextReviews\(lookbackDays\)/);
+  assert.match(workflow, /minimumFullContextReviews\(lookbackDays\)/);
   assert.match(workflow, /intelligenceCoverageReviews/);
-  assert.match(pipeline, /minimumReviewCount\?: number/);
+  assert.match(pipeline, /selectCandidatesForIntelligenceReview/);
   assert.match(pipeline, /const laneOrder: RedditSearchLane\[\]/);
   assert.match(pipeline, /triage\.intent === "irrelevant" \|\| triage\.intent === "promotional"/);
 });

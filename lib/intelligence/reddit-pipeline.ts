@@ -245,16 +245,9 @@ export function selectCandidatesForEnrichment(input: {
   candidates: readonly RedditDiscoveryCandidate[];
   triageById: ReadonlyMap<string, ConversationTriage>;
   budget: number;
-  /**
-   * Lead-oriented triage can correctly return very few acquisition candidates
-   * while the scan still contains useful pain, workaround, category or
-   * competitor evidence. This bounded floor opens a small, lane-diverse set for
-   * full-context intelligence review without changing any triage/lead label.
-   */
-  minimumReviewCount?: number;
 }): RedditDiscoveryCandidate[] {
   const budget = Math.max(1, Math.min(Math.trunc(input.budget), 20));
-  const rankedLeadCandidates = input.candidates
+  return input.candidates
     .flatMap((candidate) => {
       const triage = input.triageById.get(candidate.externalId);
       if (!triage?.worthEnriching) return [];
@@ -269,18 +262,26 @@ export function selectCandidatesForEnrichment(input: {
       if (triage.timing === "near_term") priority += 8;
       return [{ candidate, priority }];
     })
-    .sort((left, right) => right.priority - left.priority);
-  const selected = rankedLeadCandidates
+    .sort((left, right) => right.priority - left.priority)
     .slice(0, budget)
     .map(({ candidate }) => candidate);
+}
 
-  const minimumReviewCount = Math.max(
-    0,
-    Math.min(Math.trunc(input.minimumReviewCount ?? 0), budget),
-  );
-  if (selected.length >= minimumReviewCount) return selected;
 
-  const selectedIds = new Set(selected.map((candidate) => candidate.externalId));
+/**
+ * Selects a bounded, lane-diverse evidence sample for market intelligence when
+ * lead-oriented triage alone would leave too little full-context coverage.
+ * This never changes triage or creates a lead; deep qualification remains the
+ * only source for stored intelligence and acquisition decisions.
+ */
+export function selectCandidatesForIntelligenceReview(input: {
+  candidates: readonly RedditDiscoveryCandidate[];
+  triageById: ReadonlyMap<string, ConversationTriage>;
+  budget: number;
+}): RedditDiscoveryCandidate[] {
+  const budget = Math.max(0, Math.min(Math.trunc(input.budget), 20));
+  if (budget === 0) return [];
+
   const laneOrder: RedditSearchLane[] = [
     "problem_pain",
     "competitor_switching",
@@ -290,16 +291,15 @@ export function selectCandidatesForEnrichment(input: {
     "timing",
     "direct_buying_intent",
   ];
-  const intelligenceCandidates = input.candidates
+  const eligible = input.candidates
     .flatMap((candidate) => {
-      if (selectedIds.has(candidate.externalId)) return [];
       const triage = input.triageById.get(candidate.externalId);
       if (!triage || triage.intent === "irrelevant" || triage.intent === "promotional") return [];
-      const matchingLaneIndexes = candidate.discoveryLanes
+      const laneIndexes = candidate.discoveryLanes
         .map((lane) => laneOrder.indexOf(lane))
         .filter((index) => index >= 0);
-      if (matchingLaneIndexes.length === 0) return [];
-      const bestLaneIndex = Math.min(...matchingLaneIndexes);
+      if (laneIndexes.length === 0) return [];
+      const bestLaneIndex = Math.min(...laneIndexes);
       let priority = (laneOrder.length - bestLaneIndex) * 20;
       if (triage.relevant) priority += 20;
       if (triage.demandSignal !== "none") priority += 18;
@@ -310,26 +310,102 @@ export function selectCandidatesForEnrichment(input: {
     })
     .sort((left, right) => right.priority - left.priority);
 
-  // First take one candidate per evidence lane so an acquisition-heavy query
-  // cannot crowd out competitor/pain evidence, then fill any remaining floor by
-  // priority. The floor is still capped by the existing enrichment budget.
+  const selected: RedditDiscoveryCandidate[] = [];
+  const selectedIds = new Set<string>();
   for (const lane of laneOrder) {
-    if (selected.length >= minimumReviewCount) break;
-    const row = intelligenceCandidates.find(({ candidate }) =>
+    if (selected.length >= budget) break;
+    const row = eligible.find(({ candidate }) =>
       !selectedIds.has(candidate.externalId) && candidate.discoveryLanes.includes(lane),
     );
     if (!row) continue;
     selected.push(row.candidate);
     selectedIds.add(row.candidate.externalId);
   }
-  for (const { candidate } of intelligenceCandidates) {
-    if (selected.length >= minimumReviewCount) break;
+  for (const { candidate } of eligible) {
+    if (selected.length >= budget) break;
     if (selectedIds.has(candidate.externalId)) continue;
     selected.push(candidate);
     selectedIds.add(candidate.externalId);
   }
-
   return selected;
+}
+
+function zeroResultAuditSignalWeight(value: ConversationTriage["demandSignal"]): number {
+  if (value === "explicit_demand") return 40;
+  if (value === "switching") return 35;
+  if (value === "pain") return 30;
+  if (value === "workaround") return 25;
+  if (value === "timing") return 20;
+  return 0;
+}
+
+function zeroResultAuditLaneWeight(candidate: RedditDiscoveryCandidate): number {
+  let strongest = 0;
+  for (const lane of candidate.discoveryLanes) {
+    if (lane === "explicit_demand" || lane === "direct_buying_intent") strongest = Math.max(strongest, 45);
+    else if (lane === "switching" || lane === "competitor_switching") strongest = Math.max(strongest, 40);
+    else if (lane === "pain" || lane === "problem_pain") strongest = Math.max(strongest, 35);
+    else if (lane === "category_recommendation") strongest = Math.max(strongest, 32);
+    else if (lane === "workaround") strongest = Math.max(strongest, 30);
+    else if (lane === "timing") strongest = Math.max(strongest, 25);
+  }
+  return strongest;
+}
+
+/**
+ * False-zero guard. Lightweight triage is intentionally cheap and high recall,
+ * but the exact failure we need to defend against is triage missing the demand
+ * signal itself. Therefore the audit has two independent inputs: triage evidence
+ * and the bounded high-signal retrieval lane that produced the candidate.
+ *
+ * This function never creates a lead. It only spends a tiny enrichment/deep-
+ * qualification budget so the strict full-context classifier can confirm or
+ * reject the candidate. Promotional noise is never escalated, and an explicit
+ * triage rejection is only auditable when retrieval came from the strongest
+ * buying/switching lanes.
+ */
+export function selectZeroResultAuditCandidates(input: {
+  candidates: readonly RedditDiscoveryCandidate[];
+  triageById: ReadonlyMap<string, ConversationTriage>;
+  budget?: number;
+}): RedditDiscoveryCandidate[] {
+  const budget = Math.max(1, Math.min(Math.trunc(input.budget ?? 3), 3));
+  const auditableIntents = new Set<TriageIntent>([
+    "actively_looking",
+    "evaluating",
+    "switching",
+    "problem_aware",
+    "informational",
+  ]);
+
+  return input.candidates
+    .flatMap((candidate) => {
+      const triage = input.triageById.get(candidate.externalId);
+      if (!triage || triage.worthEnriching || triage.intent === "promotional") return [];
+
+      const laneWeight = zeroResultAuditLaneWeight(candidate);
+      const hasTriageSignal = triage.demandSignal !== "none";
+      const highSignalRetrieval = laneWeight >= 30;
+      const strongestRetrieval = laneWeight >= 40;
+      if (!hasTriageSignal && !highSignalRetrieval) return [];
+      if (triage.intent === "irrelevant" && !strongestRetrieval) return [];
+      if (!auditableIntents.has(triage.intent) && triage.intent !== "irrelevant") return [];
+
+      const currentTiming = triage.timing === "current" || triage.timing === "near_term";
+      if (!currentTiming && !highSignalRetrieval) return [];
+
+      let priority = laneWeight;
+      priority += intentSelectionWeight(triage.intent);
+      priority += zeroResultAuditSignalWeight(triage.demandSignal);
+      priority += fitSelectionWeight(triage.productFit) / 4;
+      priority += fitSelectionWeight(triage.replyability) / 4;
+      if (triage.timing === "current") priority += 12;
+      else if (triage.timing === "near_term") priority += 8;
+      return [{ candidate, priority }];
+    })
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, budget)
+    .map(({ candidate }) => candidate);
 }
 
 function fitScore(value: FitLevel): number {

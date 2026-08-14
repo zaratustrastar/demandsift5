@@ -2,6 +2,7 @@ import type { OpportunityRecord, ReplyRecord, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
 import { getEffectiveEntitlement, getStateRepository } from "./repository";
+import { summarizeTrackedResults } from "./result-totals";
 
 export { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 
@@ -147,6 +148,8 @@ export async function presentScan(scan: ScanRecord) {
       ))
     .map(({ row }) => row);
 
+  const resultTotals = summarizeTrackedResults(trackedResults);
+
   const persistedReplies = await repository.listRepliesForScan(scan.id);
   const persistedById = new Map(persistedReplies.map((reply) => [reply.id, reply]));
   const latestReplies = result.replies.map((reply) => persistedById.get(reply.id) ?? reply);
@@ -239,11 +242,7 @@ export async function presentScan(scan: ScanRecord) {
             competitorSignals: 0,
             replies: Math.max(0, generatedReplies.length - visibleGeneratedReplyIds.size),
           },
-      resultTotals: {
-        clicks: trackedResults.filter((row) => row.kind === "click").length,
-        conversions: trackedResults.filter((row) => row.kind === "conversion").length,
-        valueCents: trackedResults.educe((sum, row) => sum + (row.valueCents ?? 0), 0),
-      },
+      resultTotals,
     },
     pricing: {
       marketScan: { amountCents: 0, label: "Personalized Market Scan" },
@@ -255,7 +254,7 @@ export async function presentScan(scan: ScanRecord) {
         tax: "exclusive",
       },
       core: {
-        amountCents: Number(process.env.STRIPA_CORE_AMOUNT_CENTS ?? 3000),
+        amountCents: Number(process.env.STRIPE_CORE_AMOUNT_CENTS ?? 3000),
         interval: "month",
         label: "Core",
         tax: "exclusive",

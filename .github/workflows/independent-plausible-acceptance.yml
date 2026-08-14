@@ -1,0 +1,219 @@
+name: Independent Plausible acceptance
+
+on:
+  push:
+    branches:
+      - codex/plausible-independent-acceptance
+    paths:
+      - .github/workflows/independent-plausible-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  plausible-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run one controlled independent scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          started_at="$(date +%s)"
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          report_json="$(mktemp)"
+          diagnostics_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$report_json" "$diagnostics_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://plausible.io","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "independent_scan_started=true"
+
+          for attempt in $(seq 1 160); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest_json"
+
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "independent_poll=$attempt status=$status"
+
+            if [ "$status" = "failed" ]; then
+              python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          error = payload.get("error") or {}
+          print("independent_result=failed")
+          print("scan_error=" + str(scan.get("error") or "")[:300])
+          print("api_error_code=" + str(error.get("code") or ""))
+          print("api_error_message=" + str(error.get("message") or "")[:300])
+          PY
+              exit 1
+            fi
+
+            if [ "$status" = "complete" ]; then
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/api/scans/$scan_id" > "$report_json"
+
+              elapsed="$(( $(date +%s) - started_at ))"
+              python3 - "$diagnostics_json" "$report_json" "$elapsed" <<'PY'
+          import json, sys
+          diagnostics = json.load(open(sys.argv[1]))
+          payload = json.load(open(sys.argv[2]))
+          elapsed = int(sys.argv[3])
+          scan = payload.get("scan") or {}
+          report = payload.get("report") or {}
+          profile = report.get("profile") or {}
+          retrieval = diagnostics.get("retrieval") or {}
+          funnel = diagnostics.get("diagnostics") or {}
+          decisions = diagnostics.get("decisionBreakdown") or {}
+          presentation = diagnostics.get("presentation") or {}
+          sources = report.get("sources") or []
+          source_by_id = {str(row.get("id")): row for row in sources}
+
+          if scan.get("status") != "complete":
+              raise SystemExit("Independent acceptance failed: scan is not complete.")
+          if not presentation.get("ok"):
+              raise SystemExit("Independent acceptance failed: report presentation failed.")
+          if not profile:
+              raise SystemExit("Independent acceptance failed: business profile missing.")
+          if int(retrieval.get("queryCount") or 0) < 5:
+              raise SystemExit("Independent acceptance failed: fewer than five searches executed.")
+          if int(funnel.get("triageReturned") or 0) != int(funnel.get("submittedForTriage") or 0):
+              raise SystemExit("Independent acceptance failed: AI triage coverage incomplete.")
+          if int(funnel.get("deepQualificationsReturned") or 0) != int(funnel.get("submittedForDeepQualification") or 0):
+              raise SystemExit("Independent acceptance failed: deep qualification coverage incomplete.")
+
+          print("independent_result=complete")
+          print("elapsed_seconds=" + str(elapsed))
+          print("website=" + str(scan.get("websiteUrl") or ""))
+          print("profile=" + json.dumps({
+              "name": profile.get("name"),
+              "summary": profile.get("summary"),
+              "productCategory": profile.get("productCategory"),
+              "targetAudience": profile.get("targetAudience") or [],
+              "problemsSolved": profile.get("problemsSolved") or [],
+              "competitors": profile.get("competitors") or [],
+          }, ensure_ascii=False, separators=(",", ":")))
+          print("stored_counts=" + json.dumps(report.get("storedCounts") or {}, separators=(",", ":"), sort_keys=True))
+          print("qualification_coverage=" + json.dumps(report.get("qualificationCoverage") or {}, separators=(",", ":"), sort_keys=True))
+          print("retrieval=" + json.dumps({
+              "provider": retrieval.get("provider"),
+              "queryCount": retrieval.get("queryCount"),
+              "queryCountsByLane": retrieval.get("queryCountsByLane") or {},
+              "matchedCandidatesByLane": retrieval.get("matchedCandidatesByLane") or {},
+              "worthEnrichingByLane": retrieval.get("worthEnrichingByLane") or {},
+              "fetchedCandidates": retrieval.get("fetchedCandidates"),
+              "normalizedCandidates": retrieval.get("normalizedCandidates"),
+              "locallyMatchedCandidates": retrieval.get("locallyMatchedCandidates"),
+              "enrichmentAttempts": retrieval.get("enrichmentAttempts"),
+              "enrichedConversations": retrieval.get("enrichedConversations"),
+              "enrichmentFallbacks": retrieval.get("enrichmentFallbacks"),
+          }, separators=(",", ":"), sort_keys=True))
+          print("funnel=" + json.dumps({
+              key: funnel.get(key)
+              for key in [
+                  "retrieved", "normalized", "deterministicSurvivors",
+                  "submittedForTriage", "triageReturned", "worthEnriching",
+                  "requestedForEnrichment", "enrichedSuccessfully", "enrichmentFailures",
+                  "submittedForDeepQualification", "deepQualificationsReturned",
+                  "potentialCustomerConversations", "uniquePotentialCustomers",
+                  "repliesGenerated", "reusedUnchanged"
+              ]
+          }, separators=(",", ":"), sort_keys=True))
+          print("triage_breakdown=" + json.dumps(decisions.get("triage") or {}, separators=(",", ":"), sort_keys=True))
+          print("deep_breakdown=" + json.dumps(decisions.get("deepQualification") or {}, separators=(",", ":"), sort_keys=True))
+
+          public_sources = []
+          for row in sources:
+              public_sources.append({
+                  "id": row.get("id"),
+                  "kind": row.get("kind"),
+                  "title": row.get("title"),
+                  "url": row.get("url"),
+                  "excerpt": str(row.get("excerpt") or "")[:280],
+                  "provider": row.get("provider"),
+              })
+          print("public_sources=" + json.dumps(public_sources, ensure_ascii=False, separators=(",", ":")))
+
+          opportunities = []
+          for row in report.get("opportunities") or []:
+              opportunities.append({
+                  "title": row.get("title"),
+                  "permalink": row.get("permalink"),
+                  "subreddit": row.get("subreddit"),
+                  "intent": row.get("intent"),
+                  "potentialCustomerIntent": row.get("potentialCustomerIntent"),
+                  "relevanceScore": row.get("relevanceScore"),
+                  "whyItMatters": row.get("whyItMatters"),
+                  "customerProblem": row.get("customerProblem"),
+                  "recommendedAction": row.get("recommendedAction"),
+                  "communityRisk": row.get("communityRisk"),
+                  "sourceIds": row.get("sourceIds") or [],
+              })
+          print("visible_opportunities=" + json.dumps(opportunities, ensure_ascii=False, separators=(",", ":")))
+
+          insights = []
+          for row in report.get("insights") or []:
+              ids = [str(x) for x in row.get("sourceIds") or []]
+              insights.append({
+                  "title": row.get("title"),
+                  "summary": row.get("summary"),
+                  "evidence": row.get("evidence"),
+                  "evidenceScope": row.get("evidenceScope"),
+                  "sourceCount": row.get("sourceCount"),
+                  "sourceUrls": [source_by_id[x].get("url") for x in ids if x in source_by_id],
+              })
+          print("visible_insights=" + json.dumps(insights, ensure_ascii=False, separators=(",", ":")))
+
+          competitor = report.get("competitorWeakness") or {}
+          competitor_ids = [str(x) for x in competitor.get("sourceIds") or []]
+          print("competitor_signal=" + json.dumps({
+              "verified": competitor.get("verified"),
+              "competitor": competitor.get("competitor"),
+              "title": competitor.get("title"),
+              "summary": competitor.get("summary"),
+              "sourceUrls": [source_by_id[x].get("url") for x in competitor_ids if x in source_by_id],
+          }, ensure_ascii=False, separators=(",", ":")))
+
+          replies = []
+          for row in report.get("replies") or []:
+              replies.append({
+                  "opportunityId": row.get("opportunityId"),
+                  "content": row.get("content"),
+              })
+          print("visible_replies=" + json.dumps(replies, ensure_ascii=False, separators=(",", ":")))
+          PY
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "independent_result=timeout" >&2
+          exit 1

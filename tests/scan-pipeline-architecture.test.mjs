@@ -72,8 +72,8 @@ test("active scan does not use batch reply generation", () => {
   assert.ok(source.includes("aiProvider.generateReply("));
 });
 
-test("categorical lead status is checked before ranking is calculated", () => {
-  const leadDecision = position('qualification.leadStatus !== "potential_customer"');
+test("deterministic lead invariants are checked before ranking is calculated", () => {
+  const leadDecision = position("isQualifiedPotentialCustomer(qualification)");
   const ranking = position("opportunityRankScore(qualification)");
   assert.ok(leadDecision < ranking);
 });

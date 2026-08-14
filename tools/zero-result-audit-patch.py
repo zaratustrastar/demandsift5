@@ -1,0 +1,157 @@
+from pathlib import Path
+
+pipeline = Path("lib/intelligence/reddit-pipeline.ts")
+text = pipeline.read_text()
+marker = "\nfunction fitScore(value: FitLevel): number {"
+assert marker in text, "reddit-pipeline insertion marker missing"
+helper = r'''
+
+function zeroResultAuditSignalWeight(value: ConversationTriage["demandSignal"]): number {
+  if (value === "explicit_demand") return 40;
+  if (value === "switching") return 35;
+  if (value === "pain") return 30;
+  if (value === "workaround") return 25;
+  if (value === "timing") return 20;
+  return 0;
+}
+
+/**
+ * Acquisition-only false-zero guard. Lightweight triage is intentionally cheap
+ * and high recall, but it can still under-estimate product fit from a short
+ * discovery snippet. If it selects nobody, escalate only a tiny number of
+ * candidates where triage itself observed current demand/pain/switching evidence.
+ * Deep qualification remains the only path that can create an opportunity.
+ */
+export function selectZeroResultAuditCandidates(input: {
+  candidates: readonly RedditDiscoveryCandidate[];
+  triageById: ReadonlyMap<string, ConversationTriage>;
+  budget?: number;
+}): RedditDiscoveryCandidate[] {
+  const budget = Math.max(1, Math.min(Math.trunc(input.budget ?? 3), 3));
+  const auditableIntents = new Set<TriageIntent>([
+    "actively_looking",
+    "evaluating",
+    "switching",
+    "problem_aware",
+  ]);
+
+  return input.candidates
+    .flatMap((candidate) => {
+      const triage = input.triageById.get(candidate.externalId);
+      if (!triage || triage.worthEnriching || triage.demandSignal === "none") return [];
+      if (!auditableIntents.has(triage.intent)) return [];
+      if (triage.timing !== "current" && triage.timing !== "near_term") return [];
+
+      let priority = intentSelectionWeight(triage.intent);
+      priority += zeroResultAuditSignalWeight(triage.demandSignal);
+      priority += fitSelectionWeight(triage.productFit) / 4;
+      priority += fitSelectionWeight(triage.replyability) / 4;
+      priority += triage.timing === "current" ? 12 : 8;
+      return [{ candidate, priority }];
+    })
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, budget)
+    .map(({ candidate }) => candidate);
+}
+'''
+text = text.replace(marker, helper + marker, 1)
+pipeline.write_text(text)
+
+workflow = Path("lib/server/scan-workflow.ts")
+text = workflow.read_text()
+old_import = '''  potentialCustomerIntentFromQualification,
+  selectCandidatesForEnrichment,
+} from "@/lib/intelligence/reddit-pipeline";'''
+new_import = '''  potentialCustomerIntentFromQualification,
+  selectCandidatesForEnrichment,
+  selectZeroResultAuditCandidates,
+} from "@/lib/intelligence/reddit-pipeline";'''
+assert old_import in text, "scan-workflow import marker missing"
+text = text.replace(old_import, new_import, 1)
+
+old_block = '''    const worthEnriching = cleaned.survivors.filter(
+      (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
+    );
+    await setStage(
+      scan,
+      "triage",
+      "complete",
+      `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`,
+    );
+
+    await setStage(scan, "enrichment", "active");
+    const selectedForEnrichment = selectCandidatesForEnrichment({
+      candidates: worthEnriching,
+      triageById,
+      budget: enrichmentBudget(),
+    });'''
+new_block = '''    const worthEnriching = cleaned.survivors.filter(
+      (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
+    );
+    const zeroResultAuditCandidates = !previousResult && worthEnriching.length === 0
+      ? selectZeroResultAuditCandidates({
+          candidates: cleaned.survivors,
+          triageById,
+          budget: Math.min(3, enrichmentBudget()),
+        })
+      : [];
+    const triageDetail = zeroResultAuditCandidates.length > 0
+      ? `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; lightweight triage selected none, so ${zeroResultAuditCandidates.length} current demand-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for a bounded full-context audit.`
+      : `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`;
+    await setStage(scan, "triage", "complete", triageDetail);
+
+    await setStage(scan, "enrichment", "active");
+    const selectedForEnrichment = zeroResultAuditCandidates.length > 0
+      ? zeroResultAuditCandidates
+      : selectCandidatesForEnrichment({
+          candidates: worthEnriching,
+          triageById,
+          budget: enrichmentBudget(),
+        });'''
+assert old_block in text, "scan-workflow triage block marker missing"
+text = text.replace(old_block, new_block, 1)
+workflow.write_text(text)
+
+tests = Path("tests/reddit-intelligence-pipeline.test.mjs")
+text = tests.read_text()
+marker = '\ntest("ranking happens after categorical qualification and does not change leadStatus", () => {'
+assert marker in text, "reddit pipeline test marker missing"
+test_case = r'''
+
+test("acquisition zero-result audit escalates only current demand signals", () => {
+  const rows = [
+    candidate({ externalId: "explicit", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "pain", discoveryLanes: ["problem_pain"] }),
+    candidate({ externalId: "promo", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "noise", discoveryLanes: ["category_recommendation"] }),
+  ];
+  const triage = new Map([
+    ["explicit", { externalId: "explicit", relevant: true, intent: "actively_looking", demandSignal: "explicit_demand", productFit: "low", timing: "current", replyability: "medium", worthEnriching: false, reason: "short snippet leaves fit uncertain" }],
+    ["pain", { externalId: "pain", relevant: true, intent: "problem_aware", demandSignal: "pain", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "pain is real but fit needs context" }],
+    ["promo", { externalId: "promo", relevant: false, intent: "promotional", demandSignal: "none", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "promotion" }],
+    ["noise", { externalId: "noise", relevant: false, intent: "irrelevant", demandSignal: "none", productFit: "low", timing: "unknown", replyability: "low", worthEnriching: false, reason: "noise" }],
+  ]);
+
+  const selected = pipeline.selectZeroResultAuditCandidates({
+    candidates: rows,
+    triageById: triage,
+    budget: 3,
+  });
+  assert.deepEqual(selected.map((row) => row.externalId), ["explicit", "pain"]);
+});
+'''
+text = text.replace(marker, test_case + marker, 1)
+tests.write_text(text)
+
+architecture = Path("tests/scan-pipeline-architecture.test.mjs")
+text = architecture.read_text()
+text += r'''
+
+test("fresh acquisition scans audit a bounded demand-signal sample before accepting a triage false zero", async () => {
+  const source = await readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8");
+  assert.match(source, /!previousResult && worthEnriching\.length === 0/);
+  assert.match(source, /selectZeroResultAuditCandidates/);
+  assert.match(source, /Math\.min\(3, enrichmentBudget\(\)\)/);
+});
+'''
+architecture.write_text(text)

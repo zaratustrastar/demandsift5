@@ -1,0 +1,87 @@
+name: Deploy and inspect TVCP zero-result fix
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/deploy-inspect-tvcp-zero-fix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    env:
+      EXPECTED_SHA: 905303ebf6fa8f529efe30564fe551022e1c3011
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Confirm feature tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+          echo "feature_tip_verified=true"
+
+      - name: Reclaim bounded build space
+        run: sudo -n /usr/local/sbin/demandsift-release reclaim
+
+      - name: Build tested feature candidate
+        run: sudo -n /usr/local/sbin/demandsift-release build "$EXPECTED_SHA"
+
+      - name: Reconfirm feature tip before deploy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+
+      - name: Deploy with rollback preserved
+        run: sudo -n /usr/local/sbin/demandsift-release deploy
+
+      - name: Verify healthy release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          curl --fail --silent --show-error --max-time 10 "$APP_URL/" >/dev/null
+          echo "production_health=passed"
+
+      - name: Inspect recent TVCP scan funnels safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          test -n "$pid"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer $secret" \
+            "$APP_URL/api/internal/diagnostics/recent-scans?domain=tvcp.app" > "$tmp"
+          python3 - "$tmp" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scans = payload.get('scans') or []
+          print('tvcp_scan_count=' + str(len(scans)))
+          for index, scan in enumerate(scans):
+              safe = {
+                  'index': index,
+                  'id': scan.get('id'),
+                  'status': scan.get('status'),
+                  'createdAt': scan.get('createdAt'),
+                  'updatedAt': scan.get('updatedAt'),
+                  'windowDays': scan.get('windowDays'),
+                  'progress': scan.get('progress'),
+                  'diagnostics': scan.get('diagnostics'),
+                  'retrieval': scan.get('retrieval'),
+                  'triageBreakdown': scan.get('triageBreakdown'),
+                  'deepBreakdown': scan.get('deepBreakdown'),
+                  'output': scan.get('output'),
+              }
+              print('tvcp_scan=' + json.dumps(safe, separators=(',', ':'), sort_keys=True))
+          PY

@@ -60,7 +60,7 @@ type StructuredFinishReason = "length" | "stop" | "content_filter" | "tool_calls
 
 export type OpenAiProviderDiagnosticEvent =
   | {
-      kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry";
+      kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry" | "structured_chat_invalid_retry";
       operation: AiOperation;
       model: string;
       finishReason: StructuredFinishReason;
@@ -482,8 +482,16 @@ function numberValue(value: unknown, label: string): number {
 }
 
 function booleanValue(value: unknown, label: string): boolean {
-  if (typeof value !== "boolean") throw new OpenAiProviderError(`OpenAI returned an invalid ${label}.`);
-  return value;
+  if (typeof value === "boolean") return value;
+  // Some OpenAI-compatible gateways serialize schema booleans as exact JSON
+  // strings even when strict structured output was requested. This conversion
+  // is lossless; ambiguous values such as yes/no, 1/0 or null still fail.
+  if (typeof value === "string") {
+    const normalized = value.trim().toLocaleLowerCase("en-US");
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  throw new OpenAiProviderError(`OpenAI returned an invalid ${label}.`);
 }
 
 function arrayValue(value: unknown, label: string): unknown[] {
@@ -855,6 +863,12 @@ function isMalformedStructuredJson(error: unknown): error is OpenAiProviderError
     && error.message === "OpenAI returned malformed structured JSON.";
 }
 
+function isRetryableStructuredOutputError(error: unknown): error is OpenAiProviderError {
+  if (!(error instanceof OpenAiProviderError) || error.status !== undefined) return false;
+  if (isMalformedStructuredJson(error)) return true;
+  return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/.test(error.message);
+}
+
 function apiErrorMessage(payload: unknown, status: number): string {
   try {
     const object = objectValue(payload, "error response");
@@ -1191,9 +1205,11 @@ export class OpenAiProvider implements AiProvider {
               providerRequestId,
             };
           } catch (error) {
-            if (!isMalformedStructuredJson(error) || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) throw error;
+            if (!isRetryableStructuredOutputError(error) || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) throw error;
             await this.onDiagnostic?.({
-              kind: "structured_chat_malformed_retry",
+              kind: isMalformedStructuredJson(error)
+                ? "structured_chat_malformed_retry"
+                : "structured_chat_invalid_retry",
               operation: options.operation,
               model: activeModel,
               finishReason: normalizedFinishReason(payload.choices?.[0]?.finish_reason),

@@ -461,6 +461,66 @@ test("malformed structured chat JSON is retried without rerunning discovery", as
   }]);
 });
 
+test("exact string booleans from an OpenAI-compatible gateway are normalized losslessly", async () => {
+  let calls = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async () => {
+      calls += 1;
+      return chatResponse({
+        triage: [{
+          ...triageItem("a"),
+          relevant: "true",
+          worthEnriching: "false",
+        }],
+      });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.value[0].triage.relevant, true);
+  assert.equal(result.value[0].triage.worthEnriching, false);
+});
+
+test("schema-invalid triage output gets a bounded structured retry", async () => {
+  const diagnostics = [];
+  let calls = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return chatResponse({
+          triage: [{ ...triageItem("a"), relevant: null }],
+        });
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.value[0].triage.relevant, true);
+  assert.equal(diagnostics[0].kind, "structured_chat_invalid_retry");
+  assert.equal(diagnostics[0].operation, "conversation_triage");
+});
+
 test("persistent missing triage IDs fail explicitly instead of becoming irrelevant", async () => {
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",

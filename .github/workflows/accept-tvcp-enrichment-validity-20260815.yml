@@ -1,0 +1,141 @@
+name: Accept TVCP enrichment validity fix
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/accept-tvcp-enrichment-validity-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 40
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+      EXPECTED_SHA: 94c0903405a96f34e80f465498bfecd04db0cee2
+    steps:
+      - name: Verify corrected release is active
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          printf '%s\n' "$output" | grep -E '^(release_head=|container=demandsift2-(web|worker)-1 )' || true
+          printf '%s\n' "$output" | grep -q "^release_head=$EXPECTED_SHA "
+
+      - name: Run one fresh TVCP acquisition scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cookie="$work/cookies"
+          create="$work/create.json"
+          final="$work/final.json"
+
+          http="$(curl --silent --show-error --max-time 30 -o "$create" -w '%{http_code}' \
+            -c "$cookie" \
+            -H 'content-type: application/json' \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans")"
+          echo "create_http=$http"
+          test "$http" = 202
+          scan_id="$(python3 - "$create" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1]))
+          print((p.get('scan') or {}).get('id') or '')
+          PY
+          )"
+          test -n "$scan_id"
+          echo "scan_id=$scan_id"
+
+          terminal=""
+          for poll in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error --max-time 20 \
+              -b "$cookie" "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$work/status.json"
+            status="$(python3 - "$work/status.json" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1]))
+          print((p.get('scan') or {}).get('status') or '')
+          PY
+          )"
+            if [ $((poll % 6)) -eq 1 ]; then echo "poll=$poll status=$status"; fi
+            if [ "$status" = complete ] || [ "$status" = failed ]; then
+              terminal="$status"
+              break
+            fi
+            sleep 10
+          done
+          test -n "$terminal"
+          echo "terminal_status=$terminal"
+          if [ "$terminal" = failed ]; then
+            python3 - "$work/status.json" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1])); s=p.get('scan') or {}
+          print('scan_error=' + json.dumps(s.get('error'), separators=(',',':')))
+          print('progress=' + json.dumps(s.get('progress'), separators=(',',':')))
+          PY
+            exit 2
+          fi
+
+          curl --fail-with-body --silent --show-error --max-time 30 \
+            -b "$cookie" "$APP_URL/api/scans/$scan_id" > "$final"
+          python3 - "$final" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1])); r=p.get('report') or {}
+          print('report_counts=' + json.dumps(r.get('storedCounts'), separators=(',',':')))
+          print('qualification_coverage=' + json.dumps(r.get('qualificationCoverage'), separators=(',',':')))
+          PY
+
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          test -n "$pid"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer $secret" \
+            "$APP_URL/api/internal/diagnostics/recent-scans?domain=tvcp.app" > "$work/diag.json"
+
+          python3 - "$work/diag.json" "$final" "$scan_id" <<'PY'
+          import json,sys
+          diag=json.load(open(sys.argv[1])); final=json.load(open(sys.argv[2])); scan_id=sys.argv[3]
+          row=next((s for s in (diag.get('scans') or []) if s.get('id')==scan_id), None)
+          if not row:
+              raise SystemExit('fresh scan missing from diagnostics')
+          d=row.get('diagnostics') or {}
+          requested=int(d.get('requestedForEnrichment') or 0)
+          enriched=int(d.get('enrichedSuccessfully') or 0)
+          failed=int(d.get('enrichmentFailures') or 0)
+          required=min(4, requested)
+          print('fresh_diagnostics=' + json.dumps({
+              'id':scan_id,
+              'retrieved':d.get('retrieved'),
+              'credible':d.get('deterministicSurvivors'),
+              'triageReturned':d.get('triageReturned'),
+              'worthEnriching':d.get('worthEnriching'),
+              'zeroResultAuditEscalated':d.get('zeroResultAuditEscalated'),
+              'intelligenceCoverageReviews':d.get('intelligenceCoverageReviews'),
+              'requestedForEnrichment':requested,
+              'enrichedSuccessfully':enriched,
+              'enrichmentFailures':failed,
+              'deepQualificationsReturned':d.get('deepQualificationsReturned'),
+              'deepQualificationMissing':d.get('deepQualificationMissing'),
+              'uniquePotentialCustomers':d.get('uniquePotentialCustomers'),
+              'marketIntelligenceSignals':d.get('marketIntelligenceSignals'),
+              'repliesGenerated':d.get('repliesGenerated'),
+          }, separators=(',',':')))
+          print('deep_breakdown=' + json.dumps(row.get('deepBreakdown'), separators=(',',':')))
+          print('output=' + json.dumps(row.get('output'), separators=(',',':')))
+          if requested <= 0:
+              raise SystemExit('no conversations selected for enrichment')
+          if enriched < required:
+              raise SystemExit(f'invalid completed report: only {enriched}/{requested} enriched; required {required}')
+          if int(d.get('deepQualificationMissing') or 0) != 0:
+              raise SystemExit('deep qualification coverage incomplete')
+          coverage=((final.get('report') or {}).get('qualificationCoverage') or {}).get('fullContextReviewed')
+          if coverage != enriched:
+              raise SystemExit(f'presented context count {coverage} != actual enrichment {enriched}')
+          print('acceptance_valid=true')
+          PY

@@ -1,0 +1,101 @@
+name: TVCP candidate content inspection
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-content-20260814
+
+jobs:
+  inspect-tvcp-content:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run fresh TVCP scan and print workspace-owned public candidate sample
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          status_json="$(mktemp)"
+          inspect_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$status_json" "$inspect_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "tvcp_content_scan_id=$scan_id"
+
+          for attempt in $(seq 1 220); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$status_json"
+            status="$(python3 - "$status_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+          echo "tvcp_content_poll=$attempt status=$status"
+
+          if [ "$status" = "complete" ]; then
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/acceptance-ai-diagnostics?inspect=1" > "$inspect_json"
+            python3 - "$inspect_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          if not payload.get("ok"):
+              raise SystemExit("Candidate inspection route did not return ok=true.")
+          print("TVCP_PROFILE=" + json.dumps(payload.get("profile") or {}, ensure_ascii=False, separators=(",", ":")))
+          print("TVCP_SEARCH_PLAN=" + json.dumps(payload.get("searchPlan") or [], ensure_ascii=False, separators=(",", ":")))
+          for index, row in enumerate(payload.get("candidates") or [], start=1):
+              safe = {
+                  "n": index,
+                  "id": row.get("externalId"),
+                  "subreddit": row.get("subreddit"),
+                  "title": row.get("title"),
+                  "excerpt": row.get("excerpt"),
+                  "matchedQueries": row.get("matchedQueries") or [],
+                  "discoveryLanes": row.get("discoveryLanes") or [],
+                  "createdAt": row.get("sourceCreatedAt"),
+                  "triage": row.get("triage") or {},
+              }
+              print("TVCP_CANDIDATE=" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")))
+          PY
+            exit 0
+          fi
+
+          if [ "$status" = "failed" ]; then
+            python3 - "$status_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          print("tvcp_content_scan_failed")
+          print("error=" + str(scan.get("error") or ""))
+          print("progress=" + json.dumps([
+              {"id": x.get("id"), "status": x.get("status")}
+              for x in (scan.get("progress") or [])
+          ], separators=(",", ":")))
+          PY
+            exit 1
+          fi
+
+          sleep 10
+          done
+
+          echo "TVCP candidate content scan timed out" >&2
+          exit 1

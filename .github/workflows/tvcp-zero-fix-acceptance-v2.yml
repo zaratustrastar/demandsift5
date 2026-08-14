@@ -1,0 +1,90 @@
+name: TVCP zero-result guard acceptance v2
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/tvcp-zero-fix-acceptance-v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+      EXPECTED_SHA: 905303ebf6fa8f529efe30564fe551022e1c3011
+    steps:
+      - name: Confirm deployed fix and run one fresh TVCP scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          inspect_output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          grep -Fq "release_head=$EXPECTED_SHA" <<<"$inspect_output"
+
+          cookie="$(mktemp)"; created="$(mktemp)"; latest="$(mktemp)"; report="$(mktemp)"; internal="$(mktemp)"
+          trap 'rm -f "$cookie" "$created" "$latest" "$report" "$internal"' EXIT
+
+          curl --fail-with-body --silent --show-error --cookie-jar "$cookie" \
+            -H 'content-type: application/json' -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' "$APP_URL/api/scans" > "$created"
+          scan_id="$(python3 - "$created" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1])); print((p.get('scan') or {}).get('id') or '')
+          PY
+          )"
+          test -n "$scan_id"
+          echo "acceptance_scan_id=$scan_id"
+
+          status=""
+          for attempt in $(seq 1 150); do
+            curl --fail-with-body --silent --show-error --cookie "$cookie" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest"
+            status="$(python3 - "$latest" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1])); print((p.get('scan') or {}).get('status') or '')
+          PY
+          )"
+            echo "acceptance_poll=$attempt status=$status"
+            if [ "$status" = complete ]; then break; fi
+            if [ "$status" = failed ]; then exit 1; fi
+            sleep 10
+          done
+          test "$status" = complete
+
+          curl --fail-with-body --silent --show-error --cookie "$cookie" "$APP_URL/api/scans/$scan_id" > "$report"
+          python3 - "$report" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1])); scan=p.get('scan') or {}; report=p.get('report') or {}
+          assert scan.get('status') == 'complete'; assert report.get('profile')
+          print('report_rendering=passed')
+          print('visible_opportunities=' + str(len(report.get('opportunities') or [])))
+          print('visible_replies=' + str(len(report.get('replies') or [])))
+          PY
+
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          curl --fail-with-body --silent --show-error --max-time 20 -H "Authorization: Bearer $secret" \
+            "$APP_URL/api/internal/diagnostics/recent-scans?domain=tvcp.app" > "$internal"
+
+          python3 - "$scan_id" "$internal" <<'PY'
+          import json,sys
+          scan_id,path=sys.argv[1:]; scans=(json.load(open(path)).get('scans') or [])
+          row=next((x for x in scans if x.get('id') == scan_id),None); assert row
+          d=row.get('diagnostics') or {}; r=row.get('retrieval') or {}; o=row.get('output') or {}
+          print('window_days=' + str(row.get('windowDays')))
+          for key in ['retrieved','deterministicSurvivors','worthEnriching','zeroResultAuditEscalated','submittedForDeepQualification','deepQualificationsReturned','uniquePotentialCustomers']:
+              print(key + '=' + str(d.get(key,0)))
+          for key in ['insights','competitorSignals','replies']:
+              print(key + '=' + str(o.get(key,0)))
+          print('matched_lanes=' + json.dumps(r.get('matchedCandidatesByLane') or {},separators=(',',':'),sort_keys=True))
+          print('triage_breakdown=' + json.dumps(row.get('triageBreakdown') or {},separators=(',',':'),sort_keys=True))
+          print('deep_breakdown=' + json.dumps(row.get('deepBreakdown') or {},separators=(',',':'),sort_keys=True))
+          if int(d.get('worthEnriching') or 0) == 0:
+              assert int(d.get('zeroResultAuditEscalated') or 0) >= 1, 'false-zero guard did not escalate'
+              assert int(d.get('submittedForDeepQualification') or 0) >= 1, 'audit did not reach deep qualification'
+          PY

@@ -1,0 +1,59 @@
+name: TVCP stored candidate inspection
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-candidate-inspect-20260814
+
+jobs:
+  inspect-tvcp:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Read exact stored TVCP scan candidates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scan_id='scan_125da85d566b4c2ba10bab84193709b1'
+
+          # Read only the exact public Reddit candidates and their already-stored
+          # triage metadata. Do not print environment values, credentials, or
+          # unrelated workspace/customer records.
+          docker exec -i demandsift2-database-1 sh -c '
+            exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+              --no-align --tuples-only --field-separator="|" -v scan_id="$1"
+          ' sh "$scan_id" <<'SQL'
+          SELECT
+            elem->>'externalId',
+            elem->>'subreddit',
+            LEFT(REPLACE(REPLACE(COALESCE(elem->>'title',''), E'\n', ' '), E'\r', ' '), 180),
+            LEFT(REPLACE(REPLACE(COALESCE(elem->>'excerpt',''), E'\n', ' '), E'\r', ' '), 650),
+            COALESCE(elem->'matchedQueries', '[]'::jsonb)::text,
+            COALESCE(elem->'discoveryLanes', '[]'::jsonb)::text,
+            COALESCE(elem #>> '{triage,intent}', ''),
+            COALESCE(elem #>> '{triage,demandSignal}', ''),
+            COALESCE(elem #>> '{triage,productFit}', ''),
+            COALESCE(elem #>> '{triage,timing}', ''),
+            COALESCE(elem #>> '{triage,replyability}', ''),
+            COALESCE(elem #>> '{triage,worthEnriching}', ''),
+            LEFT(REPLACE(REPLACE(COALESCE(elem #>> '{triage,reason}', ''), E'\n', ' '), E'\r', ' '), 400)
+          FROM runtime_scans
+          CROSS JOIN LATERAL jsonb_array_elements(record #> '{result,processedRedditState}') AS elem
+          WHERE id = :'scan_id'
+          ORDER BY
+            CASE elem #>> '{triage,intent}'
+              WHEN 'actively_looking' THEN 1
+              WHEN 'switching' THEN 2
+              WHEN 'evaluating' THEN 3
+              WHEN 'problem_aware' THEN 4
+              WHEN 'informational' THEN 5
+              WHEN 'promotional' THEN 6
+              ELSE 7
+            END,
+            elem->>'externalId'
+          LIMIT 30;
+
+          SELECT 'SEARCH_PLAN', COALESCE(record #> '{result,retrievalDiagnostics,searchPlan}', '[]'::jsonb)::text
+          FROM runtime_scans
+          WHERE id = :'scan_id';
+          SQL

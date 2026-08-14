@@ -1,0 +1,79 @@
+name: Apply repeat-scan recall fix v2
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/apply-repeat-scan-recall-fix-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-push:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Patch repeat-scan recall safeguards
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('lib/server/scan-workflow.ts')
+          s=p.read_text()
+          old='''      if (previous && previous.contentHash === candidate.provenance.contentHash) {\n        triageById.set(candidate.externalId, previous.triage);\n        reusedTriageOnly += 1;\n        continue;\n      }'''
+          new='''      if (\n        previous &&\n        previous.contentHash === candidate.provenance.contentHash &&\n        previous.triage.worthEnriching === true\n      ) {\n        // Positive triage may be reused because it still flows into enrichment/deep\n        // qualification. Negative triage is intentionally re-run on repeat scans: a\n        // stale cheap false-negative must never become a permanent blind spot.\n        triageById.set(candidate.externalId, previous.triage);\n        reusedTriageOnly += 1;\n        continue;\n      }'''
+          if old not in s:
+              raise SystemExit('triage reuse block not found')
+          s=s.replace(old,new,1)
+          old_budget='budget: Math.min(previousResult ? 1 : 3, enrichmentBudget()),'
+          new_budget='budget: Math.min(previousResult ? 2 : 3, enrichmentBudget()),'
+          if old_budget not in s:
+              raise SystemExit('audit budget block not found')
+          s=s.replace(old_budget,new_budget,1)
+          p.write_text(s)
+
+          t=Path('tests/scan-pipeline-architecture.test.mjs')
+          s=t.read_text()
+          old_assert='assert.match(source, /budget: Math\\.min\\(previousResult \\? 1 : 3, enrichmentBudget\\(\\)\\)/);'
+          new_assert='assert.match(source, /budget: Math\\.min\\(previousResult \\? 2 : 3, enrichmentBudget\\(\\)\\)/);'
+          if old_assert not in s:
+              raise SystemExit('audit test assertion not found')
+          s=s.replace(old_assert,new_assert,1)
+          anchor='''test("zero-result scans audit a bounded high-signal sample before accepting a triage false zero", async () => {'''
+          extra='''test("unchanged negative triage is re-evaluated instead of becoming a permanent blind spot", () => {\n  assert.match(source, /previous\\.triage\\.worthEnriching === true/);\n  assert.equal(\n    source.includes("if (previous && previous.contentHash === candidate.provenance.contentHash)"),\n    false,\n  );\n});\n\n'''
+          if anchor not in s:
+              raise SystemExit('test anchor not found')
+          s=s.replace(anchor, extra+anchor,1)
+          t.write_text(s)
+          PY
+      - name: Install dependencies
+        run: npm ci
+      - name: Focused regression
+        run: node --test tests/scan-pipeline-architecture.test.mjs tests/reddit-intelligence-pipeline.test.mjs
+      - name: Build and lint
+        run: |
+          npm run build:node
+          npm run lint
+      - name: Full test suite
+        run: npm test
+      - name: Commit and push feature branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/server/scan-workflow.ts tests/scan-pipeline-architecture.test.mjs
+          git commit -m 'Re-evaluate negative triage on repeat scans'
+          git push origin HEAD:feature/reddit-intelligence-pipeline
+          echo "pushed_sha=$(git rev-parse HEAD)"

@@ -146,9 +146,17 @@ test("scan persists mandatory stage diagnostics and recurring state", () => {
 });
 
 
+test("unchanged negative triage is re-evaluated instead of becoming a permanent blind spot", () => {
+  assert.match(source, /previous\.triage\.worthEnriching === true/);
+  assert.equal(
+    source.includes("if (previous && previous.contentHash === candidate.provenance.contentHash)"),
+    false,
+  );
+});
+
 test("zero-result scans audit a bounded high-signal sample before accepting a triage false zero", async () => {
   const source = await readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8");
   assert.match(source, /const zeroResultAuditCandidates = worthEnriching\.length === 0/);
   assert.match(source, /selectZeroResultAuditCandidates/);
-  assert.match(source, /budget: Math\.min\(previousResult \? 1 : 3, enrichmentBudget\(\)\)/);
+  assert.match(source, /budget: Math\.min\(previousResult \? 2 : 3, enrichmentBudget\(\)\)/);
 });

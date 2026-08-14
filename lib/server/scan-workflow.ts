@@ -688,7 +688,14 @@ export async function runScan(
 
     for (const candidate of cleaned.survivors) {
       const previous = previousStates.get(`${candidate.provider}:${candidate.externalId}`);
-      if (previous && previous.contentHash === candidate.provenance.contentHash) {
+      if (
+        previous &&
+        previous.contentHash === candidate.provenance.contentHash &&
+        previous.triage.worthEnriching === true
+      ) {
+        // Positive triage may be reused because it still flows into enrichment/deep
+        // qualification. Negative triage is intentionally re-run on repeat scans: a
+        // stale cheap false-negative must never become a permanent blind spot.
         triageById.set(candidate.externalId, previous.triage);
         reusedTriageOnly += 1;
         continue;
@@ -728,7 +735,7 @@ export async function runScan(
           // Acquisition gets a three-candidate audit. Incremental scans get one
           // independent deep check so a cached/cheap triage false-negative cannot
           // silently turn real demand into a valid-looking zero.
-          budget: Math.min(previousResult ? 1 : 3, enrichmentBudget()),
+          budget: Math.min(previousResult ? 2 : 3, enrichmentBudget()),
         })
       : [];
     const triageDetail = zeroResultAuditCandidates.length > 0

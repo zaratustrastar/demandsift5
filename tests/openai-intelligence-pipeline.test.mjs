@@ -211,6 +211,68 @@ test("temporary marketplace seller-capacity errors receive a bounded recovery wi
   assert.equal(result.value[0].externalId, "a");
 });
 
+test("exhausted seller capacity falls back once to a configured compatible model", async () => {
+  const requestedModels = [];
+  const diagnostics = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    modelFallbacks: {
+      [openai.DEFAULT_OPENAI_MODELS.analysisModel]: ["gpt-5.5"],
+    },
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      requestedModels.push(body.model);
+      if (body.model === openai.DEFAULT_OPENAI_MODELS.analysisModel) {
+        return new Response(JSON.stringify({
+          error: { message: `No available sellers for model '${body.model}'` },
+        }), {
+          status: 530,
+          headers: { "content-type": "application/json", "retry-after": "0" },
+        });
+      }
+      return chatResponse({
+        demandInsights: [],
+        competitorSignals: [],
+      });
+    },
+  });
+
+  const result = await provider.generateInsights({
+    business,
+    opportunities: [],
+    marketIntelligence: [],
+    models: openai.DEFAULT_OPENAI_MODELS,
+  });
+
+  assert.deepEqual(requestedModels, [
+    ...Array(6).fill(openai.DEFAULT_OPENAI_MODELS.analysisModel),
+    "gpt-5.5",
+  ]);
+  assert.equal(result.model, "gpt-5.5");
+  assert.deepEqual(diagnostics, [{
+    kind: "model_capacity_fallback",
+    operation: "insight_generation",
+    model: openai.DEFAULT_OPENAI_MODELS.analysisModel,
+    fallbackModel: "gpt-5.5",
+  }]);
+});
+
+test("Surplus gets a high-quality default analysis fallback without affecting other gateways", () => {
+  const surplus = openai.openAiModelFallbacksFromEnv({
+    OPENAI_BASE_URL: "https://api.surplusintelligence.ai/v1",
+    OPENAI_ANALYSIS_MODEL: "gpt-5.6-sol",
+  });
+  const direct = openai.openAiModelFallbacksFromEnv({
+    OPENAI_BASE_URL: "https://api.openai.com/v1",
+    OPENAI_ANALYSIS_MODEL: "gpt-5.6-sol",
+  });
+  assert.deepEqual(surplus, { "gpt-5.6-sol": ["gpt-5.5"] });
+  assert.deepEqual(direct, {});
+});
+
 test("ordinary upstream failures still respect the configured retry limit", async () => {
   let calls = 0;
   const provider = new openai.OpenAiProvider({

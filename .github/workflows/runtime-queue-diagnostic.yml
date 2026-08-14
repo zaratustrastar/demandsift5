@@ -22,6 +22,8 @@ jobs:
           echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "--- release ---"
           sudo -n /usr/local/sbin/demandsift-release inspect
+          echo "--- acceptance scan ---"
+          sudo -n /usr/local/sbin/demandsift-release scan-status scan_9bcf38220d114ff8aec77fd22a3271e4 || true
           echo "--- runner visibility ---"
           stat -c 'env_mode=%a env_owner=%U env_group=%G' /opt/demandsift5/deploy/vps.env 2>/dev/null || true
           if [ -r /opt/demandsift5/deploy/vps.env ]; then echo 'env_readable=true'; else echo 'env_readable=false'; fi

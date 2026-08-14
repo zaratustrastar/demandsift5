@@ -1,3 +1,4 @@
+import { dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
 import type { MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
@@ -194,8 +195,10 @@ export async function presentScan(scan: ScanRecord) {
   );
   const visibleInsights = fullAccess ? result.insights : result.insights.slice(0, 2);
   const leadSourceIds = new Set(result.opportunities.map((opportunity) => opportunity.sourceId));
-  const relevantConversations = result.marketIntelligence.filter(
-    (conversation) => !leadSourceIds.has(conversation.sourceId),
+  const relevantConversations = dedupeMarketIntelligenceRecords(
+    result.marketIntelligence.filter(
+      (conversation) => !leadSourceIds.has(conversation.sourceId),
+    ),
   );
   const visibleRelevantConversations = fullAccess
     ? relevantConversations

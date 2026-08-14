@@ -1,0 +1,43 @@
+name: Inspect latest TVCP deep-review rows
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-tvcp-deep-rows-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Read latest TVCP deep-review evidence safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          db_container="$(sudo -n docker ps --format '{{.Names}}' | grep -E '^demandsift2-(db|postgres)-1$' | head -n1)"
+          test -n "$db_container"
+          sudo -n docker exec "$db_container" sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' <<'SQL'
+          SELECT jsonb_build_object(
+            'scanId', r.id,
+            'profile', r.record->'result'->'profile',
+            'state', jsonb_build_object(
+              'externalId', s->>'externalId',
+              'title', s->>'title',
+              'excerpt', left(coalesce(s->>'excerpt',''), 700),
+              'subreddit', s->>'subreddit',
+              'permalink', s->>'canonicalPermalink',
+              'lanes', s->'discoveryLanes',
+              'triage', s->'triage',
+              'deep', s->'deepQualification'
+            )
+          )::text
+          FROM runtime_scans r
+          CROSS JOIN LATERAL jsonb_array_elements(r.record->'result'->'processedRedditState') AS s
+          WHERE r.id = 'scan_e0197c547d324a1d8936c36b8a58db70'
+            AND s->'deepQualification' IS NOT NULL;
+          SQL

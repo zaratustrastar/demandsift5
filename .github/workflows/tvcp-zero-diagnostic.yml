@@ -1,0 +1,123 @@
+name: TVCP zero-result diagnostic
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-zero-20260814
+
+jobs:
+  diagnose-tvcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run one fresh TVCP acquisition scan and print sanitized funnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          status_json="$(mktemp)"
+          diagnostics_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$status_json" "$diagnostics_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "tvcp_scan_id=$scan_id"
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$status_json"
+            status="$(python3 - "$status_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "poll=$attempt status=$status"
+
+            if [ "$status" = "complete" ]; then
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+              python3 - "$diagnostics_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          diagnostics = payload.get("diagnostics") or {}
+          retrieval = payload.get("retrieval") or {}
+          decisions = payload.get("decisionBreakdown") or {}
+          output = payload.get("output") or {}
+          safe = {
+              "scan": {
+                  "status": scan.get("status"),
+                  "websiteUrl": scan.get("websiteUrl"),
+                  "progress": scan.get("progress"),
+              },
+              "diagnostics": {
+                  "retrieved": diagnostics.get("retrieved", 0),
+                  "normalized": diagnostics.get("normalized", 0),
+                  "deterministicSurvivors": diagnostics.get("deterministicSurvivors", 0),
+                  "submittedForTriage": diagnostics.get("submittedForTriage", 0),
+                  "triageReturned": diagnostics.get("triageReturned", 0),
+                  "worthEnriching": diagnostics.get("worthEnriching", 0),
+                  "requestedForEnrichment": diagnostics.get("requestedForEnrichment", 0),
+                  "enrichedSuccessfully": diagnostics.get("enrichedSuccessfully", 0),
+                  "submittedForDeepQualification": diagnostics.get("submittedForDeepQualification", 0),
+                  "deepQualificationsReturned": diagnostics.get("deepQualificationsReturned", 0),
+                  "potentialCustomerConversations": diagnostics.get("potentialCustomerConversations", 0),
+                  "notCustomerConversations": diagnostics.get("notCustomerConversations", 0),
+                  "uncertainConversations": diagnostics.get("uncertainConversations", 0),
+                  "uniquePotentialCustomers": diagnostics.get("uniquePotentialCustomers", 0),
+                  "repliesGenerated": diagnostics.get("repliesGenerated", 0),
+              },
+              "retrieval": {
+                  "queryCount": retrieval.get("queryCount", 0),
+                  "queryCountsByLane": retrieval.get("queryCountsByLane", {}),
+                  "matchedCandidatesByLane": retrieval.get("matchedCandidatesByLane", {}),
+                  "worthEnrichingByLane": retrieval.get("worthEnrichingByLane", {}),
+                  "fetchedCandidates": retrieval.get("fetchedCandidates", 0),
+                  "normalizedCandidates": retrieval.get("normalizedCandidates", 0),
+                  "locallyMatchedCandidates": retrieval.get("locallyMatchedCandidates", 0),
+              },
+              "triageBreakdown": decisions.get("triage") or {},
+              "deepBreakdown": decisions.get("deepQualification") or {},
+              "output": output,
+          }
+          print(json.dumps(safe, indent=2, sort_keys=True))
+          PY
+              exit 0
+            fi
+
+            if [ "$status" = "failed" ]; then
+              python3 - "$status_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          print("scan_failed")
+          print("error=" + str(scan.get("error") or ""))
+          print("progress=" + json.dumps(scan.get("progress") or [], separators=(",", ":")))
+          PY
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "TVCP diagnostic timed out" >&2
+          exit 1

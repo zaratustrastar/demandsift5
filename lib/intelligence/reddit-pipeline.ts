@@ -448,9 +448,14 @@ export function isRelevantMarketConversation(input: {
     ACTIVE_DEMAND_INTENTS.has(qualification.intent) &&
     (qualification.timing === "current" || qualification.timing === "near_term");
 
-  if (hasCurrentDemand && (hasMeaningfulFit || hasResearchTag)) return true;
-  if (hasMeaningfulFit && hasResearchTag) return true;
-  return hasMeaningfulFit && input.verifiedCompetitorSignal;
+  // Relevance to the scanned business is mandatory for both the lead layer
+  // and the research layer. A real problem in an unrelated product category
+  // is useful in the abstract, but it is not DemandSift evidence for this
+  // business and must not be surfaced merely because a generic tag matched.
+  if (!hasMeaningfulFit) return false;
+  if (hasCurrentDemand) return true;
+  if (hasResearchTag) return true;
+  return input.verifiedCompetitorSignal;
 }
 
 function fitScore(value: FitLevel): number {

@@ -113,11 +113,34 @@ jobs:
           stored = report.get("storedCounts") or {}
           stored_opportunities = int(stored.get("opportunities") or 0)
           stored_replies = int(stored.get("replies") or 0)
+          stored_relevant = int(stored.get("relevantConversations") or 0)
+          visible_relevant = report.get("relevantConversations") or []
+          visible_opportunity_rows = report.get("opportunities") or []
           if stored_replies != stored_opportunities:
               raise SystemExit(
                   "Independent acceptance failed: every actionable opportunity must have one complete reply "
                   f"(opportunities={stored_opportunities}, replies={stored_replies})."
               )
+          lead_source_ids = {
+              str(source_id)
+              for row in visible_opportunity_rows
+              for source_id in (row.get("sourceIds") or [])
+          }
+          relevant_source_ids = {
+              str(source_id)
+              for row in visible_relevant
+              for source_id in (row.get("sourceIds") or [])
+          }
+          if lead_source_ids & relevant_source_ids:
+              raise SystemExit("Independent acceptance failed: a conversation is double-counted as both a lead and a research signal.")
+          if stored_relevant < len(visible_relevant):
+              raise SystemExit("Independent acceptance failed: visible relevant conversations exceed the stored count.")
+          for row in visible_relevant:
+              permalink = str(row.get("permalink") or "")
+              if not permalink.startswith(("https://www.reddit.com/", "https://reddit.com/")):
+                  raise SystemExit("Independent acceptance failed: relevant conversation has no public Reddit source link.")
+              if not row.get("sourceIds"):
+                  raise SystemExit("Independent acceptance failed: relevant conversation has no provenance source ID.")
 
           print("independent_result=complete")
           print("elapsed_seconds=" + str(elapsed))
@@ -187,6 +210,20 @@ jobs:
                   "sourceIds": row.get("sourceIds") or [],
               })
           print("visible_opportunities=" + json.dumps(opportunities, ensure_ascii=False, separators=(",", ":")))
+
+          relevant_conversations = []
+          for row in visible_relevant:
+              relevant_conversations.append({
+                  "title": row.get("title"),
+                  "summary": row.get("summary"),
+                  "permalink": row.get("permalink"),
+                  "subreddit": row.get("subreddit"),
+                  "whyItMatters": row.get("whyItMatters"),
+                  "signals": row.get("signals") or [],
+                  "competitor": row.get("competitor"),
+                  "sourceIds": row.get("sourceIds") or [],
+              })
+          print("visible_relevant_conversations=" + json.dumps(relevant_conversations, ensure_ascii=False, separators=(",", ":")))
 
           insights = []
           for row in report.get("insights") or []:

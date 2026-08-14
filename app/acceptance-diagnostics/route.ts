@@ -1,5 +1,19 @@
 import { apiErrorResponse, ApiError, requireWorkspace } from "@/lib/server/http";
+import { presentScan } from "@/lib/server/presenter";
 import { getStateRepository } from "@/lib/server/repository";
+
+function sanitizedPresentationError(error: unknown): { errorType: string; error: string } {
+  const errorType = error instanceof Error ? error.name || "Error" : "Error";
+  const raw = error instanceof Error ? error.message : "Unknown presentation failure.";
+  return {
+    errorType,
+    error: raw
+      .replace(/https?:\/\/\S+/giu, "[url]")
+      .replace(/\b(?:scan|ws|reply|opp)_[a-z\d_-]+\b/giu, "[id]")
+      .replace(/\b[A-Za-z\d_-]{32,}\b/gu, "[redacted]")
+      .slice(0, 300),
+  };
+}
 
 export async function GET(request: Request) {
   try {
@@ -12,6 +26,21 @@ export async function GET(request: Request) {
       throw new ApiError("Acceptance diagnostics are unavailable for this scan.", 404, "not_found");
     }
 
+    let presentation:
+      | { ok: true; hasReport: boolean; visibleOpportunities: number; visibleReplies: number }
+      | ({ ok: false } & ReturnType<typeof sanitizedPresentationError>);
+    try {
+      const presented = await presentScan(scan);
+      presentation = {
+        ok: true,
+        hasReport: Boolean(presented.report),
+        visibleOpportunities: presented.report?.opportunities.length ?? 0,
+        visibleReplies: presented.report?.replies.length ?? 0,
+      };
+    } catch (error) {
+      presentation = { ok: false, ...sanitizedPresentationError(error) };
+    }
+
     const payload = {
       scan: {
         id: scan.id,
@@ -22,6 +51,7 @@ export async function GET(request: Request) {
         progress: scan.progress.map((stage) => ({ id: stage.id, status: stage.status })),
       },
       diagnostics: scan.result.diagnostics,
+      presentation,
       decisionBreakdown: {
         triage: scan.result.processedRedditState.reduce<Record<string, number>>((counts, state) => {
           const key = [
@@ -67,11 +97,13 @@ export async function GET(request: Request) {
         : null,
       output: {
         opportunities: scan.result.opportunities.length,
-        potentialCustomers: scan.result.potentialCustomers.total,
+        potentialCustomers: scan.result.potentialCustomers?.total ?? scan.result.opportunities.length,
         insights: scan.result.insights.length,
-        competitorSignals: scan.result.competitorWeakness.verified ? 1 : 0,
+        competitorSignals: scan.result.competitorWeakness?.verified ? 1 : 0,
         marketIntelligence: scan.result.marketIntelligence.length,
-        replies: scan.result.replies.filter((reply) => reply.content.trim().length > 0).length,
+        replies: scan.result.replies.filter(
+          (reply) => typeof reply.content === "string" && reply.content.trim().length > 0,
+        ).length,
       },
     };
 

@@ -43,6 +43,22 @@ type ApiInsight = {
   sourceCount?: number;
 };
 
+type ApiRelevantConversation = {
+  id: string;
+  title: string;
+  summary: string;
+  subreddit: string;
+  author: string | null;
+  permalink: string | null;
+  postedAt: string;
+  tags: string[];
+  demandSignals: string[];
+  competitor: string | null;
+  sourceIds: string[];
+  provider: string;
+  dataMode: "mock" | "live" | "apify-test";
+};
+
 type ApiOpportunity = {
   id: string;
   title: string;
@@ -91,6 +107,7 @@ type ApiReply = {
 type ApiReport = {
   profile: ApiProfile;
   insights: ApiInsight[];
+  relevantConversations?: ApiRelevantConversation[];
   competitorWeakness: {
     id: string;
     verified: boolean;
@@ -135,12 +152,14 @@ type ApiReport = {
   analysisMode: "openai" | "local-fallback";
   storedCounts: {
     opportunities: number;
+    relevantConversations?: number;
     insights: number;
     competitorSignals: number;
     replies: number;
   };
   additionalLockedCounts: {
     opportunities: number;
+    relevantConversations?: number;
     insights: number;
     competitorSignals: number;
     replies: number;
@@ -297,6 +316,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
   const lockedResults = lockedRecords(report);
   const lockedCounts = {
     opportunities: report.additionalLockedCounts.opportunities,
+    relevantConversations: report.additionalLockedCounts.relevantConversations ?? 0,
     insights: report.additionalLockedCounts.insights,
     competitorSignals: report.additionalLockedCounts.competitorSignals,
     visibilityOpportunities: 0,
@@ -309,7 +329,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       item.id === "opportunities"
         ? report.storedCounts.opportunities
         : item.id === "insights"
-          ? report.storedCounts.insights
+          ? report.storedCounts.insights + (report.storedCounts.relevantConversations ?? 0)
           : item.id === "competitors"
             ? report.storedCounts.competitorSignals
             : item.id === "replies"
@@ -368,6 +388,23 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       isMock: source.synthetic,
       verifiedWithinDemoFixture:
         source.kind === "website" || (source.sourceMode ?? report.dataMode) === "live",
+    })),
+    relevantConversations: (report.relevantConversations ?? []).map((conversation) => ({
+      id: conversation.id,
+      provider: conversation.provider,
+      isMock: conversation.dataMode === "mock",
+      title: conversation.title,
+      summary: conversation.summary,
+      subreddit: conversation.subreddit.startsWith("r/")
+        ? conversation.subreddit
+        : `r/${conversation.subreddit}`,
+      authorLabel: conversation.author ?? "Reddit participant",
+      capturedAt: conversation.postedAt,
+      permalink: conversation.permalink,
+      tags: conversation.tags,
+      demandSignals: conversation.demandSignals,
+      competitorName: conversation.competitor,
+      provenanceIds: conversation.sourceIds,
     })),
     insights: report.insights.map((insight) => {
       const sourceCount = insight.sourceCount ?? new Set(insight.sourceIds).size;

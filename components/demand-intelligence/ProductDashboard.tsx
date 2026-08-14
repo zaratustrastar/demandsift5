@@ -14,6 +14,7 @@ import type {
   PricingPlan,
   RedditDemandDemoData,
   RedditOpportunity,
+  RelevantConversation,
 } from "./types";
 
 import styles from "./ProductDashboard.module.css";
@@ -423,6 +424,74 @@ export function OpportunityCard({
   );
 }
 
+function intelligenceLabel(value: string): string {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+export function RelevantConversationCard({
+  conversation,
+}: {
+  conversation: RelevantConversation;
+}) {
+  const signalLabels = [...new Set([
+    ...conversation.demandSignals,
+    ...conversation.tags,
+  ])].slice(0, 5);
+
+  return (
+    <article className={styles.opportunityCard}>
+      <div className={styles.opportunityTopline}>
+        <div className={styles.sourceIdentity}>
+          <span className={styles.redditMark}>r/</span>
+          <div>
+            <strong>{conversation.authorLabel.replace(/^u\//i, "")}</strong>
+            <span>
+              {relativeTime(conversation.capturedAt)} · {conversation.subreddit} · Public conversation
+            </span>
+          </div>
+        </div>
+        <span className={`${styles.intentPill} ${styles.intentMedium}`}>
+          Research signal — not a lead
+        </span>
+      </div>
+
+      <h3>{conversation.title}</h3>
+      <div className={styles.mockExcerpt}>
+        <span>Why it matters</span>
+        <p>{conversation.summary}</p>
+      </div>
+      {signalLabels.length > 0 && (
+        <div className={styles.opportunityMeta}>
+          {signalLabels.map((signal) => (
+            <span key={signal}>{intelligenceLabel(signal)}</span>
+          ))}
+          {conversation.competitorName && (
+            <span>Competitor: {conversation.competitorName}</span>
+          )}
+        </div>
+      )}
+      <div className={styles.opportunityAction}>
+        <div>
+          <span className={styles.fieldLabel}>Recommended use</span>
+          <p>Use this source to understand demand, objections or alternatives. It is not counted as a potential customer and has no generated reply.</p>
+        </div>
+        {conversation.permalink && !conversation.isMock && (
+          <a
+            className={styles.secondaryButton}
+            href={conversation.permalink}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            View Reddit conversation <Icon name="external" size={14} />
+          </a>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export function DemandInsightCard({ insight }: { insight: DemandInsight }) {
   return (
     <article className={styles.insightCard}>
@@ -533,7 +602,9 @@ export function LockedResultsPanel({
 }) {
   const leadResult = counts.opportunities
     ? { count: counts.opportunities, label: "provider opportunities" }
-    : counts.insights
+    : (counts.relevantConversations ?? 0)
+      ? { count: counts.relevantConversations ?? 0, label: "relevant conversations" }
+      : counts.insights
       ? { count: counts.insights, label: "demand insights" }
       : counts.competitorSignals
         ? { count: counts.competitorSignals, label: "competitor signals" }
@@ -546,6 +617,11 @@ export function LockedResultsPanel({
       label: "Qualified opportunities",
       count: counts.opportunities,
       width: "84%",
+    },
+    {
+      label: "Relevant conversations",
+      count: counts.relevantConversations ?? 0,
+      width: "74%",
     },
     { label: "Demand insights", count: counts.insights, width: "68%" },
     {
@@ -625,6 +701,9 @@ function MarketScanLockedPanel({
   const proofRows = [
     additional > 0 ? `+${additional} potential customer opportunities` : "",
     counts.readyReplies > 0 ? `+${counts.readyReplies} suggested replies` : "",
+    (counts.relevantConversations ?? 0) > 0
+      ? `+${counts.relevantConversations} relevant conversations`
+      : "",
     counts.competitorSignals > 0 ? `+${counts.competitorSignals} competitor weaknesses` : "",
     counts.insights > 0 ? `+${counts.insights} recurring customer problems` : "",
   ].filter(Boolean);
@@ -931,6 +1010,7 @@ export function ProductDashboard({
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
+  const relevantConversations = data.relevantConversations ?? [];
   const normalizedAnalyzedDomain = analyzedDomain
     ?.replace(/^https?:\/\//, "")
     .replace(/\/$/, "")
@@ -944,10 +1024,12 @@ export function ProductDashboard({
     ? `${data.fixtureDisclosure} The facts below were not produced from ${analyzedDomain}; Relaywise is a clearly separated fallback fixture while the real scan result is unavailable.`
     : data.fixtureDisclosure;
   const usesFictionalBusiness = data.business.isFictionalDemoBusiness;
-  const usesMockProvider = data.opportunities.some((opportunity) => opportunity.isMock);
-  const usesApifyTestProvider = data.opportunities.some(
-    (opportunity) => opportunity.provider === "apify-reddit-test",
-  );
+  const usesMockProvider =
+    data.opportunities.some((opportunity) => opportunity.isMock) ||
+    relevantConversations.some((conversation) => conversation.isMock);
+  const usesApifyTestProvider =
+    data.opportunities.some((opportunity) => opportunity.provider === "apify-reddit-test") ||
+    relevantConversations.some((conversation) => conversation.provider === "apify-reddit-test");
   const [activeSection, setActiveSection] =
     useState<NavigationSectionId>(initialSection);
   const [selectedOpportunityId, setSelectedOpportunityId] = useState(
@@ -1096,9 +1178,11 @@ export function ProductDashboard({
     const previewReply = potentialCustomers.total > 0
       ? availableReplyOpportunities[0]
       : undefined;
-    const strongestFallback = data.competitorWeaknesses.some((item) => item.verified)
-      ? "A source-backed competitor mention is available below."
-      : data.insights.length > 0
+    const strongestFallback = relevantConversations.length > 0
+      ? `${relevantConversations.length} source-backed relevant conversation${relevantConversations.length === 1 ? " is" : "s are"} available below.`
+      : data.competitorWeaknesses.some((item) => item.verified)
+        ? "A source-backed competitor mention is available below."
+        : data.insights.length > 0
         ? `${data.insights.length} source-backed demand signal${data.insights.length === 1 ? " is" : "s are"} available below.`
         : data.visibilityOpportunities.length > 0
           ? `${data.visibilityOpportunities.length} Search & AI Visibility Opportunit${data.visibilityOpportunities.length === 1 ? "y is" : "ies are"} available below.`
@@ -1106,6 +1190,7 @@ export function ProductDashboard({
     const hasLockedValue = !usesMockProvider && (
       data.lockedCounts.opportunities > 0 ||
       data.lockedCounts.readyReplies > 0 ||
+      (data.lockedCounts.relevantConversations ?? 0) > 0 ||
       data.lockedCounts.competitorSignals > 0 ||
       data.lockedCounts.insights > 0
     );
@@ -1178,6 +1263,23 @@ export function ProductDashboard({
             </div>
           </section>
         </TrackedSection>
+
+        {relevantConversations.length > 0 && (
+          <section className={styles.dashboardSection}>
+            <div className={styles.sectionHeadingRow}>
+              <div>
+                <span className={styles.eyebrow}>Relevant conversations</span>
+                <h2>Useful market evidence that is not a potential lead</h2>
+              </div>
+              <span className={styles.qualityNote}>Full-context reviewed · Source linked</span>
+            </div>
+            <div className={styles.opportunityStack}>
+              {relevantConversations.slice(0, 3).map((conversation) => (
+                <RelevantConversationCard key={conversation.id} conversation={conversation} />
+              ))}
+            </div>
+          </section>
+        )}
 
         {previewReply && (
           <TrackedSection event="suggested_reply_viewed" onView={onFunnelEvent}>
@@ -1378,6 +1480,23 @@ export function ProductDashboard({
         </div>
       </section>
 
+      {relevantConversations.length > 0 && (
+        <section className={styles.dashboardSection}>
+          <div className={styles.sectionHeadingRow}>
+            <div>
+              <span className={styles.eyebrow}>Relevant conversations</span>
+              <h2>Demand evidence to learn from—not leads to contact</h2>
+            </div>
+            <span className={styles.qualityNote}>Kept separate from opportunity and reply counts</span>
+          </div>
+          <div className={styles.opportunityStack}>
+            {relevantConversations.slice(0, 3).map((conversation) => (
+              <RelevantConversationCard key={conversation.id} conversation={conversation} />
+            ))}
+          </div>
+        </section>
+      )}
+
       {availableReplyOpportunities[0] && (
         <section className={styles.dashboardSection}>
           <div className={styles.sectionHeadingRow}>
@@ -1492,6 +1611,22 @@ export function ProductDashboard({
           <DemandInsightCard key={insight.id} insight={insight} />
         ))}
       </div>
+      {relevantConversations.length > 0 && (
+        <section className={styles.dashboardSection}>
+          <div className={styles.sectionHeadingRow}>
+            <div>
+              <span className={styles.eyebrow}>Relevant conversations</span>
+              <h2>Source-linked discussions behind the market picture</h2>
+            </div>
+            <span className={styles.qualityNote}>Not counted as potential customers</span>
+          </div>
+          <div className={styles.opportunityStack}>
+            {relevantConversations.map((conversation) => (
+              <RelevantConversationCard key={conversation.id} conversation={conversation} />
+            ))}
+          </div>
+        </section>
+      )}
       {!hasFullAccess && (
         <LockedResultsPanel
           counts={{

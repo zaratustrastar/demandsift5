@@ -66,3 +66,19 @@ test("market-intelligence review has a bounded full-context floor independent of
   assert.match(pipeline, /const laneOrder: RedditSearchLane\[\]/);
   assert.match(pipeline, /triage\.intent === "irrelevant" \|\| triage\.intent === "promotional"/);
 });
+
+
+test("relevant conversations are source-linked and kept separate from reply-ready leads", async () => {
+  const [presenter, dashboard, mapper] = await Promise.all([
+    source("lib/server/presenter.ts"),
+    source("components/demand-intelligence/ProductDashboard.tsx"),
+    source("components/demand-intelligence/from-scan.ts"),
+  ]);
+  assert.match(presenter, /!leadSourceIds\.has\(conversation\.sourceId\)/);
+  assert.match(presenter, /publicRelevantConversation/);
+  assert.match(presenter, /permalink: source\?\.url \|\| null/);
+  assert.match(presenter, /relevantConversations: relevantConversations\.length/);
+  assert.match(dashboard, /Research signal — not a lead/);
+  assert.match(dashboard, /It is not counted as a potential customer and has no generated reply/);
+  assert.match(mapper, /relevantConversations: \(report\.relevantConversations \?\? \[\]\)\.map/);
+});

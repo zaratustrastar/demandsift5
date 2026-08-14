@@ -1,4 +1,4 @@
-import type { OpportunityRecord, ReplyRecord, ScanRecord } from "./contracts";
+import type { MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
 import { getEffectiveEntitlement, getStateRepository } from "./repository";
@@ -48,6 +48,28 @@ function publicOpportunity(opportunity: OpportunityRecord) {
     appearedInPreviousDemandDrop: opportunity.appearedInPreviousDemandDrop ?? false,
     mentionProduct: opportunity.mentionProduct === true,
     disclosureRequired: opportunity.disclosureRequired === true,
+  };
+}
+
+function publicRelevantConversation(
+  intelligence: MarketIntelligenceRecord,
+  source: Provenance | undefined,
+) {
+  const dataMode = source?.sourceMode ?? (source?.synthetic ? "mock" : "live");
+  return {
+    id: intelligence.id,
+    title: intelligence.title,
+    summary: intelligence.summary,
+    subreddit: intelligence.subreddit,
+    author: intelligence.author,
+    permalink: source?.url || null,
+    postedAt: intelligence.sourceCreatedAt,
+    tags: intelligence.tags,
+    demandSignals: intelligence.demandSignals,
+    competitor: intelligence.competitor,
+    sourceIds: intelligence.sourceIds,
+    provider: source?.provider ?? "reddit",
+    dataMode,
   };
 }
 
@@ -171,12 +193,23 @@ export async function presentScan(scan: ScanRecord) {
     visibleReplies.filter((reply) => reply.content.trim()).map((reply) => reply.id),
   );
   const visibleInsights = fullAccess ? result.insights : result.insights.slice(0, 2);
+  const leadSourceIds = new Set(result.opportunities.map((opportunity) => opportunity.sourceId));
+  const relevantConversations = result.marketIntelligence.filter(
+    (conversation) => !leadSourceIds.has(conversation.sourceId),
+  );
+  const visibleRelevantConversations = fullAccess
+    ? relevantConversations
+    : relevantConversations.slice(0, 3);
+  const redditSourceById = new Map(
+    result.sources.filter((source) => source.kind === "reddit").map((source) => [source.id, source]),
+  );
   const visibleSourceIds = new Set([
     ...result.profile.sourceIds,
     ...visibleOpportunities.flatMap((opportunity) =>
       opportunity.supportingSourceIds ?? [opportunity.sourceId],
     ),
     ...visibleInsights.flatMap((insight) => insight.sourceIds),
+    ...visibleRelevantConversations.flatMap((conversation) => conversation.sourceIds),
     ...result.competitorWeakness.sourceIds,
   ]);
 
@@ -194,6 +227,9 @@ export async function presentScan(scan: ScanRecord) {
     report: {
       profile: result.profile,
       insights: visibleInsights,
+      relevantConversations: visibleRelevantConversations.map((conversation) =>
+        publicRelevantConversation(conversation, redditSourceById.get(conversation.sourceId))
+      ),
       competitorWeakness: result.competitorWeakness,
       opportunities: visibleOpportunities.map(publicOpportunity),
       potentialCustomers: result.potentialCustomers ?? {
@@ -235,14 +271,19 @@ export async function presentScan(scan: ScanRecord) {
       analysisMode: result.analysisMode,
       storedCounts: {
         opportunities: result.opportunities.length,
+        relevantConversations: relevantConversations.length,
         insights: result.insights.length,
         competitorSignals: competitorSignalCount,
         replies: generatedReplies.length,
       },
       additionalLockedCounts: fullAccess
-        ? { opportunities: 0, insights: 0, competitorSignals: 0, replies: 0 }
+        ? { opportunities: 0, relevantConversations: 0, insights: 0, competitorSignals: 0, replies: 0 }
         : {
             opportunities: Math.max(0, result.opportunities.length - visibleOpportunityIds.size),
+            relevantConversations: Math.max(
+              0,
+              relevantConversations.length - visibleRelevantConversations.length,
+            ),
             insights: Math.max(0, result.insights.length - visibleInsights.length),
             competitorSignals: 0,
             replies: Math.max(0, generatedReplies.length - visibleGeneratedReplyIds.size),

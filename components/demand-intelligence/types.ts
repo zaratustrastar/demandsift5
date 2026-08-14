@@ -91,6 +91,22 @@ export interface DemandInsight {
   sourceCount?: number;
 }
 
+export interface RelevantConversation {
+  id: string;
+  provider: string;
+  isMock: boolean;
+  title: string;
+  summary: string;
+  subreddit: string;
+  authorLabel: string;
+  capturedAt: string;
+  permalink: string | null;
+  tags: string[];
+  demandSignals: string[];
+  competitorName: string | null;
+  provenanceIds: string[];
+}
+
 export interface CompetitorWeakness {
   id: string;
   verified: boolean;
@@ -193,6 +209,7 @@ export interface PotentialCustomerSummary {
 
 export interface LockedResultCounts {
   opportunities: number;
+  relevantConversations?: number;
   insights: number;
   competitorSignals: number;
   visibilityOpportunities: number;
@@ -243,6 +260,7 @@ export interface RedditDemandDemoData {
   business: BusinessProfile;
   provenance: ProvenanceSource[];
   insights: DemandInsight[];
+  relevantConversations?: RelevantConversation[];
   competitorWeaknesses: CompetitorWeakness[];
   opportunities: RedditOpportunity[];
   potentialCustomers?: PotentialCustomerSummary;

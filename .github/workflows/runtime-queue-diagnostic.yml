@@ -1,0 +1,52 @@
+name: Runtime queue diagnostic
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/runtime-queue-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect runtime queue and recent service events
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "--- containers ---"
+          sudo -n docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' | grep -Ei 'demandsift|threadline|postgres|db' || true
+
+          echo "--- worker events (last 40m, sanitized) ---"
+          worker="$(sudo -n docker ps --format '{{.Names}}' | grep -Ei 'demandsift.*worker|threadline.*worker' | head -n1 || true)"
+          if [ -n "$worker" ]; then
+            echo "worker_container=$worker"
+            sudo -n docker logs --since 40m "$worker" 2>&1 \
+              | grep -E 'queue_worker|job_claimed|job_succeeded|job_failed|scan_execution|executor|timeout|retry|fatal|shutdown|database_ready|migrations|error' \
+              | tail -n 250 || true
+          else
+            echo "worker_container=NOT_FOUND"
+          fi
+
+          echo "--- web events (last 40m, sanitized) ---"
+          web="$(sudo -n docker ps --format '{{.Names}}' | grep -Ei 'demandsift.*web|threadline.*web' | head -n1 || true)"
+          if [ -n "$web" ]; then
+            echo "web_container=$web"
+            sudo -n docker logs --since 40m "$web" 2>&1 \
+              | grep -Ei 'scan_|job|executor|timeout|failed|error|apify|openai|surplus|queue' \
+              | sed -E 's#https?://[^ ]+#<url>#g' \
+              | tail -n 250 || true
+          else
+            echo "web_container=NOT_FOUND"
+          fi
+
+          echo "--- process/resource snapshot ---"
+          uptime
+          free -h
+          df -h / | tail -n 2

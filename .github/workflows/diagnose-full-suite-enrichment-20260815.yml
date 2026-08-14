@@ -1,0 +1,50 @@
+name: Diagnose enrichment full-suite failures
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/diagnose-full-suite-enrichment-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: diagnostic/runtime-queue-20260814
+          path: diagnostics
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          path: feature
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+          cache-dependency-path: feature/package-lock.json
+      - name: Apply candidate patch
+        working-directory: feature
+        run: python3 ../diagnostics/.github/scripts/fix_enrichment_validity_20260815.py
+      - name: Install
+        working-directory: feature
+        run: npm ci
+      - name: Run full suite and print failures
+        working-directory: feature
+        shell: bash
+        run: |
+          set +e
+          node --test --test-reporter=tap tests/*.test.mjs > /tmp/enrichment-tests.log 2>&1
+          status=$?
+          echo "test_status=$status"
+          if [ "$status" -ne 0 ]; then
+            echo '--- FAILURES ---'
+            grep -n -E -C 18 'not ok|ERR_ASSERTION|AssertionError|failureType|error:' /tmp/enrichment-tests.log || true
+            echo '--- END FAILURES ---'
+          fi
+          exit "$status"

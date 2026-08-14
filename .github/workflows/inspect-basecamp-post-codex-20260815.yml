@@ -1,0 +1,53 @@
+name: Inspect Basecamp post-Codex acceptance state
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-basecamp-post-codex-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Inspect release and latest Basecamp scans safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          inspect_output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          printf '%s\n' "$inspect_output" | grep -E '^(release_head=|container=demandsift2-(web|worker)-1 )' || true
+
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          test -n "$pid"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer $secret" \
+            "$APP_URL/api/internal/diagnostics/recent-scans?domain=basecamp.com" > "$tmp"
+          python3 - "$tmp" <<'PY'
+          import json,sys
+          payload=json.load(open(sys.argv[1]))
+          scans=payload.get('scans') or []
+          print('basecamp_scan_count=' + str(len(scans)))
+          for s in scans[:5]:
+              print(json.dumps({
+                  'id':s.get('id'),
+                  'status':s.get('status'),
+                  'createdAt':s.get('createdAt'),
+                  'updatedAt':s.get('updatedAt'),
+                  'windowDays':s.get('windowDays'),
+                  'diagnostics':s.get('diagnostics'),
+                  'retrieval':s.get('retrieval'),
+                  'deepBreakdown':s.get('deepBreakdown'),
+                  'output':s.get('output'),
+                  'progress':s.get('progress'),
+              }, separators=(',',':'), sort_keys=True))
+          PY

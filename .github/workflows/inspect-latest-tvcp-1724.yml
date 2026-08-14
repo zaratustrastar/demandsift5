@@ -1,0 +1,42 @@
+name: Inspect latest TVCP production scan
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-latest-tvcp-1724.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Inspect latest TVCP scans safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          test -n "$pid"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer $secret" \
+            "$APP_URL/api/internal/diagnostics/recent-scans?domain=tvcp.app" > "$tmp"
+          python3 - "$tmp" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1]))
+          scans=p.get('scans') or []
+          print('count=' + str(len(scans)))
+          for s in scans[:8]:
+              print(json.dumps({
+                  'id':s.get('id'),'status':s.get('status'),'createdAt':s.get('createdAt'),'updatedAt':s.get('updatedAt'),'windowDays':s.get('windowDays'),
+                  'progress':s.get('progress'),'diagnostics':s.get('diagnostics'),'retrieval':s.get('retrieval'),'triageBreakdown':s.get('triageBreakdown'),'deepBreakdown':s.get('deepBreakdown'),'output':s.get('output')
+              },separators=(',',':'),sort_keys=True))
+          PY

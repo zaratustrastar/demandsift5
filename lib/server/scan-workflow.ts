@@ -11,6 +11,7 @@ import type {
 import { identifyVerifiedCompetitorSignal } from "@/lib/intelligence/competitor-signal";
 import {
   cleanDiscoveryCandidates,
+  isQualifiedPotentialCustomer,
   isRelevantMarketConversation,
   legacyClassificationFromDeep,
   opportunityRankScore,
@@ -918,10 +919,7 @@ export async function runScan(
       // appropriate to answer. Non-replyable demand still contributes to the
       // source-backed intelligence layer, but it must not become a lead card
       // without the grounded reply promised by the product.
-      if (
-        qualification.leadStatus !== "potential_customer" ||
-        qualification.shouldReply !== true
-      ) return [];
+      if (!isQualifiedPotentialCustomer(qualification)) return [];
       const score = opportunityRankScore(qualification);
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${conversation.title ?? ""}\n${conversation.body}`,

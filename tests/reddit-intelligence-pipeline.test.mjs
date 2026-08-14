@@ -401,3 +401,32 @@ test("a verified competitor complaint still requires meaningful product fit", ()
     true,
   );
 });
+
+test("contradictory low-fit potential-customer labels are rejected", () => {
+  const qualification = deepQualification({
+    leadStatus: "potential_customer",
+    intent: "actively_looking",
+    demandSignals: ["explicit_demand"],
+    productFit: "low",
+    evidenceQuality: "high",
+    replyability: "high",
+    timing: "current",
+    shouldReply: true,
+  });
+  assert.equal(pipeline.isQualifiedPotentialCustomer(qualification), false);
+});
+
+test("a grounded current high-fit customer remains eligible", () => {
+  const qualification = deepQualification({
+    leadStatus: "potential_customer",
+    intent: "evaluating",
+    demandSignals: ["explicit_demand"],
+    productFit: "high",
+    evidenceQuality: "high",
+    replyability: "high",
+    timing: "current",
+    shouldReply: true,
+  });
+  assert.equal(pipeline.isQualifiedPotentialCustomer(qualification), true);
+});
+

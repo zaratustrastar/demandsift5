@@ -1,0 +1,30 @@
+name: Inspect enrichment validity test failures
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-enrichment-test-failures-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+      - name: Print exact stale assertions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo '--- verified discovery fallback ---'
+          grep -R -n -C 10 'verified discovery fallback' tests . --exclude-dir=node_modules --exclude-dir=.git || true
+          echo '--- MVP scope test ---'
+          grep -R -n -C 12 'MVP scope is isolated from excluded integration code' tests . --exclude-dir=node_modules --exclude-dir=.git || true
+          echo '--- Apify fallback test ---'
+          grep -R -n -C 15 'Apify enrichment failure preserves discovery record only' tests . --exclude-dir=node_modules --exclude-dir=.git || true

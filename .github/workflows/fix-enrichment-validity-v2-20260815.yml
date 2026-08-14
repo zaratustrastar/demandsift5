@@ -1,0 +1,76 @@
+name: Run enrichment validity patch safely
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/fix-enrichment-validity-v2-20260815.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 40
+    steps:
+      - name: Check out diagnostic helpers
+        uses: actions/checkout@v4
+        with:
+          ref: diagnostic/runtime-queue-20260814
+          path: diagnostics
+          fetch-depth: 1
+
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          path: feature
+          fetch-depth: 0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+          cache-dependency-path: feature/package-lock.json
+
+      - name: Apply patch
+        working-directory: feature
+        run: |
+          set -Eeuo pipefail
+          python3 ../diagnostics/.github/scripts/fix_enrichment_validity_20260815.py
+          git diff --check
+          git diff --stat
+
+      - name: Install dependencies
+        working-directory: feature
+        run: npm ci
+
+      - name: Focused regressions
+        working-directory: feature
+        run: node --test tests/apify-reddit-provider.test.mjs tests/demand-intelligence-trust.test.mjs
+
+      - name: Build
+        working-directory: feature
+        run: npm run build:node
+
+      - name: Lint
+        working-directory: feature
+        run: npm run lint
+
+      - name: Full test suite
+        working-directory: feature
+        run: node --test tests/*.test.mjs
+
+      - name: Commit and push tested patch
+        working-directory: feature
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts lib/server/scan-workflow.ts lib/server/presenter.ts components/demand-intelligence/ProductDashboard.tsx tests/apify-reddit-provider.test.mjs tests/demand-intelligence-trust.test.mjs
+          git commit -m "Fail closed on incomplete Reddit context"
+          git push origin HEAD:feature/reddit-intelligence-pipeline
+          echo "published_sha=$(git rev-parse HEAD)"

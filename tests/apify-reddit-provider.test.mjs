@@ -521,6 +521,56 @@ test("discovery is lightweight and does not perform enrichment", async () => {
   assert.match(calls[1].url.pathname, /\/datasets\/dataset-discovery\/items$/);
 });
 
+
+test("Actor start is immediate and transient status/dataset GET failures retry without duplicate runs", async () => {
+  const calls = [];
+  let startCalls = 0;
+  let statusCalls = 0;
+  let datasetCalls = 0;
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token: "private-apify-token",
+    fetchImpl: async (url, init = {}) => {
+      const parsedUrl = new URL(url);
+      calls.push({ url: parsedUrl, init });
+
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        startCalls += 1;
+        return new Response(JSON.stringify({
+          data: { id: "run-safe-retry", status: "RUNNING", defaultDatasetId: "dataset-safe-retry" },
+        }), { status: 201 });
+      }
+
+      if (parsedUrl.pathname.endsWith("/actor-runs/run-safe-retry")) {
+        statusCalls += 1;
+        if (statusCalls === 1) return new Response("temporary gateway failure", { status: 502 });
+        return new Response(JSON.stringify({
+          data: { id: "run-safe-retry", status: "SUCCEEDED", defaultDatasetId: "dataset-safe-retry" },
+        }), { status: 200 });
+      }
+
+      if (parsedUrl.pathname.includes("/datasets/dataset-safe-retry/items")) {
+        datasetCalls += 1;
+        if (datasetCalls === 1) return new Response("temporary dataset failure", { status: 503 });
+        return new Response(JSON.stringify([documentedActorItem]), { status: 200 });
+      }
+
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  const result = await provider.discover(searchRequest);
+
+  assert.equal(startCalls, 1, "the non-idempotent paid Actor start must never be blindly retried");
+  assert.equal(statusCalls, 2);
+  assert.equal(datasetCalls, 2);
+  assert.equal(result.candidates.length, 1);
+  const start = calls.find((call) => call.init.method === "POST");
+  assert.ok(start);
+  assert.equal(start.url.searchParams.get("waitForFinish"), "0");
+  assert.ok(calls.filter((call) => call.init.method === "GET").every((call) => !call.url.pathname.includes("/actors/")));
+});
+
 test("Actor timeout stays below the client budget so terminal status can be observed", () => {
   assert.equal(redditModule.apifyActorTimeoutSeconds(600_000), 570);
   assert.equal(redditModule.apifyActorTimeoutSeconds(480_000), 450);

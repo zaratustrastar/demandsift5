@@ -1164,6 +1164,34 @@ export class ApifyRedditTestProvider implements RedditProvider {
       }
     };
 
+    const safeGet = async (endpoint: URL): Promise<Response> => {
+      const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const response = await this.fetchImpl(endpoint, {
+            method: "GET",
+            headers,
+            signal: controller.signal,
+          });
+          if (response.ok || !retryableStatuses.has(response.status) || attempt === 2) return response;
+
+          const retryAfterHeader = response.headers.get("retry-after");
+          const retryAfterSeconds = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
+          await response.text().catch(() => "");
+          const delayMs = Number.isFinite(retryAfterSeconds)
+            ? Math.min(Math.max(0, retryAfterSeconds * 1_000), 5_000)
+            : Math.min(500 * 2 ** attempt, 2_000);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        } catch (error) {
+          lastError = error;
+          if (controller.signal.aborted || attempt === 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
+        }
+      }
+      throw lastError ?? new Error("Apify Reddit test GET request failed.");
+    };
+
     const runData = (payload: unknown): Record<string, unknown> => {
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         throw new Error("The Apify Reddit test provider returned invalid run metadata.");
@@ -1184,7 +1212,11 @@ export class ApifyRedditTestProvider implements RedditProvider {
         `/v2/actors/${encodeURIComponent(this.actorId)}/runs`,
         "https://api.apify.com",
       );
-      startEndpoint.searchParams.set("waitForFinish", "60");
+      // Start asynchronously and obtain the run ID immediately. Holding this
+      // non-idempotent POST open while the Actor works makes a transient gateway
+      // 502 ambiguous: retrying could create and charge for a duplicate run.
+      // Once we have runId, all waiting/reading happens through retry-safe GETs.
+      startEndpoint.searchParams.set("waitForFinish", "0");
       startEndpoint.searchParams.set("timeout", String(apifyActorTimeoutSeconds(timeoutMs)));
       startEndpoint.searchParams.set("maxItems", String(Math.min(100, actorInput.maxItems)));
       startEndpoint.searchParams.set("maxTotalChargeUsd", "0.50");
@@ -1212,11 +1244,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
           "https://api.apify.com",
         );
         statusEndpoint.searchParams.set("waitForFinish", "60");
-        const statusResponse = await this.fetchImpl(statusEndpoint, {
-          method: "GET",
-          headers,
-          signal: controller.signal,
-        });
+        const statusResponse = await safeGet(statusEndpoint);
         const current = runData(await readJson(statusResponse, 1_000_000));
         status = stringValue(current.status, 40).toUpperCase();
         statusMessage = stringValue(current.statusMessage, 500);
@@ -1244,11 +1272,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
       datasetEndpoint.searchParams.set("format", "json");
       datasetEndpoint.searchParams.set("limit", String(Math.min(100, actorInput.maxItems)));
 
-      const datasetResponse = await this.fetchImpl(datasetEndpoint, {
-        method: "GET",
-        headers,
-        signal: controller.signal,
-      });
+      const datasetResponse = await safeGet(datasetEndpoint);
       const payload = await readJson(datasetResponse, 5_000_000);
       if (!Array.isArray(payload)) {
         throw new Error("The Apify Reddit test provider returned an invalid dataset.");

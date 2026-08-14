@@ -174,6 +174,22 @@ jobs:
             echo "acceptance_poll=$attempt status=$status queued_polls=$queued_polls running_polls=$running_polls"
 
             if [ "$status" = "complete" ]; then
+              # Probe the presenter first so a report failure yields a sanitized,
+              # actionable reason instead of an opaque HTTP 500.
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+              python3 - "$diagnostics_json" <<'PY'
+          import json, sys
+          aggregate = json.load(open(sys.argv[1]))
+          presentation = aggregate.get("presentation") or {}
+          print("acceptance_presentation_ok=" + str(bool(presentation.get("ok"))).lower())
+          if not presentation.get("ok"):
+              print("presentation_error_type=" + str(presentation.get("errorType") or "Error"))
+              print("presentation_error=" + str(presentation.get("error") or "Unknown presentation failure."))
+              raise SystemExit("Acceptance failed: report presentation could not be built.")
+          PY
+
               # Exercise the same fully presented report endpoint used by the
               # browser after polling completes. Keep user content out of CI
               # logs; only verify the report shape and aggregate counts.
@@ -201,9 +217,6 @@ jobs:
           print("visible_replies=" + str(visible_replies))
           PY
 
-              curl --fail-with-body --silent --show-error \
-                --cookie "$cookie_jar" \
-                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
               python3 - "$diagnostics_json" <<'PY'
           import json, sys
           aggregate = json.load(open(sys.argv[1]))

@@ -1,0 +1,22 @@
+name: Inspect release wrapper interface
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-release-wrapper-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Print safe release wrapper usage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n /usr/local/sbin/demandsift-release help || sudo -n /usr/local/sbin/demandsift-release --help || true

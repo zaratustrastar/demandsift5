@@ -9,9 +9,12 @@ import { ApiError, apiErrorResponse, requireWorkspace } from "@/lib/server/http"
 import { getStateRepository } from "@/lib/server/repository";
 
 /**
- * Temporary, workspace-protected acceptance probe. It replays only the AI
- * triage boundary from already stored scan records and never starts Reddit
- * discovery, returns conversation text, or exposes provider credentials.
+ * Temporary, workspace-protected acceptance probe. The normal mode replays only
+ * the AI triage boundary from already stored scan records. `inspect=1` is a
+ * read-only debugging mode for the owning workspace that returns bounded public
+ * Reddit excerpts plus their already-stored triage decisions; it never starts a
+ * provider request and never exposes authors, permalinks, credentials, or data
+ * from another workspace.
  */
 export async function POST(request: Request) {
   const diagnosticEvents: OpenAiProviderDiagnosticEvent[] = [];
@@ -21,6 +24,36 @@ export async function POST(request: Request) {
     const scan = await getStateRepository().getLatestScan(actor.workspaceId);
     if (!scan?.result || scan.result.dataMode !== "apify-test") {
       throw new ApiError("No completed Apify acceptance scan is available.", 404, "scan_not_found");
+    }
+
+    const inspect = new URL(request.url).searchParams.get("inspect") === "1";
+    if (inspect) {
+      return Response.json({
+        ok: true,
+        websiteUrl: scan.websiteUrl,
+        profile: {
+          name: scan.result.profile.name,
+          summary: scan.result.profile.summary,
+          productCategory: scan.result.profile.productCategory,
+          targetAudience: scan.result.profile.targetAudience,
+          problemsSolved: scan.result.profile.problemsSolved,
+          jobsToBeDone: scan.result.profile.jobsToBeDone ?? [],
+          likelyWorkarounds: scan.result.profile.likelyWorkarounds ?? [],
+          triggerEvents: scan.result.profile.triggerEvents ?? [],
+          customerProblemLanguage: scan.result.profile.customerProblemLanguage ?? [],
+        },
+        searchPlan: scan.result.retrievalDiagnostics?.searchPlan ?? [],
+        candidates: scan.result.processedRedditState.slice(0, 30).map((state) => ({
+          externalId: state.externalId,
+          subreddit: state.subreddit,
+          title: (state.title ?? "").slice(0, 180),
+          excerpt: state.excerpt.slice(0, 650),
+          matchedQueries: state.matchedQueries,
+          discoveryLanes: state.discoveryLanes,
+          sourceCreatedAt: state.sourceCreatedAt,
+          triage: state.triage,
+        })),
+      }, { headers: { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow" } });
     }
 
     const profile = scan.result.profile;

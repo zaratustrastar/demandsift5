@@ -1,4 +1,4 @@
-name: Apply zero-result acquisition audit
+name: Apply triage reliability hardening
 
 on:
   push:
@@ -19,20 +19,20 @@ jobs:
           ref: feature/reddit-intelligence-pipeline
           fetch-depth: 0
 
-      - name: Apply bounded acquisition zero-result audit
+      - name: Apply triage batching and timeout fallback
         shell: bash
         run: |
           set -Eeuo pipefail
           git fetch origin diagnostic/tvcp-zero-20260814
-          git show origin/diagnostic/tvcp-zero-20260814:tools/zero-result-audit-patch.py > /tmp/zero-result-audit-patch.py
-          python3 /tmp/zero-result-audit-patch.py
+          git show origin/diagnostic/tvcp-zero-20260814:tools/triage-reliability-patch.py > /tmp/triage-reliability-patch.py
+          python3 /tmp/triage-reliability-patch.py
 
       - name: Validate focused and full suite
         shell: bash
         run: |
           set -Eeuo pipefail
           npm ci
-          node --test tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs
+          node --test tests/openai-intelligence-pipeline.test.mjs
           npm run lint
           npm run build
           npm test
@@ -44,6 +44,6 @@ jobs:
           set -Eeuo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add lib/intelligence/reddit-pipeline.ts lib/server/scan-workflow.ts tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs
-          git commit -m 'Audit acquisition false-zero demand signals'
+          git add lib/providers/openai.server.ts tests/openai-intelligence-pipeline.test.mjs
+          git commit -m 'Harden triage batching and timeout fallback'
           git push origin HEAD:feature/reddit-intelligence-pipeline

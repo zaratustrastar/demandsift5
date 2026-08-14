@@ -8,7 +8,7 @@ import type {
   RedditSearchLane,
   TriageIntent,
 } from "@/lib/domain/types";
-import type { PotentialCustomerIntent } from "@/lib/server/contracts";
+import type { MarketIntelligenceRecord, PotentialCustomerIntent } from "@/lib/server/contracts";
 import { contentFingerprint, normalizeSearchText } from "./opportunity-ranking";
 
 export type DeterministicRejectionReason =
@@ -456,6 +456,27 @@ export function isRelevantMarketConversation(input: {
   if (hasCurrentDemand) return true;
   if (hasResearchTag) return true;
   return input.verifiedCompetitorSignal;
+}
+
+/**
+ * A cross-posted or repeated conversation by the same Reddit author is one
+ * research signal, not several independent market observations. Keep the
+ * earliest-ranked record and fall back to source identity for absent authors.
+ */
+export function dedupeMarketIntelligenceRecords(
+  records: MarketIntelligenceRecord[],
+): MarketIntelligenceRecord[] {
+  const seenAuthors = new Set<string>();
+  const seenSources = new Set<string>();
+  return records.filter((record) => {
+    if (seenSources.has(record.sourceId)) return false;
+    seenSources.add(record.sourceId);
+    const author = normalizedAuthor(record.author ?? undefined);
+    if (!author) return true;
+    if (seenAuthors.has(author)) return false;
+    seenAuthors.add(author);
+    return true;
+  });
 }
 
 /**

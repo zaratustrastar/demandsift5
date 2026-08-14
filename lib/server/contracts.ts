@@ -268,7 +268,7 @@ export type ScanDiagnostics = {
   triageDuplicateIds: number;
   triageUnknownIds: number;
   worthEnriching: number;
-  zeroResultAuditEscalated: number;
+  intelligenceCoverageReviews: number;
   requestedForEnrichment: number;
   enrichedSuccessfully: number;
   enrichmentFailures: number;
@@ -318,6 +318,7 @@ export type ScanResult = {
     normalizedCandidates: number;
     locallyMatchedCandidates: number;
     enrichmentAttempts: number;
+    intelligenceCoverageReviews: number;
     enrichedConversations: number;
     verifiedRecentConversations: number;
     missingVerifiedTimestamps: number;

@@ -90,6 +90,7 @@ export async function GET(request: Request) {
             normalizedCandidates: scan.result.retrievalDiagnostics.normalizedCandidates,
             locallyMatchedCandidates: scan.result.retrievalDiagnostics.locallyMatchedCandidates,
             enrichmentAttempts: scan.result.retrievalDiagnostics.enrichmentAttempts,
+            intelligenceCoverageReviews: scan.result.retrievalDiagnostics.intelligenceCoverageReviews,
             enrichedConversations: scan.result.retrievalDiagnostics.enrichedConversations,
             enrichmentFallbacks: scan.result.retrievalDiagnostics.enrichmentFallbacks,
             qualifiedOpportunities: scan.result.retrievalDiagnostics.qualifiedOpportunities,

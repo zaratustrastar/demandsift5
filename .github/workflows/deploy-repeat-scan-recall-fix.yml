@@ -1,0 +1,45 @@
+name: Deploy repeat-scan recall fix
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/deploy-repeat-scan-recall-fix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: 5c6f97a7797d5d48fa29b7096332b8f3ada3a4c3
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Confirm feature tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+      - name: Reclaim bounded build space
+        run: sudo -n /usr/local/sbin/demandsift-release reclaim
+      - name: Build exact tested candidate
+        run: sudo -n /usr/local/sbin/demandsift-release build "$EXPECTED_SHA"
+      - name: Reconfirm feature tip before deploy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+      - name: Deploy with rollback preserved
+        run: sudo -n /usr/local/sbin/demandsift-release deploy
+      - name: Verify healthy release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n /usr/local/sbin/demandsift-release inspect | grep -Fq "release_head=$EXPECTED_SHA"
+          curl --fail --silent --show-error --max-time 10 "$APP_URL/" >/dev/null
+          echo production_health=passed

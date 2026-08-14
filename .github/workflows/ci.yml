@@ -135,8 +135,9 @@ jobs:
           cookie_jar="$(mktemp)"
           created_json="$(mktemp)"
           latest_json="$(mktemp)"
+          report_json="$(mktemp)"
           diagnostics_json="$(mktemp)"
-          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$diagnostics_json"' EXIT
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$report_json" "$diagnostics_json"' EXIT
 
           curl --fail-with-body --silent --show-error \
             --cookie-jar "$cookie_jar" \
@@ -173,6 +174,33 @@ jobs:
             echo "acceptance_poll=$attempt status=$status queued_polls=$queued_polls running_polls=$running_polls"
 
             if [ "$status" = "complete" ]; then
+              # Exercise the same fully presented report endpoint used by the
+              # browser after polling completes. Keep user content out of CI
+              # logs; only verify the report shape and aggregate counts.
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/api/scans/$scan_id" > "$report_json"
+              python3 - "$report_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          report = payload.get("report") or {}
+          stored = report.get("storedCounts") or {}
+          visible_opportunities = len(report.get("opportunities") or [])
+          visible_replies = len(report.get("replies") or [])
+          if scan.get("status") != "complete":
+              raise SystemExit("Acceptance failed: presented scan is not complete.")
+          if not report.get("profile"):
+              raise SystemExit("Acceptance failed: presented report has no business profile.")
+          if visible_opportunities < 1 or int(stored.get("opportunities") or 0) < 1:
+              raise SystemExit("Acceptance failed: presented report has no qualified opportunity.")
+          if visible_replies < 1 or int(stored.get("replies") or 0) < 1:
+              raise SystemExit("Acceptance failed: presented report has no grounded reply.")
+          print("acceptance_report_rendering=passed")
+          print("visible_opportunities=" + str(visible_opportunities))
+          print("visible_replies=" + str(visible_replies))
+          PY
+
               curl --fail-with-body --silent --show-error \
                 --cookie "$cookie_jar" \
                 "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"

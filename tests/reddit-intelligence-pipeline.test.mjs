@@ -326,7 +326,7 @@ test("current problem evidence can be relevant research without becoming a lead"
     intent: "problem_aware",
     demandSignals: ["pain"],
     intelligenceTags: ["problem_signal"],
-    productFit: "low",
+    productFit: "medium",
     painSeverity: "high",
     leadStatus: "not_customer",
   });
@@ -339,6 +339,25 @@ test("current problem evidence can be relevant research without becoming a lead"
   );
   assert.equal(qualification.leadStatus, "not_customer");
   assert.equal(qualification.shouldReply, false);
+});
+
+test("low-fit current problems stay excluded from business research", () => {
+  const qualification = deepQualification({
+    intent: "problem_aware",
+    demandSignals: ["pain"],
+    intelligenceTags: ["problem_signal", "market_insight"],
+    productFit: "low",
+    painSeverity: "high",
+    leadStatus: "not_customer",
+    whyItMatters: "The source describes credential storage, not the scanned product category.",
+  });
+  assert.equal(
+    pipeline.isRelevantMarketConversation({
+      qualification,
+      verifiedCompetitorSignal: false,
+    }),
+    false,
+  );
 });
 
 test("high-fit informational research is separate from potential-customer qualification", () => {

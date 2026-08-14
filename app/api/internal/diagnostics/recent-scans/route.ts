@@ -51,7 +51,10 @@ function deepBreakdown(record: (typeof runtimeScans.$inferSelect)["record"]) {
 export async function GET(request: Request) {
   try {
     requireWorker(request);
-    const domain = new URL(request.url).searchParams.get("domain")?.trim().toLowerCase() ?? "";
+    const url = new URL(request.url);
+    const domain = url.searchParams.get("domain")?.trim().toLowerCase() ?? "";
+    const inspect = url.searchParams.get("inspect") === "1";
+    const scanId = url.searchParams.get("scanId")?.trim() ?? "";
     if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) {
       throw new ApiError("domain is invalid.", 400, "invalid_domain");
     }
@@ -72,6 +75,7 @@ export async function GET(request: Request) {
     return Response.json({
       scans: rows.map((row) => {
         const result = row.record.result;
+        const includeInspection = Boolean(inspect && result && (!scanId || row.id === scanId));
         return {
           id: row.id,
           status: row.status,
@@ -94,6 +98,37 @@ export async function GET(request: Request) {
             : null,
           triageBreakdown: triageBreakdown(row.record),
           deepBreakdown: deepBreakdown(row.record),
+          inspection: includeInspection && result
+            ? {
+                profile: {
+                  name: result.profile.name,
+                  summary: result.profile.summary,
+                  productCategory: result.profile.productCategory,
+                  targetAudience: result.profile.targetAudience,
+                  problemsSolved: result.profile.problemsSolved,
+                  jobsToBeDone: result.profile.jobsToBeDone ?? [],
+                  likelyWorkarounds: result.profile.likelyWorkarounds ?? [],
+                  triggerEvents: result.profile.triggerEvents ?? [],
+                  customerProblemLanguage: result.profile.customerProblemLanguage ?? [],
+                  features: result.profile.features,
+                  competitors: result.profile.competitors,
+                  irrelevantTopics: result.profile.irrelevantTopics,
+                  ambiguityRisks: result.profile.ambiguityRisks ?? [],
+                },
+                searchPlan: result.retrievalDiagnostics?.searchPlan ?? [],
+                candidates: result.processedRedditState.slice(0, 40).map((state) => ({
+                  externalId: state.externalId,
+                  subreddit: state.subreddit,
+                  title: (state.title ?? "").slice(0, 180),
+                  excerpt: state.excerpt.slice(0, 700),
+                  matchedQueries: state.matchedQueries,
+                  discoveryLanes: state.discoveryLanes,
+                  sourceCreatedAt: state.sourceCreatedAt,
+                  triage: state.triage,
+                  deepQualification: state.deepQualification,
+                })),
+              }
+            : null,
           output: result
             ? {
                 opportunities: result.opportunities.length,

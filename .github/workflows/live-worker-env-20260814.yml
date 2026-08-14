@@ -1,0 +1,29 @@
+name: Live worker env 20260814
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/live-worker-env-20260814.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect safe worker runtime settings
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          echo "worker_pid=${pid:-missing}"
+          if [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
+            tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(BACKGROUND_WORKER_MODE|BACKGROUND_JOB_POLL_MS|BACKGROUND_JOB_TIMEOUT_SECONDS|BACKGROUND_JOB_HEARTBEAT_SECONDS|BACKGROUND_JOB_LEASE_STALE_SECONDS|BACKGROUND_JOB_STALE_SECONDS)=' || true
+          else
+            echo 'worker_environ_readable=false'
+          fi
+          ps -o pid,ppid,etime,stat,user,group,args -p "$pid" || true

@@ -73,6 +73,7 @@ export interface InsightEvidence {
   quote: string;
   sourceLabel: string;
   provenanceId: string;
+  sourceUrl?: string | null;
 }
 
 export interface DemandInsight {
@@ -86,6 +87,8 @@ export interface DemandInsight {
   signalStrength: ConfidenceLevel;
   opportunityIds: string[];
   provenanceIds: string[];
+  evidenceScope?: "single-conversation" | "recurring-pattern";
+  sourceCount?: number;
 }
 
 export interface CompetitorWeakness {
@@ -243,6 +246,10 @@ export interface RedditDemandDemoData {
   competitorWeaknesses: CompetitorWeakness[];
   opportunities: RedditOpportunity[];
   potentialCustomers?: PotentialCustomerSummary;
+  qualificationCoverage?: {
+    credibleCandidates: number;
+    fullContextReviewed: number;
+  };
   lockedResults: LockedStoredResult[];
   lockedCounts: LockedResultCounts;
   metrics: DashboardMetrics;

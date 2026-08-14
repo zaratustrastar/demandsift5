@@ -7,6 +7,7 @@ import type {
   BusinessProfile,
   CompetitorWeakness,
   DemandInsight,
+  InsightEvidence,
   LockedResultCounts,
   LockedStoredResult,
   NavigationSectionId,
@@ -116,6 +117,22 @@ function potentialIntentLabel(intent: RedditOpportunity["potentialCustomerIntent
   if (intent === "competitor_switching") return "Frustrated with an alternative";
   if (intent === "problem_aware") return "Problem aware";
   return "Relevant demand signal";
+}
+
+function EvidenceSourceLink({ evidence }: { evidence: InsightEvidence }) {
+  if (!evidence.sourceUrl) return <cite>{evidence.sourceLabel}</cite>;
+  return (
+    <cite>
+      <a
+        href={evidence.sourceUrl}
+        target="_blank"
+        rel="noreferrer noopener"
+        aria-label={"View source: " + evidence.sourceLabel}
+      >
+        View public source <Icon name="external" size={12} />
+      </a>
+    </cite>
+  );
 }
 
 function relativeTime(value: string | undefined): string {
@@ -428,7 +445,7 @@ export function DemandInsightCard({ insight }: { insight: DemandInsight }) {
             <blockquote key={evidence.provenanceId}>
               <span>{evidence.sourceLabel}</span>
               <p>{evidence.quote}</p>
-              <cite>{evidence.sourceLabel}</cite>
+              <EvidenceSourceLink evidence={evidence} />
             </blockquote>
           ))}
         </div>
@@ -488,7 +505,7 @@ export function CompetitorWeaknessCard({
             : "Public conversation signal"}
         </span>
         {evidence.quote}
-        <cite>{evidence.sourceLabel}</cite>
+        <EvidenceSourceLink evidence={evidence} />
       </blockquote>
       <div className={styles.actionStrip}>
         <Icon name="arrow" size={15} />
@@ -1082,7 +1099,7 @@ export function ProductDashboard({
     const strongestFallback = data.competitorWeaknesses.some((item) => item.verified)
       ? "A source-backed competitor mention is available below."
       : data.insights.length > 0
-        ? `${data.insights.length} recurring demand insight${data.insights.length === 1 ? " is" : "s are"} available below.`
+        ? `${data.insights.length} source-backed demand signal${data.insights.length === 1 ? " is" : "s are"} available below.`
         : data.visibilityOpportunities.length > 0
           ? `${data.visibilityOpportunities.length} Search & AI Visibility Opportunit${data.visibilityOpportunities.length === 1 ? "y is" : "ies are"} available below.`
           : "No weaker mention was promoted into a potential-customer claim.";
@@ -1107,8 +1124,10 @@ export function ProductDashboard({
               </>
             ) : (
               <>
-                <h1>No strong potential-customer signals found in this scan.</h1>
-                <p>{strongestFallback}</p>
+                <h1>No candidates passed qualification in this scan.</h1>
+                <p>
+                  {strongestFallback} Reviewed {data.qualificationCoverage?.fullContextReviewed ?? 0} of {data.qualificationCoverage?.credibleCandidates ?? 0} credible recent candidates with full conversation context.
+                </p>
               </>
             )}
             <div className={styles.customerHeroFoot}>

@@ -427,6 +427,14 @@ function sameWebsite(left: string, right: string): boolean {
   }
 }
 
+function normalizedCompetitorName(value: string | null | undefined): string {
+  return (value ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
 function intentForQualification(qualification: DeepQualification): OpportunityRecord["intent"] {
   if (qualification.intent === "actively_looking") return "actively-looking";
   if (qualification.intent === "evaluating" || qualification.intent === "switching") return "evaluating";
@@ -470,15 +478,20 @@ function buildFallbackInsights(
       rows: problemAware,
     },
   ];
-  const insights = inputs.filter((input) => input.rows.length > 0).map((input) => ({
-    id: createId("ins"),
-    title: input.title,
-    summary: input.summary,
-    evidence: input.evidence,
-    signal: input.signal,
-    opportunityIds: input.rows.map((row) => row.id),
-    sourceIds: input.rows.map((row) => row.sourceId),
-  }));
+  const insights = inputs.filter((input) => input.rows.length > 0).map((input) => {
+    const sourceIds = [...new Set(input.rows.map((row) => row.sourceId))];
+    return {
+      id: createId("ins"),
+      title: input.title,
+      summary: input.summary,
+      evidence: input.evidence,
+      signal: input.signal,
+      opportunityIds: input.rows.map((row) => row.id),
+      sourceIds,
+      evidenceScope: sourceIds.length >= 2 ? "recurring-pattern" as const : "single-conversation" as const,
+      sourceCount: sourceIds.length,
+    };
+  });
   const weakness: CompetitorWeaknessRecord = competitorOpportunities.length > 0
     ? {
         id: createId("comp"),
@@ -782,7 +795,10 @@ export async function runScan(
         previous?.contextHash && previous.contextHash === currentContextHash,
       );
 
-      if (sourceUnchanged && contextUnchanged && previous?.deepQualification) {
+      if (
+        sourceUnchanged && contextUnchanged && previous?.deepQualification &&
+        previous.deepQualification.leadStatus !== "not_customer"
+      ) {
         reusedDeepById.set(conversation.externalId, previous.deepQualification);
         deepById.set(conversation.externalId, {
           externalId: conversation.externalId,
@@ -961,17 +977,32 @@ export async function runScan(
           models,
         });
         usage.push(usageRecord(generated, "insight-generation"));
-        const generatedInsights: DemandInsightRecord[] = generated.value.demandInsights.map((insight) => ({
-          id: createId("ins"),
-          title: insight.title,
-          summary: insight.summary,
-          evidence: insight.implication,
-          signal: insight.confidence >= 0.75 ? "rising" : insight.confidence >= 0.5 ? "steady" : "emerging",
-          opportunityIds: opportunities
-            .filter((opportunity) => insight.provenanceIds.includes(opportunity.sourceId))
-            .map((opportunity) => opportunity.id),
-          sourceIds: [...new Set(insight.provenanceIds)],
-        }));
+        const reviewedRedditSourceIds = new Set(
+          deepRows.map((row) => row.conversation.provenance.id),
+        );
+        const seenEvidenceSets = new Set<string>();
+        const generatedInsights: DemandInsightRecord[] = generated.value.demandInsights.flatMap((insight) => {
+          const sourceIds = [...new Set(insight.provenanceIds)]
+            .filter((sourceId) => reviewedRedditSourceIds.has(sourceId))
+            .sort();
+          if (sourceIds.length === 0) return [];
+          const evidenceKey = sourceIds.join("|");
+          if (seenEvidenceSets.has(evidenceKey)) return [];
+          seenEvidenceSets.add(evidenceKey);
+          return [{
+            id: createId("ins"),
+            title: insight.title,
+            summary: insight.summary,
+            evidence: insight.implication,
+            signal: insight.confidence >= 0.75 ? "rising" : insight.confidence >= 0.5 ? "steady" : "emerging",
+            opportunityIds: opportunities
+              .filter((opportunity) => sourceIds.includes(opportunity.sourceId))
+              .map((opportunity) => opportunity.id),
+            sourceIds,
+            evidenceScope: sourceIds.length >= 2 ? "recurring-pattern" as const : "single-conversation" as const,
+            sourceCount: sourceIds.length,
+          }];
+        });
         const combinedInsights = [
           ...generatedInsights,
           ...fallbackInsightSet.insights.filter((fallback) =>
@@ -980,11 +1011,20 @@ export async function runScan(
         ].slice(0, 3);
 
         const generatedCompetitor = generated.value.competitorSignals.find((signal) =>
-          deepRows.some((row) =>
-            signal.provenanceIds.includes(row.conversation.provenance.id) &&
-            row.qualification.intelligenceTags.includes("competitor_intelligence") &&
-            Boolean(row.qualification.competitorMentioned),
-          ),
+          deepRows.some((row) => {
+            if (!signal.provenanceIds.includes(row.conversation.provenance.id)) return false;
+            const verified = identifyVerifiedCompetitorSignal({
+              conversationText: (row.conversation.title ?? "") + "\n" + row.conversation.body,
+              sourceMode: row.conversation.sourceMode,
+              externalId: row.conversation.externalId,
+              businessCompetitors: business.competitors.value.map((competitor) => competitor.name),
+              deterministicCompetitorScore: 1,
+              classifiedComplaintScore: row.qualification.intelligenceTags.includes("competitor_intelligence") ? 1 : 0,
+              classifiedCompetitor: row.qualification.competitorMentioned ?? undefined,
+            });
+            return verified.verified &&
+              normalizedCompetitorName(verified.competitor) === normalizedCompetitorName(signal.competitorName);
+          }),
         );
         const matchingOpportunities = generatedCompetitor
           ? opportunities.filter((opportunity) => generatedCompetitor.provenanceIds.includes(opportunity.sourceId))
@@ -997,7 +1037,9 @@ export async function runScan(
               title: generatedCompetitor.signal,
               summary: generatedCompetitor.customerImpact,
               opportunityIds: matchingOpportunities.map((opportunity) => opportunity.id),
-              sourceIds: [...new Set(generatedCompetitor.provenanceIds)],
+              sourceIds: [...new Set(generatedCompetitor.provenanceIds)].filter((sourceId) =>
+                deepRows.some((row) => row.conversation.provenance.id === sourceId),
+              ),
             }
           : fallbackInsightSet.weakness;
         insightSet = { insights: combinedInsights, weakness };

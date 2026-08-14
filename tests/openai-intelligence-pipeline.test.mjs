@@ -578,3 +578,42 @@ test("deep qualification preserves multidimensional intelligence and reply risk 
   assert.equal(result.value[0].qualification.shouldReply, false);
   assert.equal(result.value[0].qualification.autoReplyAllowed, false);
 });
+
+
+test("website provenance cannot masquerade as observed customer demand", async () => {
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async () => chatResponse({
+      demandInsights: [
+        {
+          kind: "pain",
+          title: "Website-only claim",
+          summary: "This must be dropped because it is not Reddit evidence.",
+          implication: "No observed demand source supports it.",
+          confidence: 0.9,
+          provenanceIds: ["web_1"],
+        },
+        {
+          kind: "pain",
+          title: "Observed workflow pain",
+          summary: "A Reddit author describes missed deadlines.",
+          implication: "Answer the concrete workflow problem.",
+          confidence: 0.7,
+          provenanceIds: ["web_1", "source_a"],
+        },
+      ],
+      competitorSignals: [],
+    }),
+  });
+  const conversation = candidate("a");
+  const result = await provider.generateInsights({
+    business,
+    opportunities: [],
+    evidenceConversations: [{ externalId: "a", conversation, qualification: {} }],
+    models: openai.DEFAULT_OPENAI_MODELS,
+  });
+  assert.equal(result.value.demandInsights.length, 1);
+  assert.equal(result.value.demandInsights[0].title, "Observed workflow pain");
+  assert.deepEqual(result.value.demandInsights[0].provenanceIds, ["source_a"]);
+});

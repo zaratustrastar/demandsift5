@@ -39,6 +39,8 @@ type ApiInsight = {
   signal: "rising" | "steady" | "emerging";
   opportunityIds: string[];
   sourceIds: string[];
+  evidenceScope?: "single-conversation" | "recurring-pattern";
+  sourceCount?: number;
 };
 
 type ApiOpportunity = {
@@ -111,6 +113,10 @@ type ApiReport = {
       problemAware: number;
     };
     newSincePreviousDemandDrop: number;
+  };
+  qualificationCoverage?: {
+    credibleCandidates: number;
+    fullContextReviewed: number;
   };
   lockedOpportunityPreviews: Array<{
     id: string;
@@ -363,27 +369,39 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       verifiedWithinDemoFixture:
         source.kind === "website" || (source.sourceMode ?? report.dataMode) === "live",
     })),
-    insights: report.insights.map((insight) => ({
-      id: insight.id,
-      eyebrow: "Customer demand insight",
-      title: insight.title,
-      summary: insight.summary,
-      evidence: [...new Set(insight.sourceIds)].slice(0, 2).flatMap((sourceId) => {
-        const source = sourceById.get(sourceId);
-        return source
-          ? [{
-              quote: source.excerpt,
-              sourceLabel: sourceEvidenceLabel(source, report.dataMode),
-              provenanceId: sourceId,
-            }]
-          : [];
-      }),
-      whyItMatters: insight.summary,
-      recommendedAction: "Use the underlying question to guide a useful answer and product messaging.",
-      signalStrength: confidence(insight.signal),
-      opportunityIds: insight.opportunityIds,
-      provenanceIds: insight.sourceIds,
-    })),
+    insights: report.insights.map((insight) => {
+      const sourceCount = insight.sourceCount ?? new Set(insight.sourceIds).size;
+      const evidenceScope = insight.evidenceScope ??
+        (sourceCount >= 2 ? "recurring-pattern" : "single-conversation");
+      return {
+        id: insight.id,
+        eyebrow: evidenceScope === "recurring-pattern"
+          ? String(sourceCount) + "-conversation demand pattern"
+          : "Single-conversation demand signal",
+        title: insight.title,
+        summary: insight.summary,
+        evidence: [...new Set(insight.sourceIds)].slice(0, 2).flatMap((sourceId) => {
+          const source = sourceById.get(sourceId);
+          return source
+            ? [{
+                quote: source.excerpt,
+                sourceLabel: sourceEvidenceLabel(source, report.dataMode),
+                provenanceId: sourceId,
+                sourceUrl: source.url || null,
+              }]
+            : [];
+        }),
+        whyItMatters: insight.summary,
+        recommendedAction: "Use the underlying question to guide a useful answer and product messaging.",
+        signalStrength: evidenceScope === "single-conversation"
+          ? "medium"
+          : confidence(insight.signal),
+        opportunityIds: insight.opportunityIds,
+        provenanceIds: insight.sourceIds,
+        evidenceScope,
+        sourceCount,
+      };
+    }),
     competitorWeaknesses: [
       {
         id: report.competitorWeakness.id,
@@ -399,6 +417,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
                 quote: source.excerpt,
                 sourceLabel: sourceEvidenceLabel(source, report.dataMode),
                 provenanceId: sourceId,
+                sourceUrl: source.url || null,
               }]
             : [];
         }),
@@ -426,6 +445,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       },
       newSincePreviousDemandDrop: report.storedCounts.opportunities,
     },
+    qualificationCoverage: report.qualificationCoverage,
     lockedResults,
     lockedCounts,
     metrics: {

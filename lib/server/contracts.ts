@@ -70,6 +70,9 @@ export type DemandInsightRecord = {
   signal: "rising" | "steady" | "emerging";
   opportunityIds: string[];
   sourceIds: string[];
+  /** A single conversation is a directional signal, never a recurring pattern. */
+  evidenceScope: "single-conversation" | "recurring-pattern";
+  sourceCount: number;
 };
 
 export type MarketIntelligenceRecord = {

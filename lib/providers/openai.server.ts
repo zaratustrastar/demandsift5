@@ -1506,14 +1506,12 @@ export class OpenAiProvider implements AiProvider {
 
   async generateInsights(request: GenerateInsightsRequest): Promise<AiProviderResult<GeneratedInsightSet>> {
     const evidenceRows = request.evidenceConversations ?? [];
+    // Website facts remain useful business-fit context, but they are not
+    // evidence of customer demand. Only reviewed Reddit conversations may
+    // support a demand or competitor claim.
     const allowedIds = new Set([
       ...request.opportunities.flatMap((opportunity) => opportunity.provenanceIds),
       ...evidenceRows.map((row) => row.conversation.provenance.id),
-      ...request.business.name.provenanceIds,
-      ...request.business.summary.provenanceIds,
-      ...request.business.problemsSolved.provenanceIds,
-      ...request.business.features.provenanceIds,
-      ...request.business.competitors.provenanceIds,
     ]);
     return this.structured({
       model: request.models.analysisModel,

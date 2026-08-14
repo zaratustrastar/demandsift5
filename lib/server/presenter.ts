@@ -213,6 +213,11 @@ export async function presentScan(scan: ScanRecord) {
         },
         newSincePreviousDemandDrop: result.opportunities.length,
       },
+      qualificationCoverage: {
+        credibleCandidates: result.diagnostics.deterministicSurvivors,
+        fullContextReviewed:
+          result.diagnostics.submittedForDeepQualification + result.diagnostics.reusedUnchanged,
+      },
       lockedOpportunityPreviews: lockedOpportunities.map((opportunity) => ({
         id: opportunity.id,
         subreddit: opportunity.subreddit,

@@ -1,0 +1,30 @@
+name: Live runtime logs 20260814
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/live-runtime-logs-20260814.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Read current production logs without secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "--- release ---"
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          echo "--- worker logs (normal docker access) ---"
+          docker logs --since 15m --tail 300 demandsift2-worker-1 2>&1 || true
+          echo "--- web logs (normal docker access) ---"
+          docker logs --since 15m --tail 300 demandsift2-web-1 2>&1 || true
+          echo "--- processes ---"
+          ps -eo pid,ppid,etime,stat,comm,args | grep -E 'background-worker|server\.js|node' | grep -v grep | head -n 60 || true

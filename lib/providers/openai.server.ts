@@ -56,15 +56,24 @@ export interface OpenAiUsageEvent {
   providerRequestId?: string;
 }
 
-export interface OpenAiProviderDiagnosticEvent {
-  kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry";
-  operation: AiOperation;
-  model: string;
-  finishReason: "length" | "stop" | "content_filter" | "tool_calls" | "missing" | "other";
-  outputTokens: number;
-  requestedMaxTokens: number;
-  retryMaxTokens: number;
-}
+type StructuredFinishReason = "length" | "stop" | "content_filter" | "tool_calls" | "missing" | "other";
+
+export type OpenAiProviderDiagnosticEvent =
+  | {
+      kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry";
+      operation: AiOperation;
+      model: string;
+      finishReason: StructuredFinishReason;
+      outputTokens: number;
+      requestedMaxTokens: number;
+      retryMaxTokens: number;
+    }
+  | {
+      kind: "model_capacity_fallback";
+      operation: AiOperation;
+      model: string;
+      fallbackModel: string;
+    };
 
 export interface OpenAiProviderOptions {
   apiKey: string;
@@ -75,6 +84,7 @@ export interface OpenAiProviderOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxRetries?: number;
+  modelFallbacks?: Readonly<Record<string, readonly string[]>>;
   pricing?: ModelPriceCatalog;
   onUsage?: (event: OpenAiUsageEvent) => void | Promise<void>;
   /** Sanitized provider-boundary metadata only; never includes prompts or model text. */
@@ -765,7 +775,7 @@ function chatUsage(payload: ChatCompletionsPayload): TokenUsage {
   };
 }
 
-function normalizedFinishReason(value: string | null | undefined): OpenAiProviderDiagnosticEvent["finishReason"] {
+function normalizedFinishReason(value: string | null | undefined): StructuredFinishReason {
   if (!value) return "missing";
   if (value === "length" || value === "max_tokens" || value === "max_output_tokens") return "length";
   if (value === "stop" || value === "content_filter" || value === "tool_calls") return value;
@@ -776,7 +786,7 @@ type ChatTextResult =
   | { state: "complete"; text: string }
   | {
       state: "empty";
-      finishReason: OpenAiProviderDiagnosticEvent["finishReason"];
+      finishReason: StructuredFinishReason;
       retryable: boolean;
       contentType: string;
       outputTokens: number;
@@ -788,6 +798,7 @@ const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
 // model. Retrying those responses over a short backoff window is cheaper and
 // safer than failing the entire scan after an immediate burst of requests.
 const MARKETPLACE_CAPACITY_RETRY_FLOOR = 5;
+const SURPLUS_DEFAULT_ANALYSIS_FALLBACKS = ["gpt-5.5"] as const;
 
 function structuredChatSystemPrompt(options: {
   system: string;
@@ -876,12 +887,45 @@ function optionalFiniteNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function commaSeparatedModels(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+  return [...new Set(value.split(",").map((model) => model.trim()).filter(Boolean))];
+}
+
+function isSurplusGateway(baseUrl: string | undefined): boolean {
+  if (!baseUrl?.trim()) return false;
+  try {
+    return new URL(baseUrl).hostname.toLocaleLowerCase("en-US") === "api.surplusintelligence.ai";
+  } catch {
+    return false;
+  }
+}
+
 export function openAiModelsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelConfiguration {
   return {
     analysisModel: env.OPENAI_ANALYSIS_MODEL?.trim() || DEFAULT_OPENAI_MODELS.analysisModel,
     economyModel: env.OPENAI_ECONOMY_MODEL?.trim() || DEFAULT_OPENAI_MODELS.economyModel,
     embeddingModel: env.OPENAI_EMBEDDING_MODEL?.trim() || DEFAULT_OPENAI_MODELS.embeddingModel,
   };
+}
+
+export function openAiModelFallbacksFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  models = openAiModelsFromEnv(env),
+): Record<string, string[]> {
+  const configuredAnalysisFallbacks = commaSeparatedModels(env.OPENAI_ANALYSIS_FALLBACK_MODELS);
+  const analysisFallbacks = configuredAnalysisFallbacks.length > 0
+    ? configuredAnalysisFallbacks
+    : isSurplusGateway(env.OPENAI_BASE_URL) && models.analysisModel === "gpt-5.6-sol"
+      ? [...SURPLUS_DEFAULT_ANALYSIS_FALLBACKS]
+      : [];
+  const economyFallbacks = commaSeparatedModels(env.OPENAI_ECONOMY_FALLBACK_MODELS);
+  const result: Record<string, string[]> = {};
+  const analysis = analysisFallbacks.filter((model) => model !== models.analysisModel);
+  const economy = economyFallbacks.filter((model) => model !== models.economyModel);
+  if (analysis.length > 0) result[models.analysisModel] = analysis;
+  if (economy.length > 0) result[models.economyModel] = economy;
+  return result;
 }
 
 function configuredPrice(env: NodeJS.ProcessEnv, prefix: string, defaults: ModelPrice): ModelPrice {
@@ -922,6 +966,15 @@ export function openAiPricingFromEnv(
     cacheWriteInputUsdPerMillionTokens: 0.02,
     outputUsdPerMillionTokens: 0,
   });
+  const analysisFallbackPrice = configuredPrice(env, "OPENAI_ANALYSIS_FALLBACK", {
+    inputUsdPerMillionTokens: 5,
+    cachedInputUsdPerMillionTokens: 0.5,
+    cacheWriteInputUsdPerMillionTokens: 6.25,
+    outputUsdPerMillionTokens: 30,
+  });
+  for (const fallback of openAiModelFallbacksFromEnv(env, models)[models.analysisModel] ?? []) {
+    prices[fallback] = analysisFallbackPrice;
+  }
   return prices;
 }
 
@@ -935,6 +988,7 @@ export class OpenAiProvider implements AiProvider {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly modelFallbacks: Readonly<Record<string, readonly string[]>>;
   private readonly pricing: ModelPriceCatalog;
   private readonly onUsage?: OpenAiProviderOptions["onUsage"];
   private readonly onDiagnostic?: OpenAiProviderOptions["onDiagnostic"];
@@ -951,6 +1005,7 @@ export class OpenAiProvider implements AiProvider {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = Math.max(5_000, Math.min(options.timeoutMs ?? 90_000, 300_000));
     this.maxRetries = Math.max(0, Math.min(options.maxRetries ?? 2, 5));
+    this.modelFallbacks = options.modelFallbacks ?? {};
     this.pricing = options.pricing ?? {};
     this.onUsage = options.onUsage;
     this.onDiagnostic = options.onDiagnostic;
@@ -965,44 +1020,69 @@ export class OpenAiProvider implements AiProvider {
     };
   }
 
-  private async post(path: string, body: JsonObject): Promise<{ payload: unknown; requestId?: string }> {
+  private async post(
+    path: string,
+    body: JsonObject,
+    operation: AiOperation,
+  ): Promise<{ payload: unknown; requestId?: string; model?: string }> {
     let lastError: OpenAiProviderError | undefined;
-    for (let attempt = 0; attempt <= Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR); attempt += 1) {
-      let response: Response;
-      try {
-        response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-          method: "POST",
-          headers: this.headers(),
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
-      } catch (error) {
-        lastError = new OpenAiProviderError(
-          error instanceof Error ? `OpenAI network request failed: ${error.message}` : "OpenAI network request failed.",
-        );
-        if (attempt < this.maxRetries) {
-          await sleep(Math.min(500 * 2 ** attempt, 5_000));
-          continue;
-        }
-        throw lastError;
-      }
-      const requestId = response.headers.get("x-request-id") ?? undefined;
-      const payload = (await response.json().catch(() => null)) as unknown;
-      if (response.ok) return { payload, requestId };
+    const primaryModel = typeof body.model === "string" ? body.model : undefined;
+    const models = primaryModel
+      ? [...new Set([primaryModel, ...(this.modelFallbacks[primaryModel] ?? [])])]
+      : [undefined];
 
-      lastError = new OpenAiProviderError(apiErrorMessage(payload, response.status), response.status, requestId);
-      const marketplaceCapacityError = isMarketplaceCapacityError(payload, response.status);
-      const retryLimit = marketplaceCapacityError
-        ? Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR)
-        : this.maxRetries;
-      const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
-      if (!retryable || attempt >= retryLimit) throw lastError;
-      const retryAfterHeader = response.headers.get("retry-after");
-      const retryAfter = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
-      const fallbackDelay = marketplaceCapacityError
-        ? Math.min(2_000 * 2 ** attempt, 10_000)
-        : Math.min(500 * 2 ** attempt, 5_000);
-      await sleep(Number.isFinite(retryAfter) ? Math.min(retryAfter * 1_000, 10_000) : fallbackDelay);
+    for (let modelIndex = 0; modelIndex < models.length; modelIndex += 1) {
+      const model = models[modelIndex];
+      const requestBody = model ? { ...body, model } : body;
+      for (let attempt = 0; attempt <= Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR); attempt += 1) {
+        let response: Response;
+        try {
+          response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+            method: "POST",
+            headers: this.headers(),
+            body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(this.timeoutMs),
+          });
+        } catch (error) {
+          lastError = new OpenAiProviderError(
+            error instanceof Error ? `OpenAI network request failed: ${error.message}` : "OpenAI network request failed.",
+          );
+          if (attempt < this.maxRetries) {
+            await sleep(Math.min(500 * 2 ** attempt, 5_000));
+            continue;
+          }
+          throw lastError;
+        }
+        const requestId = response.headers.get("x-request-id") ?? undefined;
+        const payload = (await response.json().catch(() => null)) as unknown;
+        if (response.ok) return { payload, requestId, model };
+
+        lastError = new OpenAiProviderError(apiErrorMessage(payload, response.status), response.status, requestId);
+        const marketplaceCapacityError = isMarketplaceCapacityError(payload, response.status);
+        const retryLimit = marketplaceCapacityError
+          ? Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR)
+          : this.maxRetries;
+        const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
+        if (!retryable || attempt >= retryLimit) {
+          const fallbackModel = models[modelIndex + 1];
+          if (marketplaceCapacityError && model && fallbackModel) {
+            await this.onDiagnostic?.({
+              kind: "model_capacity_fallback",
+              operation,
+              model,
+              fallbackModel,
+            });
+            break;
+          }
+          throw lastError;
+        }
+        const retryAfterHeader = response.headers.get("retry-after");
+        const retryAfter = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
+        const fallbackDelay = marketplaceCapacityError
+          ? Math.min(2_000 * 2 ** attempt, 10_000)
+          : Math.min(500 * 2 ** attempt, 5_000);
+        await sleep(Number.isFinite(retryAfter) ? Math.min(retryAfter * 1_000, 10_000) : fallbackDelay);
+      }
     }
     throw lastError ?? new OpenAiProviderError("OpenAI request failed.");
   }
@@ -1042,12 +1122,13 @@ export class OpenAiProvider implements AiProvider {
   }): Promise<AiProviderResult<T>> {
     if (this.apiStyle === "chat") {
       let maxTokens = options.maxOutputTokens;
+      let activeModel = options.model;
       const attemptUsages: TokenUsage[] = [];
       let estimatedCostUsd = 0;
 
       for (let attempt = 0; attempt < STRUCTURED_CHAT_MAX_ATTEMPTS; attempt += 1) {
         const result = await this.post("/chat/completions", {
-          model: options.model,
+          model: activeModel,
           messages: [
             {
               role: "system",
@@ -1061,13 +1142,14 @@ export class OpenAiProvider implements AiProvider {
             { role: "user", content: options.user },
           ],
           max_tokens: maxTokens,
-        });
+        }, options.operation);
+        activeModel = result.model ?? activeModel;
         const payload = objectValue(result.payload, "Chat Completions API payload") as ChatCompletionsPayload;
         const usage = chatUsage(payload);
         const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
         attemptUsages.push(usage);
         estimatedCostUsd += await this.recordUsage(
-          options.model,
+          activeModel,
           options.operation,
           usage,
           options.context,
@@ -1080,7 +1162,7 @@ export class OpenAiProvider implements AiProvider {
             const value = options.parse(parseStructuredText(chatResult.text, result.requestId));
             return {
               value,
-              model: options.model,
+              model: activeModel,
               operation: options.operation,
               usage: combineTokenUsage(attemptUsages),
               estimatedCostUsd,
@@ -1091,7 +1173,7 @@ export class OpenAiProvider implements AiProvider {
             await this.onDiagnostic?.({
               kind: "structured_chat_malformed_retry",
               operation: options.operation,
-              model: options.model,
+              model: activeModel,
               finishReason: normalizedFinishReason(payload.choices?.[0]?.finish_reason),
               outputTokens: usage.outputTokens,
               requestedMaxTokens: maxTokens,
@@ -1114,7 +1196,7 @@ export class OpenAiProvider implements AiProvider {
         await this.onDiagnostic?.({
           kind: "structured_chat_empty_retry",
           operation: options.operation,
-          model: options.model,
+          model: activeModel,
           finishReason: chatResult.finishReason,
           outputTokens: usage.outputTokens,
           requestedMaxTokens: maxTokens,
@@ -1142,20 +1224,21 @@ export class OpenAiProvider implements AiProvider {
       reasoning: { effort: options.reasoningEffort },
       max_output_tokens: options.maxOutputTokens,
       store: false,
-    });
+    }, options.operation);
+    const activeModel = result.model ?? options.model;
     const payload = objectValue(result.payload, "Responses API payload") as ResponsesApiPayload;
     const usage = responseUsage(payload);
     const text = responseText(payload);
     const value = options.parse(parseStructuredText(text, result.requestId));
     const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
     const estimatedCostUsd = await this.recordUsage(
-      options.model,
+      activeModel,
       options.operation,
       usage,
       options.context,
       providerRequestId,
     );
-    return { value, model: options.model, operation: options.operation, usage, estimatedCostUsd, providerRequestId };
+    return { value, model: activeModel, operation: options.operation, usage, estimatedCostUsd, providerRequestId };
   }
 
   async analyzeBusiness(request: AnalyzeBusinessRequest): Promise<AiProviderResult<BusinessUnderstanding>> {
@@ -1276,7 +1359,7 @@ export class OpenAiProvider implements AiProvider {
     const usage = combineTokenUsage(attempts.map((attempt) => attempt.usage));
     return {
       value: expectedIds.map((id) => collected.get(id)!),
-      model: request.models.economyModel,
+      model: attempts.at(-1)?.model ?? request.models.economyModel,
       operation: "conversation_triage",
       usage,
       estimatedCostUsd: attempts.reduce((sum, attempt) => sum + attempt.estimatedCostUsd, 0),
@@ -1366,7 +1449,7 @@ export class OpenAiProvider implements AiProvider {
     const usage = combineTokenUsage(attempts.map((attempt) => attempt.usage));
     return {
       value: expectedIds.map((id) => collected.get(id)!),
-      model: request.models.analysisModel,
+      model: attempts.at(-1)?.model ?? request.models.analysisModel,
       operation: "deep_qualification",
       usage,
       estimatedCostUsd: attempts.reduce((sum, attempt) => sum + attempt.estimatedCostUsd, 0),
@@ -1499,7 +1582,7 @@ export class OpenAiProvider implements AiProvider {
       model: request.models.embeddingModel,
       input: request.texts,
       encoding_format: "float",
-    });
+    }, "embedding");
     const payload = objectValue(result.payload, "Embeddings API payload") as EmbeddingsApiPayload;
     const vectors = (payload.data ?? [])
       .map((entry, position) => ({ index: entry.index ?? position, embedding: entry.embedding }))
@@ -1556,6 +1639,7 @@ export function createOpenAiProviderFromEnv(
     project: env.OPENAI_PROJECT,
     timeoutMs: options.timeoutMs ?? optionalFiniteNumber(env.OPENAI_TIMEOUT_MS),
     maxRetries: options.maxRetries ?? optionalFiniteNumber(env.OPENAI_MAX_RETRIES),
+    modelFallbacks: options.modelFallbacks ?? openAiModelFallbacksFromEnv(env),
     pricing: openAiPricingFromEnv(env),
   });
 }

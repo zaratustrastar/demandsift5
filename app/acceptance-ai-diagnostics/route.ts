@@ -89,7 +89,9 @@ export async function POST(request: Request) {
     }));
 
     const provider = createOpenAiProviderFromEnv(process.env, {
-      onDiagnostic: (event) => diagnosticEvents.push(event),
+      onDiagnostic: (event) => {
+        diagnosticEvents.push(event);
+      },
     });
     const models = openAiModelsFromEnv();
     const result = await provider.triageConversations({

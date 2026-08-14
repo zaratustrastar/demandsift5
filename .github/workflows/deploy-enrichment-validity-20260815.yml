@@ -1,0 +1,37 @@
+name: Deploy tested enrichment validity fix
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/deploy-enrichment-validity-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    steps:
+      - name: Build exact tested feature tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SHA=94c0903405a96f34e80f465498bfecd04db0cee2
+          sudo -n /usr/local/sbin/demandsift-release build "$SHA"
+      - name: Deploy rollback-safe candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n /usr/local/sbin/demandsift-release deploy
+      - name: Verify exact release and health
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -q '^release_head=94c0903405a96f34e80f465498bfecd04db0cee2 '
+          printf '%s\n' "$output" | grep -q 'container=demandsift2-web-1 .*healthy'
+          printf '%s\n' "$output" | grep -q 'container=demandsift2-worker-1 .*Up'

@@ -15,17 +15,16 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Inspect production release without secrets
+      - name: Inspect production runtime without secrets
         shell: bash
         run: |
           set -Eeuo pipefail
           echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          for wrapper in /usr/local/sbin/demandsift-release /usr/local/bin/demandsift-release /opt/demandsift5/deploy/demandsift-release; do
-            if [ -x "$wrapper" ]; then
-              echo "release_wrapper=$wrapper"
-              sudo -n "$wrapper" inspect
-              exit 0
-            fi
-          done
-          echo "release_wrapper=NOT_FOUND"
-          exit 1
+          echo "--- release ---"
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          echo "--- runner visibility ---"
+          stat -c 'env_mode=%a env_owner=%U env_group=%G' /opt/demandsift5/deploy/vps.env 2>/dev/null || true
+          if [ -r /opt/demandsift5/deploy/vps.env ]; then echo 'env_readable=true'; else echo 'env_readable=false'; fi
+          ps -eo pid,ppid,etime,stat,comm,args | grep -E 'background-worker|server\.js|node' | grep -v grep | head -n 40 || true
+          echo "--- local health ---"
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1/ >/dev/null && echo 'local_http=ok' || echo 'local_http=failed'

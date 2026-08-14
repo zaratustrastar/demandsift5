@@ -1,0 +1,31 @@
+name: Verify repeat-scan recall deployment
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/verify-repeat-scan-recall-fix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    env:
+      EXPECTED_SHA: 5c6f97a7797d5d48fa29b7096332b8f3ada3a4c3
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Verify exact deployed release and health
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          inspect_output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          grep -Fq "release_head=$EXPECTED_SHA" <<<"$inspect_output"
+          echo "$inspect_output" | grep -F 'container=demandsift2-web-1'
+          echo "$inspect_output" | grep -F 'container=demandsift2-worker-1'
+          curl --fail --silent --show-error --max-time 10 "$APP_URL/" >/dev/null
+          echo "release_verified=$EXPECTED_SHA"
+          echo "production_health=passed"

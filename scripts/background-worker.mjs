@@ -584,16 +584,54 @@ export function jobExecutionConfiguration(environment = process.env) {
     1_200,
     1_800,
   );
-  const configuredStaleSeconds = boundedNumber(
-    environment.BACKGROUND_JOB_STALE_SECONDS,
-    timeoutSeconds + 300,
+  const heartbeatSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_HEARTBEAT_SECONDS,
+    15,
+    5,
     60,
-    3_600,
+  );
+  const configuredStaleSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_LEASE_STALE_SECONDS,
+    90,
+    45,
+    300,
   );
   return {
     timeoutSeconds,
-    staleSeconds: Math.max(configuredStaleSeconds, timeoutSeconds + 300),
+    heartbeatSeconds,
+    staleSeconds: Math.max(configuredStaleSeconds, heartbeatSeconds * 3),
   };
+}
+
+export async function refreshJobLease(sql, jobId, workerIdValue) {
+  const rows = await sql`
+    UPDATE background_jobs
+    SET locked_at = now(), updated_at = now()
+    WHERE id = ${jobId}
+      AND status = 'running'
+      AND locked_by = ${workerIdValue}
+    RETURNING id
+  `;
+  return rows.length > 0;
+}
+
+export async function maintainJobLease(sql, job, workerIdValue, signal, heartbeatMs) {
+  while (!signal.aborted) {
+    await waitForNextPoll(signal, heartbeatMs);
+    if (signal.aborted) return;
+    try {
+      const refreshed = await refreshJobLease(sql, job.id, workerIdValue);
+      if (!refreshed) {
+        log("warn", "job_lease_lost", { jobId: job.id });
+        return;
+      }
+    } catch (error) {
+      log("warn", "job_lease_refresh_failed", {
+        jobId: job.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 export async function claimJob(sql, workerIdValue) {
@@ -876,26 +914,33 @@ async function runQueueWorker(databaseUrl, signal) {
         continue;
       }
       log("info", "job_claimed", {
+      jobId: job.id,
+      type: job.type,
+      attempt: job.attempts,
+      maxAttempts: job.max_attempts,
+    });
+    const leaseController = new AbortController();
+    const leaseSignal = AbortSignal.any([queueSignal, leaseController.signal]);
+    const { heartbeatSeconds } = jobExecutionConfiguration();
+    const leaseTask = maintainJobLease(sql, job, workerId, leaseSignal, heartbeatSeconds * 1_000);
+    try {
+      const result = await executeScanJob(job, queueSignal);
+      await completeJob(sql, job);
+      log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
+    } catch (error) {
+      const disposition = jobFailureDisposition(job, error);
+      await failJob(sql, job, error, disposition);
+      log("error", "job_failed", {
         jobId: job.id,
-        type: job.type,
         attempt: job.attempts,
-        maxAttempts: job.max_attempts,
+        retryable: disposition.retryable,
+        terminal: disposition.terminal,
+        message: error instanceof Error ? error.message : String(error),
       });
-      try {
-        const result = await executeScanJob(job, queueSignal);
-        await completeJob(sql, job);
-        log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
-      } catch (error) {
-        const disposition = jobFailureDisposition(job, error);
-        await failJob(sql, job, error, disposition);
-        log("error", "job_failed", {
-          jobId: job.id,
-          attempt: job.attempts,
-          retryable: disposition.retryable,
-          terminal: disposition.terminal,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
+    } finally {
+      leaseController.abort("job finished");
+      await leaseTask;
+    }
     }
   } finally {
     queueController.abort("queue worker stopping");

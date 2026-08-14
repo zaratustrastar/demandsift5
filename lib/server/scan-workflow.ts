@@ -528,14 +528,17 @@ export async function enqueueScanRun(scan: ScanRecord) {
   return getStateRepository().enqueueScan(scan.id, scan.workspaceId);
 }
 
-export async function runScan(scanId: string): Promise<ScanRecord> {
+export async function runScan(
+  scanId: string,
+  options: { resumeRunning?: boolean } = {},
+): Promise<ScanRecord> {
   const repository = getStateRepository();
   const claim = await repository.beginScanRun(scanId);
   if (claim.state === "missing" || !claim.scan) {
     throw new ApiError("Scan was not found.", 404, "scan_not_found");
   }
   if (claim.state === "complete") return claim.scan;
-  if (claim.state === "running") return claim.scan;
+  if (claim.state === "running" && !options.resumeRunning) return claim.scan;
   const scan = claim.scan;
 
   try {

@@ -68,19 +68,29 @@ function terminalScanFailure(scan: ScanRecord) {
   };
 }
 
-async function executeClaimedScan(scanId: string): Promise<void> {
+const activeScanExecutions = new Map<string, Promise<void>>();
+
+async function executeClaimedScan(scanId: string, resumeRunning = false): Promise<void> {
   try {
-    await runScan(scanId);
+    await runScan(scanId, { resumeRunning });
   } catch (error) {
-    // runScan durably records the failed scan before rejecting. The worker
-    // observes that terminal state through short polling requests, so this
-    // background task must never become an unhandled rejection.
     if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
       console.error("Background scan exhausted structured AI recovery.");
       return;
     }
     console.error("Background scan execution failed.", error);
   }
+}
+
+function ensureClaimedScanExecution(scanId: string, resumeRunning = false): Promise<void> {
+  const existing = activeScanExecutions.get(scanId);
+  if (existing) return existing;
+  const execution = executeClaimedScan(scanId, resumeRunning);
+  activeScanExecutions.set(scanId, execution);
+  void execution.finally(() => {
+    if (activeScanExecutions.get(scanId) === execution) activeScanExecutions.delete(scanId);
+  });
+  return execution;
 }
 
 function executionSnapshot(job: ClaimedJob, scan: ScanRecord) {
@@ -103,18 +113,27 @@ export async function POST(request: Request, context: RouteContext) {
     }
     const { jobId } = await context.params;
     const { job, scan } = await requireClaimedScan(jobId, body.workerId);
-    if (scan.status === "complete" || scan.status === "failed" || scan.status === "running") {
-      return Response.json(executionSnapshot(job, scan), {
-        status: scan.status === "running" ? 202 : 200,
-        headers: { "cache-control": "no-store" },
-      });
-    }
+    if (scan.status === "complete" || scan.status === "failed") {
+    return Response.json(executionSnapshot(job, scan), {
+      status: 200,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+  if (scan.status === "running") {
+    // If this web process restarted, no execution is registered for the
+    // persisted running scan. Resume it instead of blocking the queue.
+    void ensureClaimedScanExecution(scan.id, true);
+    return Response.json(executionSnapshot(job, scan), {
+      status: 202,
+      headers: { "cache-control": "no-store" },
+    });
+  }
 
-    // The VPS is a persistent Node process, not a request-scoped serverless
+  // The VPS is a persistent Node process, not a request-scoped serverless
     // function. Start the durable scan and release the HTTP request immediately.
     // Worker and browser status checks are then independent short requests, so
     // no proxy/server timeout can terminate a long-running scan.
-    void executeClaimedScan(scan.id);
+    void ensureClaimedScanExecution(scan.id, false);
     return Response.json(
       { ok: true, jobId: job.id, scanId: scan.id, status: "starting", complete: false },
       { status: 202, headers: { "cache-control": "no-store" } },

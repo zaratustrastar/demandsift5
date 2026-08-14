@@ -9,6 +9,7 @@ import {
   isMonitoringCandidateDue,
   jobExecutionConfiguration,
   jobFailureDisposition,
+  refreshJobLease,
   monitoringConfiguration,
   monitoringDedupeKey,
   postJsonWithLongTimeout,
@@ -303,18 +304,33 @@ test("job claiming never reclaims a job at its maximum attempt count", async () 
   assert.match(query, /attempts < max_attempts/u);
 });
 
-test("scan execution timeout and stale-lock windows cannot overlap", () => {
+test("long scan timeout is independent from the heartbeat lease", () => {
   assert.deepEqual(jobExecutionConfiguration({}), {
     timeoutSeconds: 1_200,
-    staleSeconds: 1_500,
+    heartbeatSeconds: 15,
+    staleSeconds: 90,
   });
   assert.deepEqual(jobExecutionConfiguration({
-    BACKGROUND_JOB_TIMEOUT_SECONDS: "480",
-    BACKGROUND_JOB_STALE_SECONDS: "600",
+    BACKGROUND_JOB_TIMEOUT_SECONDS: "1800",
+    BACKGROUND_JOB_HEARTBEAT_SECONDS: "20",
+    BACKGROUND_JOB_LEASE_STALE_SECONDS: "120",
   }), {
-    timeoutSeconds: 1_200,
-    staleSeconds: 1_500,
+    timeoutSeconds: 1_800,
+    heartbeatSeconds: 20,
+    staleSeconds: 120,
   });
+});
+
+test("job lease heartbeat only refreshes a still-owned running job", async () => {
+  let query = "";
+  const sql = async (strings) => {
+    query = strings.join("?").replace(/\s+/gu, " ").trim();
+    return [{ id: "job_owned" }];
+  };
+  assert.equal(await refreshJobLease(sql, "job_owned", "worker_owned"), true);
+  assert.match(query, /UPDATE background_jobs SET locked_at = now\(\), updated_at = now\(\)/u);
+  assert.match(query, /status = 'running'/u);
+  assert.match(query, /locked_by = \?/u);
 });
 
 test("long worker execution helper uses the configured timeout rather than fetch defaults", async () => {

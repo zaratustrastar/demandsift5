@@ -1,0 +1,32 @@
+name: Live worker claim 20260814
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/live-worker-claim-20260814.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect worker claims without secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "--- release ---"
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          echo "--- worker events ---"
+          if sudo -n /usr/bin/docker logs --since 90m demandsift2-worker-1 2>&1 | grep -E 'job_(claimed|succeeded|failed)|queue|worker' | tail -n 250; then
+            true
+          else
+            echo 'worker_logs_unavailable=true'
+          fi
+          echo "--- basecamp acceptance scan status ---"
+          sudo -n /usr/local/sbin/demandsift-release scan-status scan_e7258daa65d74d55af1d90862d1ece86 || true

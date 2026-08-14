@@ -402,6 +402,37 @@ test("a verified competitor complaint still requires meaningful product fit", ()
   );
 });
 
+test("research conversations are deduplicated by normalized Reddit author", () => {
+  const record = (id, author, sourceId = `source_${id}`) => ({
+    id: `intel_${id}`,
+    sourceId,
+    externalId: id,
+    title: `Research ${id}`,
+    summary: "Useful current market evidence.",
+    subreddit: "smallbusiness",
+    author,
+    tags: ["market_insight"],
+    demandSignals: ["explicit_demand"],
+    competitor: null,
+    sourceCreatedAt: "2026-08-09T00:00:00.000Z",
+    sourceIds: [sourceId],
+  });
+
+  const deduped = pipeline.dedupeMarketIntelligenceRecords([
+    record("first", "u/RepeatedAuthor"),
+    record("crosspost", "repeatedauthor"),
+    record("other", "different_author"),
+    record("anonymous-1", null),
+    record("anonymous-2", null),
+    record("same-source", null, "source_anonymous-1"),
+  ]);
+
+  assert.deepEqual(
+    deduped.map((row) => row.externalId),
+    ["first", "other", "anonymous-1", "anonymous-2"],
+  );
+});
+
 test("contradictory low-fit potential-customer labels are rejected", () => {
   const qualification = deepQualification({
     leadStatus: "potential_customer",

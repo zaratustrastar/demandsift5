@@ -805,6 +805,31 @@ function redditPostIdFromPermalink(value: string): string | undefined {
   }
 }
 
+function redditThreadPermalink(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (host === "redd.it") {
+      url.hash = "";
+      url.search = "";
+      return url.toString();
+    }
+    if (host !== "reddit.com" && !host.endsWith(".reddit.com")) return undefined;
+    const segments = url.pathname.split("/").filter(Boolean);
+    const commentsIndex = segments.findIndex((segment) => segment.toLowerCase() === "comments");
+    if (commentsIndex < 0 || !segments[commentsIndex + 1]) return undefined;
+    const titleIndex = commentsIndex + 2;
+    const end = segments[titleIndex] ? titleIndex + 1 : commentsIndex + 2;
+    url.pathname = `/${segments.slice(0, end).join("/")}/`;
+    url.hash = "";
+    url.search = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function rawExternalId(item: ApifyRedditItem): string {
   return stringValue(item.parsedId, 200) || stringValue(item.id, 200).replace(/^t[13]_/i, "");
 }
@@ -914,17 +939,24 @@ function enrichedItemForCandidate(
   candidate: RedditDiscoveryCandidate,
   payload: readonly unknown[],
 ): unknown | undefined {
-  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;
-  return payload.find((value) => {
+  const candidateId = candidate.externalId.replace(/^t[13]_/i, "").toLowerCase();
+  const exact = payload.find((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     const item = value as ApifyRedditItem;
     const dataType = stringValue(item.dataType, 20).toLowerCase();
     if (dataType !== candidate.kind) return false;
-    const itemId = rawExternalId(item).replace(/^t[13]_/i, "");
-    if (itemId && itemId === candidate.externalId.replace(/^t[13]_/i, "")) return true;
-    const permalink = safeRedditPermalink(item.url);
-    return candidate.kind === "post" && Boolean(postId && permalink && redditPostIdFromPermalink(permalink) === postId);
+    const itemId = rawExternalId(item).replace(/^t[13]_/i, "").toLowerCase();
+    return Boolean(itemId && itemId === candidateId);
   });
+  if (exact) return exact;
+
+  // Comment deep-links are not guaranteed to be emitted as an item by the Actor
+  // even when the Actor successfully opens the parent thread. Discovery already
+  // verified the matched author's words, so any item from the same Reddit thread
+  // is a safe anchor for adding surrounding context without substituting content.
+  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;
+  if (!postId) return undefined;
+  return payload.find((value) => postIdForItem(value) === postId);
 }
 
 function enrichedConversation(
@@ -935,31 +967,35 @@ function enrichedConversation(
 ): EnrichedRedditConversation | null {
   if (!enrichedValue || typeof enrichedValue !== "object" || Array.isArray(enrichedValue)) return null;
   const item = enrichedValue as ApifyRedditItem;
+  const anchorId = rawExternalId(item).replace(/^t[13]_/i, "").toLowerCase();
+  const candidateId = candidate.externalId.replace(/^t[13]_/i, "").toLowerCase();
+  const anchorKind = stringValue(item.dataType, 20).toLowerCase();
+  const exactItemMatch = anchorKind === candidate.kind && Boolean(anchorId && anchorId === candidateId);
   const context = structuredContextForCandidate(candidate, payload);
   const threadContext = flattenStructuredContext(context);
   const contentHash = contentFingerprint(
-    `${candidate.title ?? ""}\n${candidate.body}\n${JSON.stringify(context)}`,
+    `${candidate.title ?? ""}
+${candidate.body}
+${JSON.stringify(context)}`,
   );
   return {
     provider,
     sourceMode: candidate.sourceMode,
     externalId: candidate.externalId,
     kind: candidate.kind,
-    parentExternalId: stringValue(item.parentId, 200) || candidate.parentExternalId,
+    parentExternalId: candidate.parentExternalId,
     subreddit: candidate.subreddit,
-    title: cleanRedditText(item.title, 500) || candidate.title,
-    body: cleanRedditText(item.body) || candidate.body,
+    // The discovery candidate remains authoritative. A same-thread Actor item is
+    // only an anchor for surrounding context and must never overwrite the matched
+    // author's title/body/identity with another comment from the thread.
+    title: candidate.title ?? (cleanRedditText(item.title, 500) || undefined),
+    body: candidate.body,
     threadContext: threadContext || undefined,
     structuredContext: context,
-    author: cleanRedditText(item.username, 100) || candidate.author,
+    author: candidate.author,
     permalink: candidate.permalink,
     createdAt: candidate.createdAt,
-    metrics: {
-      score: nonNegativeInteger(item.upVotes) || candidate.metrics.score,
-      comments: candidate.kind === "comment"
-        ? nonNegativeInteger(item.numberOfReplies) || candidate.metrics.comments
-        : nonNegativeInteger(item.numberOfComments) || candidate.metrics.comments,
-    },
+    metrics: candidate.metrics,
     matchedQuery: candidate.matchedQuery,
     matchedQueries: candidate.matchedQueries,
     discoveryLanes: candidate.discoveryLanes,
@@ -971,6 +1007,7 @@ function enrichedConversation(
       metadata: {
         ...(candidate.provenance.metadata ?? {}),
         enriched: true,
+        enrichmentMatch: exactItemMatch ? "exact-item" : "same-thread-anchor",
       },
     },
   };
@@ -1420,36 +1457,59 @@ export class ApifyRedditTestProvider implements RedditProvider {
       0,
       Math.min(request.maxComments ?? this.enrichmentComments, 20),
     );
-    const input: ApifyEnrichmentActorInput = {
-      startUrls: candidates.flatMap((candidate) => candidate.permalink ? [{ url: candidate.permalink }] : []),
-      skipComments: false,
-      skipUserPosts: true,
-      skipCommunity: true,
-      includeMediaLinks: true,
-      includeNSFW: false,
-      maxItems: Math.min(
-        100,
-        Math.max(
-          APIFY_REDDIT_ENRICHMENT_MIN_ITEMS,
-          candidates.length * (maxComments + 1),
+    const buildInput = (batch: readonly RedditDiscoveryCandidate[]): ApifyEnrichmentActorInput => {
+      const threadUrls = [...new Set(batch.flatMap((candidate) => {
+        const url = redditThreadPermalink(candidate.permalink);
+        return url ? [url] : [];
+      }))];
+      return {
+        startUrls: threadUrls.map((url) => ({ url })),
+        skipComments: false,
+        skipUserPosts: true,
+        skipCommunity: true,
+        includeMediaLinks: true,
+        includeNSFW: false,
+        maxItems: Math.min(
+          100,
+          Math.max(
+            APIFY_REDDIT_ENRICHMENT_MIN_ITEMS,
+            Math.max(1, threadUrls.length) * (maxComments + 1),
+          ),
         ),
-      ),
-      maxPostCount: candidates.length,
-      maxComments,
-      maxCommunitiesCount: 0,
-      maxUserCount: 0,
-      scrollTimeout: 20,
-      navigationTimeout: 30,
-      debugMode: false,
-      proxy: {
-        useApifyProxy: true,
-        apifyProxyGroups: ["RESIDENTIAL"],
-      },
+        maxPostCount: Math.max(1, threadUrls.length),
+        maxComments,
+        maxCommunitiesCount: 0,
+        maxUserCount: 0,
+        scrollTimeout: 20,
+        navigationTimeout: 30,
+        debugMode: false,
+        proxy: {
+          useApifyProxy: true,
+          apifyProxyGroups: ["RESIDENTIAL"],
+        },
+      };
     };
+
+    const primaryInput = buildInput(candidates);
+    if (primaryInput.startUrls.length === 0) {
+      return {
+        conversations: candidates.map((candidate) =>
+          discoveryFallbackConversation(candidate, `apify:${this.actorId}`),
+        ),
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: "missing_reddit_thread_urls",
+        },
+      };
+    }
 
     let payload: unknown[];
     try {
-      payload = await this.runActor(input, apifyEnrichmentTimeoutMs(this.timeoutMs));
+      payload = await this.runActor(primaryInput, apifyEnrichmentTimeoutMs(this.timeoutMs));
     } catch (error) {
       console.error("Apify Reddit thread enrichment failed", error);
       const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";
@@ -1468,36 +1528,71 @@ export class ApifyRedditTestProvider implements RedditProvider {
       };
     }
 
-    let failed = 0;
-    let unmatched = 0;
-    let invalidConversation = 0;
-    const conversations = candidates.flatMap((candidate) => {
-      const enriched = enrichedItemForCandidate(candidate, payload);
-      if (!enriched) {
-        failed += 1;
-        unmatched += 1;
-        return [discoveryFallbackConversation(candidate, `apify:${this.actorId}`)];
+    const mapped = new Map<string, EnrichedRedditConversation>();
+    const mapFromPayload = (batch: readonly RedditDiscoveryCandidate[], sourcePayload: readonly unknown[]) => {
+      for (const candidate of batch) {
+        if (mapped.has(candidate.externalId)) continue;
+        const anchor = enrichedItemForCandidate(candidate, sourcePayload);
+        if (!anchor) continue;
+        const conversation = enrichedConversation(
+          candidate,
+          anchor,
+          sourcePayload,
+          `apify:${this.actorId}`,
+        );
+        if (conversation) mapped.set(candidate.externalId, conversation);
       }
-      const conversation = enrichedConversation(candidate, enriched, payload, `apify:${this.actorId}`);
-      if (!conversation) {
-        failed += 1;
-        invalidConversation += 1;
-        return [discoveryFallbackConversation(candidate, `apify:${this.actorId}`)];
+    };
+
+    mapFromPayload(candidates, payload);
+    const initiallyUnmatched = candidates.filter((candidate) => !mapped.has(candidate.externalId));
+    let recoveryAttempted = false;
+    let recovered = 0;
+    let recoveryPayloadItems = 0;
+    let recoveryError = false;
+
+    // A single bounded recovery run protects future scans from partial multi-URL
+    // Actor datasets. It runs only after a successful paid run whose dataset did
+    // not map completely, so normal scans keep the one-run cost profile.
+    if (initiallyUnmatched.length > 0) {
+      const recoveryInput = buildInput(initiallyUnmatched);
+      if (recoveryInput.startUrls.length > 0) {
+        recoveryAttempted = true;
+        try {
+          const recoveryPayload = await this.runActor(
+            recoveryInput,
+            apifyEnrichmentTimeoutMs(this.timeoutMs),
+          );
+          recoveryPayloadItems = recoveryPayload.length;
+          const before = mapped.size;
+          mapFromPayload(initiallyUnmatched, recoveryPayload);
+          recovered = mapped.size - before;
+        } catch (error) {
+          recoveryError = true;
+          console.error("Apify Reddit thread enrichment recovery failed", error);
+        }
       }
-      return [conversation];
-    });
+    }
+
+    const conversations = candidates.map((candidate) =>
+      mapped.get(candidate.externalId) ??
+        discoveryFallbackConversation(candidate, `apify:${this.actorId}`),
+    );
+    const failed = candidates.length - mapped.size;
     return {
       conversations,
       sourceMode: this.sourceMode,
       diagnostics: {
         requested: candidates.length,
-        enriched: conversations.length - failed,
+        enriched: mapped.size,
         failed,
         fallbackUsed: failed,
         ...(failed > 0
           ? {
               failureReason:
-                `actor_succeeded_mapping_failure:unmatched=${unmatched};invalid=${invalidConversation};payload_items=${payload.length}`,
+                `actor_succeeded_mapping_failure:unmatched=${failed};payload_items=${payload.length};` +
+                `recovery_attempted=${recoveryAttempted ? 1 : 0};recovered=${recovered};` +
+                `recovery_payload_items=${recoveryPayloadItems};recovery_error=${recoveryError ? 1 : 0}`,
             }
           : {}),
       },

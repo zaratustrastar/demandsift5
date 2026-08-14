@@ -1211,7 +1211,7 @@ export function ProductDashboard({
               <>
                 <h1>No candidates passed qualification in this scan.</h1>
                 <p>
-                  {strongestFallback} Reviewed {data.qualificationCoverage?.fullContextReviewed ?? 0} of {data.qualificationCoverage?.credibleCandidates ?? 0} credible recent candidates with full conversation context.
+                  {strongestFallback} Reviewed {data.qualificationCoverage?.fullContextReviewed ?? 0} of {data.qualificationCoverage?.credibleCandidates ?? 0} credible recent candidates with additional Reddit thread context.
                 </p>
               </>
             )}
@@ -1271,7 +1271,7 @@ export function ProductDashboard({
                 <span className={styles.eyebrow}>Relevant conversations</span>
                 <h2>Useful market evidence that is not a potential lead</h2>
               </div>
-              <span className={styles.qualityNote}>Full-context reviewed · Source linked</span>
+              <span className={styles.qualityNote}>Thread-context reviewed · Source linked</span>
             </div>
             <div className={styles.opportunityStack}>
               {relevantConversations.slice(0, 3).map((conversation) => (

@@ -796,11 +796,23 @@ export async function runScan(
       candidates: selectedForEnrichment,
       maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
     });
+    const requiredFullContextReviews = Math.min(
+      minimumFullContextReviews(lookbackDays),
+      selectedForEnrichment.length,
+    );
+    if (enrichment.diagnostics.enriched < requiredFullContextReviews) {
+      const detail =
+        `Thread context could be verified for only ${enrichment.diagnostics.enriched} of ` +
+        `${selectedForEnrichment.length} selected conversations; ${requiredFullContextReviews} are required. ` +
+        "The scan will not publish a definitive zero or incomplete intelligence report.";
+      await setStage(scan, "enrichment", "failed", detail);
+      throw new ApiError(detail, 502, "reddit_enrichment_failed");
+    }
     await setStage(
       scan,
       "enrichment",
       "complete",
-      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} enriched; ${enrichment.diagnostics.fallbackUsed} verified discovery fallback${enrichment.diagnostics.fallbackUsed === 1 ? "" : "s"} used.`,
+      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} received additional thread context; ${enrichment.diagnostics.fallbackUsed} discovery-only fallback${enrichment.diagnostics.fallbackUsed === 1 ? "" : "s"} used.`,
     );
 
     await setStage(scan, "qualification", "active");
@@ -872,8 +884,21 @@ export async function runScan(
     }
 
     const deepRows = [...deepById.values()];
+    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
+      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
+    const incompleteQualifiedLead = deepRows.find((row) =>
+      isQualifiedPotentialCustomer(row.qualification) && !hasVerifiedThreadContext(row.conversation),
+    );
+    if (incompleteQualifiedLead) {
+      throw new ApiError(
+        "A qualified Reddit candidate could not be verified with thread context. The scan will retry rather than publish an incomplete lead.",
+        502,
+        "reddit_enrichment_failed",
+      );
+    }
     const relevantCompetitorByExternalId = new Map<string, string | null>();
     const relevantDeepRows = deepRows.filter((row) => {
+      if (!hasVerifiedThreadContext(row.conversation)) return false;
       const qualification = row.qualification;
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${row.conversation.title ?? ""}\n${row.conversation.body}`,
@@ -919,8 +944,9 @@ export async function runScan(
       // A public acquisition opportunity must be both a plausible customer and
       // appropriate to answer. Non-replyable demand still contributes to the
       // source-backed intelligence layer, but it must not become a lead card
-      // without the grounded reply promised by the product.
-      if (!isQualifiedPotentialCustomer(qualification)) return [];
+      // without the grounded reply promised by the product. Apify discovery-only
+      // fallbacks are never promoted as reply-ready leads.
+      if (!isQualifiedPotentialCustomer(qualification) || !hasVerifiedThreadContext(conversation)) return [];
       const score = opportunityRankScore(qualification);
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${conversation.title ?? ""}\n${conversation.body}`,

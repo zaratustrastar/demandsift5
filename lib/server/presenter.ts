@@ -254,8 +254,10 @@ export async function presentScan(scan: ScanRecord) {
       },
       qualificationCoverage: {
         credibleCandidates: result.diagnostics.deterministicSurvivors,
-        fullContextReviewed:
-          result.diagnostics.submittedForDeepQualification + result.diagnostics.reusedUnchanged,
+        // Only provider-confirmed thread enrichment counts as context coverage.
+        // Discovery-only fallbacks may still be classified internally, but are
+        // never presented to the user as full-context review.
+        fullContextReviewed: result.diagnostics.enrichedSuccessfully,
       },
       lockedOpportunityPreviews: lockedOpportunities.map((opportunity) => ({
         id: opportunity.id,

@@ -88,3 +88,18 @@ test("relevant conversations are source-linked and kept separate from reply-read
   assert.match(dashboard, /It is not counted as a potential customer and has no generated reply/);
   assert.match(mapper, /relevantConversations: \(report\.relevantConversations \?\? \[\]\)\.map/);
 });
+
+
+test("context coverage counts only successful provider enrichment and incomplete floors fail closed", async () => {
+  const [workflow, presenter, dashboard] = await Promise.all([
+    source("lib/server/scan-workflow.ts"),
+    source("lib/server/presenter.ts"),
+    source("components/demand-intelligence/ProductDashboard.tsx"),
+  ]);
+  assert.match(workflow, /enrichment\.diagnostics\.enriched < requiredFullContextReviews/);
+  assert.match(workflow, /reddit_enrichment_failed/);
+  assert.match(workflow, /hasVerifiedThreadContext/);
+  assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
+  assert.match(dashboard, /additional Reddit thread context/);
+  assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
+});

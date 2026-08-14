@@ -994,8 +994,75 @@ test("enrichment reports actor-success mapping failures without inventing contex
   assert.equal(result.diagnostics.fallbackUsed, 1);
   assert.match(
     result.diagnostics.failureReason,
-    /^actor_succeeded_mapping_failure:unmatched=1;invalid=0;payload_items=1$/,
+    /^actor_succeeded_mapping_failure:unmatched=1;payload_items=1;recovery_attempted=1;recovered=0;recovery_payload_items=1;recovery_error=0$/,
   );
+});
+
+
+test("comment enrichment uses same-thread context when Actor omits the exact comment item", async () => {
+  const candidate = {
+    provider: "apify-test",
+    sourceMode: "apify-test",
+    externalId: "missingcomment",
+    kind: "comment",
+    parentExternalId: "t3_abc123",
+    subreddit: "SaaS",
+    title: undefined,
+    body: "I need something simpler for keeping family screen time under control.",
+    author: "parent_user",
+    permalink: "https://www.reddit.com/r/SaaS/comments/abc123/looking_for_demand_intelligence/missingcomment/",
+    createdAt: documentedComment.createdAt,
+    metrics: { score: 3, comments: 1 },
+    matchedQueries: ["family screen time control"],
+    discoveryLanes: ["direct_buying_intent"],
+    provenance: {
+      id: "reddit_apify_missingcomment",
+      kind: "reddit",
+      provider: "apify-test",
+      providerExternalId: "missingcomment",
+      url: "https://www.reddit.com/r/SaaS/comments/abc123/looking_for_demand_intelligence/missingcomment/",
+      excerpt: "I need something simpler for keeping family screen time under control.",
+      contentHash: "hash-missingcomment",
+      observedAt: "2026-08-14T00:00:00.000Z",
+      isMock: false,
+      metadata: { testOnly: true },
+    },
+  };
+  const calls = [];
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token: "private-apify-token",
+    fetchImpl: async (url, init = {}) => {
+      const parsedUrl = new URL(url);
+      calls.push({ url: parsedUrl, init, input: init.body ? JSON.parse(init.body) : null });
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        return new Response(JSON.stringify({
+          data: { id: "run-comment-thread", status: "SUCCEEDED", defaultDatasetId: "dataset-comment-thread" },
+        }), { status: 201 });
+      }
+      if (parsedUrl.pathname.includes("/datasets/dataset-comment-thread/items")) {
+        // Exact candidate comment is deliberately absent. The post and another
+        // comment prove the Actor opened the correct thread.
+        return new Response(JSON.stringify([documentedActorItem, documentedComment]), { status: 200 });
+      }
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  const result = await provider.enrich({ candidates: [candidate], maxComments: 6 });
+  assert.equal(result.diagnostics.enriched, 1);
+  assert.equal(result.diagnostics.failed, 0);
+  assert.equal(result.conversations[0].externalId, "missingcomment");
+  assert.equal(result.conversations[0].body, candidate.body, "same-thread anchor must not replace the matched author's words");
+  assert.equal(result.conversations[0].structuredContext.matched.body, candidate.body);
+  assert.equal(result.conversations[0].structuredContext.originalPost.externalId, "abc123");
+  assert.equal(result.conversations[0].provenance.metadata.enriched, true);
+  assert.equal(result.conversations[0].provenance.metadata.enrichmentMatch, "same-thread-anchor");
+  const start = calls.find((call) => call.init.method === "POST");
+  assert.ok(start);
+  assert.deepEqual(start.input.startUrls, [{
+    url: "https://www.reddit.com/r/SaaS/comments/abc123/looking_for_demand_intelligence/",
+  }]);
 });
 
 test("controlled live enrichment probe opens and maps one selected thread", {

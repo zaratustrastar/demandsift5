@@ -1,0 +1,48 @@
+name: Test and deploy secure scan inspection
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/test-deploy-scan-inspection-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify-deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      SHA: 09dc69fe86cb04b7df4c4ca386e0d159adc44156
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 09dc69fe86cb04b7df4c4ca386e0d159adc44156
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build:node
+      - name: Lint
+        run: npm run lint
+      - name: Full tests
+        run: node --test tests/*.test.mjs
+      - name: Build exact candidate on VPS
+        run: sudo -n /usr/local/sbin/demandsift-release build "$SHA"
+      - name: Deploy candidate
+        run: sudo -n /usr/local/sbin/demandsift-release deploy
+      - name: Verify release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          printf '%s\n' "$output" | grep -E '^(release_head=|container=demandsift2-(web|worker)-1 )' || true
+          printf '%s\n' "$output" | grep -q "^release_head=$SHA "
+          printf '%s\n' "$output" | grep -q 'container=demandsift2-web-1 .*healthy'
+          printf '%s\n' "$output" | grep -q 'container=demandsift2-worker-1 .*Up'

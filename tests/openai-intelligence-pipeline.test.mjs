@@ -180,6 +180,64 @@ test("an empty length-limited gateway response is retried inside the AI provider
   }]);
 });
 
+test("temporary marketplace seller-capacity errors receive a bounded recovery window", async () => {
+  let calls = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls <= 5) {
+        return new Response(JSON.stringify({
+          error: { message: "No available sellers for model 'gpt-5.6-sol'" },
+        }), {
+          status: 530,
+          headers: { "content-type": "application/json", "retry-after": "0" },
+        });
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.equal(calls, 6);
+  assert.equal(result.value[0].externalId, "a");
+});
+
+test("ordinary upstream failures still respect the configured retry limit", async () => {
+  let calls = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 1,
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: { message: "generic upstream error" } }), {
+        status: 500,
+        headers: { "content-type": "application/json", "retry-after": "0" },
+      });
+    },
+  });
+
+  await assert.rejects(
+    provider.triageConversations({
+      business,
+      candidates: [candidate("a")],
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 0,
+    }),
+    /generic upstream error/i,
+  );
+  assert.equal(calls, 2);
+});
+
 test("two length-limited empty string responses get a bounded 16000-token recovery attempt", async () => {
   const requests = [];
   const diagnostics = [];

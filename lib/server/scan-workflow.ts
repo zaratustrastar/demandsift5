@@ -11,6 +11,7 @@ import type {
 import { identifyVerifiedCompetitorSignal } from "@/lib/intelligence/competitor-signal";
 import {
   cleanDiscoveryCandidates,
+  dedupeMarketIntelligenceRecords,
   isQualifiedPotentialCustomer,
   isRelevantMarketConversation,
   legacyClassificationFromDeep,
@@ -895,7 +896,7 @@ export async function runScan(
       }
       return relevant;
     });
-    const marketIntelligence: MarketIntelligenceRecord[] = relevantDeepRows.map((row) => {
+    const marketIntelligence: MarketIntelligenceRecord[] = dedupeMarketIntelligenceRecords(relevantDeepRows.map((row) => {
       const qualification = row.qualification;
       return {
         id: createId("intel"),
@@ -911,7 +912,7 @@ export async function runScan(
         sourceCreatedAt: row.conversation.createdAt,
         sourceIds: [row.conversation.provenance.id],
       };
-    });
+    }));
 
     const rawOpportunities: OpportunityRecord[] = deepRows.flatMap((row) => {
       const { conversation, qualification } = row;

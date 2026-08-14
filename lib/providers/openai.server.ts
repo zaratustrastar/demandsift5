@@ -784,6 +784,10 @@ type ChatTextResult =
 
 const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
 const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
+// Marketplace gateways can temporarily have no seller for an otherwise valid
+// model. Retrying those responses over a short backoff window is cheaper and
+// safer than failing the entire scan after an immediate burst of requests.
+const MARKETPLACE_CAPACITY_RETRY_FLOOR = 5;
 
 function structuredChatSystemPrompt(options: {
   system: string;
@@ -848,6 +852,13 @@ function apiErrorMessage(payload: unknown, status: number): string {
   }
 }
 
+function isMarketplaceCapacityError(payload: unknown, status: number): boolean {
+  if (status !== 530) return false;
+  return /no available sellers|seller capacity|capacity unavailable/i.test(
+    apiErrorMessage(payload, status),
+  );
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -857,6 +868,12 @@ function parsePrice(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) throw new Error("OpenAI model prices must be non-negative numbers.");
   return parsed;
+}
+
+function optionalFiniteNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 export function openAiModelsFromEnv(env: NodeJS.ProcessEnv = process.env): ModelConfiguration {
@@ -950,7 +967,7 @@ export class OpenAiProvider implements AiProvider {
 
   private async post(path: string, body: JsonObject): Promise<{ payload: unknown; requestId?: string }> {
     let lastError: OpenAiProviderError | undefined;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+    for (let attempt = 0; attempt <= Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR); attempt += 1) {
       let response: Response;
       try {
         response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -974,10 +991,18 @@ export class OpenAiProvider implements AiProvider {
       if (response.ok) return { payload, requestId };
 
       lastError = new OpenAiProviderError(apiErrorMessage(payload, response.status), response.status, requestId);
+      const marketplaceCapacityError = isMarketplaceCapacityError(payload, response.status);
+      const retryLimit = marketplaceCapacityError
+        ? Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR)
+        : this.maxRetries;
       const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
-      if (!retryable || attempt >= this.maxRetries) throw lastError;
-      const retryAfter = Number(response.headers.get("retry-after"));
-      await sleep(Number.isFinite(retryAfter) ? Math.min(retryAfter * 1_000, 10_000) : Math.min(500 * 2 ** attempt, 5_000));
+      if (!retryable || attempt >= retryLimit) throw lastError;
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfter = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
+      const fallbackDelay = marketplaceCapacityError
+        ? Math.min(2_000 * 2 ** attempt, 10_000)
+        : Math.min(500 * 2 ** attempt, 5_000);
+      await sleep(Number.isFinite(retryAfter) ? Math.min(retryAfter * 1_000, 10_000) : fallbackDelay);
     }
     throw lastError ?? new OpenAiProviderError("OpenAI request failed.");
   }
@@ -1529,6 +1554,8 @@ export function createOpenAiProviderFromEnv(
           : undefined,
     organization: env.OPENAI_ORGANIZATION,
     project: env.OPENAI_PROJECT,
+    timeoutMs: options.timeoutMs ?? optionalFiniteNumber(env.OPENAI_TIMEOUT_MS),
+    maxRetries: options.maxRetries ?? optionalFiniteNumber(env.OPENAI_MAX_RETRIES),
     pricing: openAiPricingFromEnv(env),
   });
 }

@@ -15,6 +15,7 @@ import {
   opportunityRankScore,
   potentialCustomerIntentFromQualification,
   selectCandidatesForEnrichment,
+  selectZeroResultAuditCandidates,
 } from "@/lib/intelligence/reddit-pipeline";
 import { contentFingerprint, isUsefulSearchPhrase } from "@/lib/intelligence/opportunity-ranking";
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
@@ -717,19 +718,26 @@ export async function runScan(scanId: string): Promise<ScanRecord> {
     const worthEnriching = cleaned.survivors.filter(
       (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
     );
-    await setStage(
-      scan,
-      "triage",
-      "complete",
-      `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`,
-    );
+    const zeroResultAuditCandidates = !previousResult && worthEnriching.length === 0
+      ? selectZeroResultAuditCandidates({
+          candidates: cleaned.survivors,
+          triageById,
+          budget: Math.min(3, enrichmentBudget()),
+        })
+      : [];
+    const triageDetail = zeroResultAuditCandidates.length > 0
+      ? `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; lightweight triage selected none, so ${zeroResultAuditCandidates.length} current demand-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for a bounded full-context audit.`
+      : `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`;
+    await setStage(scan, "triage", "complete", triageDetail);
 
     await setStage(scan, "enrichment", "active");
-    const selectedForEnrichment = selectCandidatesForEnrichment({
-      candidates: worthEnriching,
-      triageById,
-      budget: enrichmentBudget(),
-    });
+    const selectedForEnrichment = zeroResultAuditCandidates.length > 0
+      ? zeroResultAuditCandidates
+      : selectCandidatesForEnrichment({
+          candidates: worthEnriching,
+          triageById,
+          budget: enrichmentBudget(),
+        });
     const enrichment = await redditProvider.enrich({
       candidates: selectedForEnrichment,
       maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),

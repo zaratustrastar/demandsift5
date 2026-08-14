@@ -185,6 +185,29 @@ test("only AI-triaged worthEnriching candidates enter the enrichment budget", ()
   assert.equal(selected.some((row) => row.externalId === "b"), false);
 });
 
+
+test("acquisition zero-result audit escalates only current demand signals", () => {
+  const rows = [
+    candidate({ externalId: "explicit", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "pain", discoveryLanes: ["problem_pain"] }),
+    candidate({ externalId: "promo", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "noise", discoveryLanes: ["category_recommendation"] }),
+  ];
+  const triage = new Map([
+    ["explicit", { externalId: "explicit", relevant: true, intent: "actively_looking", demandSignal: "explicit_demand", productFit: "low", timing: "current", replyability: "medium", worthEnriching: false, reason: "short snippet leaves fit uncertain" }],
+    ["pain", { externalId: "pain", relevant: true, intent: "problem_aware", demandSignal: "pain", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "pain is real but fit needs context" }],
+    ["promo", { externalId: "promo", relevant: false, intent: "promotional", demandSignal: "none", productFit: "low", timing: "current", replyability: "low", worthEnriching: false, reason: "promotion" }],
+    ["noise", { externalId: "noise", relevant: false, intent: "irrelevant", demandSignal: "none", productFit: "low", timing: "unknown", replyability: "low", worthEnriching: false, reason: "noise" }],
+  ]);
+
+  const selected = pipeline.selectZeroResultAuditCandidates({
+    candidates: rows,
+    triageById: triage,
+    budget: 3,
+  });
+  assert.deepEqual(selected.map((row) => row.externalId), ["explicit", "pain"]);
+});
+
 test("ranking happens after categorical qualification and does not change leadStatus", () => {
   const qualification = {
     externalId: "lead",

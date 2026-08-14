@@ -266,6 +266,55 @@ export function selectCandidatesForEnrichment(input: {
     .map(({ candidate }) => candidate);
 }
 
+
+function zeroResultAuditSignalWeight(value: ConversationTriage["demandSignal"]): number {
+  if (value === "explicit_demand") return 40;
+  if (value === "switching") return 35;
+  if (value === "pain") return 30;
+  if (value === "workaround") return 25;
+  if (value === "timing") return 20;
+  return 0;
+}
+
+/**
+ * Acquisition-only false-zero guard. Lightweight triage is intentionally cheap
+ * and high recall, but it can still under-estimate product fit from a short
+ * discovery snippet. If it selects nobody, escalate only a tiny number of
+ * candidates where triage itself observed current demand/pain/switching evidence.
+ * Deep qualification remains the only path that can create an opportunity.
+ */
+export function selectZeroResultAuditCandidates(input: {
+  candidates: readonly RedditDiscoveryCandidate[];
+  triageById: ReadonlyMap<string, ConversationTriage>;
+  budget?: number;
+}): RedditDiscoveryCandidate[] {
+  const budget = Math.max(1, Math.min(Math.trunc(input.budget ?? 3), 3));
+  const auditableIntents = new Set<TriageIntent>([
+    "actively_looking",
+    "evaluating",
+    "switching",
+    "problem_aware",
+  ]);
+
+  return input.candidates
+    .flatMap((candidate) => {
+      const triage = input.triageById.get(candidate.externalId);
+      if (!triage || triage.worthEnriching || triage.demandSignal === "none") return [];
+      if (!auditableIntents.has(triage.intent)) return [];
+      if (triage.timing !== "current" && triage.timing !== "near_term") return [];
+
+      let priority = intentSelectionWeight(triage.intent);
+      priority += zeroResultAuditSignalWeight(triage.demandSignal);
+      priority += fitSelectionWeight(triage.productFit) / 4;
+      priority += fitSelectionWeight(triage.replyability) / 4;
+      priority += triage.timing === "current" ? 12 : 8;
+      return [{ candidate, priority }];
+    })
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, budget)
+    .map(({ candidate }) => candidate);
+}
+
 function fitScore(value: FitLevel): number {
   if (value === "high") return 1;
   if (value === "medium") return 0.65;

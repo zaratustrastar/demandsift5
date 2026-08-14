@@ -141,3 +141,11 @@ test("scan persists mandatory stage diagnostics and recurring state", () => {
     assert.ok(source.includes(field), `missing ${field}`);
   }
 });
+
+
+test("fresh acquisition scans audit a bounded demand-signal sample before accepting a triage false zero", async () => {
+  const source = await readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8");
+  assert.match(source, /!previousResult && worthEnriching\.length === 0/);
+  assert.match(source, /selectZeroResultAuditCandidates/);
+  assert.match(source, /Math\.min\(3, enrichmentBudget\(\)\)/);
+});

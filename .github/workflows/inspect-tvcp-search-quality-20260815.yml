@@ -1,0 +1,58 @@
+name: Inspect TVCP search quality without rerun
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/inspect-tvcp-search-quality-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+      SCAN_ID: scan_7d07ad2b4075431b87b080424ae2b18c
+    steps:
+      - name: Inspect stored profile, queries and candidates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          output="$(sudo -n /usr/local/sbin/demandsift-release inspect)"
+          printf '%s\n' "$output" | grep '^release_head=' || true
+          pid="$(ps -eo pid,args | awk '/node scripts\/background-worker\.mjs work/ && !/awk/ {print $1; exit}')"
+          test -n "$pid"
+          secret="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^BACKGROUND_WORKER_SECRET=//p' | head -n1)"
+          test "${#secret}" -ge 32
+          tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer $secret" \
+            "$APP_URL/api/internal/diagnostics/recent-scans?domain=tvcp.app&inspect=1&scanId=$SCAN_ID" > "$tmp"
+          python3 - "$tmp" "$SCAN_ID" <<'PY'
+          import json,sys,collections
+          p=json.load(open(sys.argv[1])); sid=sys.argv[2]
+          row=next((s for s in (p.get('scans') or []) if s.get('id')==sid), None)
+          if not row: raise SystemExit('scan not found')
+          ins=row.get('inspection') or {}
+          print('PROFILE=' + json.dumps(ins.get('profile'), ensure_ascii=False, separators=(',',':')))
+          print('SEARCH_PLAN=' + json.dumps(ins.get('searchPlan'), ensure_ascii=False, separators=(',',':')))
+          print('TRIAGE_BREAKDOWN=' + json.dumps(row.get('triageBreakdown'), ensure_ascii=False, separators=(',',':')))
+          candidates=ins.get('candidates') or []
+          interesting=[]
+          for c in candidates:
+              t=c.get('triage') or {}; d=c.get('deepQualification')
+              if d or t.get('demandSignal')!='none' or t.get('intent') not in ('irrelevant','promotional'):
+                  interesting.append({
+                    'id':c.get('externalId'), 'subreddit':c.get('subreddit'),
+                    'title':c.get('title'), 'excerpt':(c.get('excerpt') or '')[:450],
+                    'queries':c.get('matchedQueries'), 'lanes':c.get('discoveryLanes'),
+                    'triage':t, 'deep':d,
+                  })
+          print('INTERESTING_COUNT=' + str(len(interesting)))
+          for i,c in enumerate(interesting[:20],1):
+              print(f'CANDIDATE_{i}=' + json.dumps(c, ensure_ascii=False, separators=(',',':')))
+          PY

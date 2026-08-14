@@ -1,4 +1,4 @@
-name: Apply triage reliability hardening
+name: Apply Apify discovery reliability hardening
 
 on:
   push:
@@ -19,20 +19,20 @@ jobs:
           ref: feature/reddit-intelligence-pipeline
           fetch-depth: 0
 
-      - name: Apply triage batching and timeout fallback
+      - name: Apply safe async Actor polling patch
         shell: bash
         run: |
           set -Eeuo pipefail
           git fetch origin diagnostic/tvcp-zero-20260814
-          git show origin/diagnostic/tvcp-zero-20260814:tools/triage-reliability-patch.py > /tmp/triage-reliability-patch.py
-          python3 /tmp/triage-reliability-patch.py
+          git show origin/diagnostic/tvcp-zero-20260814:tools/apify-reliability-patch.py > /tmp/apify-reliability-patch.py
+          python3 /tmp/apify-reliability-patch.py
 
       - name: Validate focused and full suite
         shell: bash
         run: |
           set -Eeuo pipefail
           npm ci
-          node --test tests/openai-intelligence-pipeline.test.mjs
+          node --test tests/apify-reddit-provider.test.mjs
           npm run lint
           npm run build
           npm test
@@ -44,6 +44,6 @@ jobs:
           set -Eeuo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add lib/providers/openai.server.ts tests/openai-intelligence-pipeline.test.mjs
-          git commit -m 'Harden triage batching and timeout fallback'
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git commit -m 'Harden Apify async discovery reads'
           git push origin HEAD:feature/reddit-intelligence-pipeline

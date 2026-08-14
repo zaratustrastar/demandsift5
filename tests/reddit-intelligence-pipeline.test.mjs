@@ -279,3 +279,106 @@ test("ranking happens after categorical qualification and does not change leadSt
   assert.equal(qualification.communityRisk, "high");
   assert.ok(score > 0);
 });
+
+
+function deepQualification(overrides = {}) {
+  return {
+    externalId: "deep",
+    leadStatus: "not_customer",
+    demandSignals: ["none"],
+    intelligenceTags: [],
+    productFit: "low",
+    painSeverity: "low",
+    intent: "informational",
+    timing: "current",
+    evidenceQuality: "high",
+    replyability: "low",
+    communityRisk: "low",
+    whyItMatters: "Deeply reviewed source evidence.",
+    shouldReply: false,
+    autoReplyAllowed: false,
+    requiresHumanReview: false,
+    mentionProduct: false,
+    disclosureRequired: false,
+    ...overrides,
+  };
+}
+
+test("incidental competitor overlap does not become a relevant conversation", () => {
+  const qualification = deepQualification({
+    intent: "irrelevant",
+    productFit: "low",
+    intelligenceTags: ["competitor_intelligence", "market_insight"],
+    competitorMentioned: "Google Analytics",
+    whyItMatters: "The author wants an authentication vault, not analytics.",
+  });
+  assert.equal(
+    pipeline.isRelevantMarketConversation({
+      qualification,
+      verifiedCompetitorSignal: true,
+    }),
+    false,
+  );
+});
+
+test("current problem evidence can be relevant research without becoming a lead", () => {
+  const qualification = deepQualification({
+    intent: "problem_aware",
+    demandSignals: ["pain"],
+    intelligenceTags: ["problem_signal"],
+    productFit: "low",
+    painSeverity: "high",
+    leadStatus: "not_customer",
+  });
+  assert.equal(
+    pipeline.isRelevantMarketConversation({
+      qualification,
+      verifiedCompetitorSignal: false,
+    }),
+    true,
+  );
+  assert.equal(qualification.leadStatus, "not_customer");
+  assert.equal(qualification.shouldReply, false);
+});
+
+test("high-fit informational research is separate from potential-customer qualification", () => {
+  const qualification = deepQualification({
+    intent: "informational",
+    intelligenceTags: ["market_insight"],
+    productFit: "high",
+    timing: "unknown",
+  });
+  assert.equal(
+    pipeline.isRelevantMarketConversation({
+      qualification,
+      verifiedCompetitorSignal: false,
+    }),
+    true,
+  );
+  assert.equal(qualification.leadStatus, "not_customer");
+});
+
+test("a verified competitor complaint still requires meaningful product fit", () => {
+  const lowFit = deepQualification({
+    intelligenceTags: ["competitor_intelligence"],
+    productFit: "low",
+  });
+  const mediumFit = deepQualification({
+    intelligenceTags: ["competitor_intelligence"],
+    productFit: "medium",
+  });
+  assert.equal(
+    pipeline.isRelevantMarketConversation({
+      qualification: lowFit,
+      verifiedCompetitorSignal: true,
+    }),
+    false,
+  );
+  assert.equal(
+    pipeline.isRelevantMarketConversation({
+      qualification: mediumFit,
+      verifiedCompetitorSignal: true,
+    }),
+    true,
+  );
+});

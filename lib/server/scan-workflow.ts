@@ -11,6 +11,7 @@ import type {
 import { identifyVerifiedCompetitorSignal } from "@/lib/intelligence/competitor-signal";
 import {
   cleanDiscoveryCandidates,
+  isRelevantMarketConversation,
   legacyClassificationFromDeep,
   opportunityRankScore,
   potentialCustomerIntentFromQualification,
@@ -869,11 +870,33 @@ export async function runScan(
     }
 
     const deepRows = [...deepById.values()];
-    const marketIntelligence: MarketIntelligenceRecord[] = deepRows.flatMap((row) => {
+    const relevantCompetitorByExternalId = new Map<string, string | null>();
+    const relevantDeepRows = deepRows.filter((row) => {
       const qualification = row.qualification;
-      const demandSignals = qualification.demandSignals.filter((signal) => signal !== "none");
-      if (qualification.intelligenceTags.length === 0 && demandSignals.length === 0) return [];
-      return [{
+      const competitorEvidence = identifyVerifiedCompetitorSignal({
+        conversationText: `${row.conversation.title ?? ""}\n${row.conversation.body}`,
+        sourceMode: row.conversation.sourceMode,
+        externalId: row.conversation.externalId,
+        businessCompetitors: business.competitors.value.map((competitor) => competitor.name),
+        deterministicCompetitorScore: qualification.demandSignals.includes("switching") ? 1 : 0,
+        classifiedComplaintScore: qualification.intelligenceTags.includes("competitor_intelligence") ? 1 : 0,
+        classifiedCompetitor: qualification.competitorMentioned,
+      });
+      const relevant = isRelevantMarketConversation({
+        qualification,
+        verifiedCompetitorSignal: competitorEvidence.verified,
+      });
+      if (relevant) {
+        relevantCompetitorByExternalId.set(
+          row.externalId,
+          competitorEvidence.verified ? competitorEvidence.competitor : null,
+        );
+      }
+      return relevant;
+    });
+    const marketIntelligence: MarketIntelligenceRecord[] = relevantDeepRows.map((row) => {
+      const qualification = row.qualification;
+      return {
         id: createId("intel"),
         sourceId: row.conversation.provenance.id,
         externalId: row.externalId,
@@ -882,11 +905,11 @@ export async function runScan(
         subreddit: row.conversation.subreddit,
         author: row.conversation.author ?? null,
         tags: qualification.intelligenceTags,
-        demandSignals,
-        competitor: qualification.competitorMentioned ?? null,
+        demandSignals: qualification.demandSignals.filter((signal) => signal !== "none"),
+        competitor: relevantCompetitorByExternalId.get(row.externalId) ?? null,
         sourceCreatedAt: row.conversation.createdAt,
         sourceIds: [row.conversation.provenance.id],
-      }];
+      };
     });
 
     const rawOpportunities: OpportunityRecord[] = deepRows.flatMap((row) => {
@@ -1000,17 +1023,17 @@ export async function runScan(
 
     const fallbackInsightSet = buildFallbackInsights(opportunities);
     let insightSet = fallbackInsightSet;
-    if (aiProvider && deepRows.length > 0) {
+    if (aiProvider && relevantDeepRows.length > 0) {
       try {
         const generated = await aiProvider.generateInsights({
           business,
           opportunities: qualifiedOpportunities,
-          evidenceConversations: deepRows,
+          evidenceConversations: relevantDeepRows,
           models,
         });
         usage.push(usageRecord(generated, "insight-generation"));
         const reviewedRedditSourceIds = new Set(
-          deepRows.map((row) => row.conversation.provenance.id),
+          relevantDeepRows.map((row) => row.conversation.provenance.id),
         );
         const seenEvidenceSets = new Set<string>();
         const generatedInsights: DemandInsightRecord[] = generated.value.demandInsights.flatMap((insight) => {
@@ -1043,7 +1066,7 @@ export async function runScan(
         ].slice(0, 3);
 
         const generatedCompetitor = generated.value.competitorSignals.find((signal) =>
-          deepRows.some((row) => {
+          relevantDeepRows.some((row) => {
             if (!signal.provenanceIds.includes(row.conversation.provenance.id)) return false;
             const verified = identifyVerifiedCompetitorSignal({
               conversationText: (row.conversation.title ?? "") + "\n" + row.conversation.body,
@@ -1070,7 +1093,7 @@ export async function runScan(
               summary: generatedCompetitor.customerImpact,
               opportunityIds: matchingOpportunities.map((opportunity) => opportunity.id),
               sourceIds: [...new Set(generatedCompetitor.provenanceIds)].filter((sourceId) =>
-                deepRows.some((row) => row.conversation.provenance.id === sourceId),
+                relevantDeepRows.some((row) => row.conversation.provenance.id === sourceId),
               ),
             }
           : fallbackInsightSet.weakness;

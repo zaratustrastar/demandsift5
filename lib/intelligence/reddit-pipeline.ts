@@ -408,6 +408,51 @@ export function selectZeroResultAuditCandidates(input: {
     .map(({ candidate }) => candidate);
 }
 
+const RESEARCH_INTELLIGENCE_TAGS = new Set<DeepQualification["intelligenceTags"][number]>([
+  "problem_signal",
+  "product_feedback",
+  "market_insight",
+  "objection",
+  "workaround",
+]);
+
+const ACTIVE_DEMAND_INTENTS = new Set<TriageIntent>([
+  "actively_looking",
+  "evaluating",
+  "switching",
+  "problem_aware",
+]);
+
+/**
+ * A deeply reviewed conversation may be useful market evidence without being a
+ * reply-ready lead. The boundary stays evidence-first: an incidental competitor
+ * name or a generic intelligence tag is not enough on its own.
+ */
+export function isRelevantMarketConversation(input: {
+  qualification: DeepQualification;
+  verifiedCompetitorSignal: boolean;
+}): boolean {
+  const { qualification } = input;
+  if (qualification.evidenceQuality !== "high") return false;
+  if (qualification.intent === "irrelevant" || qualification.intent === "promotional") return false;
+  if (qualification.timing === "historical" || qualification.timing === "hypothetical") return false;
+
+  const hasMeaningfulFit =
+    qualification.productFit === "medium" || qualification.productFit === "high";
+  const hasResearchTag = qualification.intelligenceTags.some((tag) =>
+    RESEARCH_INTELLIGENCE_TAGS.has(tag),
+  );
+  const hasDemandSignal = qualification.demandSignals.some((signal) => signal !== "none");
+  const hasCurrentDemand =
+    hasDemandSignal &&
+    ACTIVE_DEMAND_INTENTS.has(qualification.intent) &&
+    (qualification.timing === "current" || qualification.timing === "near_term");
+
+  if (hasCurrentDemand && (hasMeaningfulFit || hasResearchTag)) return true;
+  if (hasMeaningfulFit && hasResearchTag) return true;
+  return hasMeaningfulFit && input.verifiedCompetitorSignal;
+}
+
 function fitScore(value: FitLevel): number {
   if (value === "high") return 1;
   if (value === "medium") return 0.65;

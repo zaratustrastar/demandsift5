@@ -265,6 +265,7 @@ export type ScanDiagnostics = {
   triageDuplicateIds: number;
   triageUnknownIds: number;
   worthEnriching: number;
+  zeroResultAuditEscalated: number;
   requestedForEnrichment: number;
   enrichedSuccessfully: number;
   enrichmentFailures: number;

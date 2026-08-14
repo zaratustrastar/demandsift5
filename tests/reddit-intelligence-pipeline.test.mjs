@@ -208,6 +208,22 @@ test("acquisition zero-result audit escalates only current demand signals", () =
   assert.deepEqual(selected.map((row) => row.externalId), ["explicit", "pain"]);
 });
 
+test("zero-result audit independently checks a high-signal retrieval false negative", () => {
+  const rows = [
+    candidate({ externalId: "missed", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "promo2", discoveryLanes: ["direct_buying_intent"] }),
+    candidate({ externalId: "weak", discoveryLanes: ["timing"] }),
+  ];
+  const triage = new Map([
+    ["missed", { externalId: "missed", relevant: false, intent: "irrelevant", demandSignal: "none", productFit: "unknown", timing: "unknown", replyability: "unknown", worthEnriching: false, reason: "cheap triage missed the signal" }],
+    ["promo2", { externalId: "promo2", relevant: false, intent: "promotional", demandSignal: "none", productFit: "unknown", timing: "current", replyability: "low", worthEnriching: false, reason: "promotion" }],
+    ["weak", { externalId: "weak", relevant: false, intent: "informational", demandSignal: "none", productFit: "unknown", timing: "unknown", replyability: "low", worthEnriching: false, reason: "weak timing-only retrieval" }],
+  ]);
+
+  const selected = pipeline.selectZeroResultAuditCandidates({ candidates: rows, triageById: triage, budget: 3 });
+  assert.deepEqual(selected.map((row) => row.externalId), ["missed"]);
+});
+
 test("ranking happens after categorical qualification and does not change leadStatus", () => {
   const qualification = {
     externalId: "lead",

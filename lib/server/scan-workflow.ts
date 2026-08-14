@@ -721,15 +721,18 @@ export async function runScan(
     const worthEnriching = cleaned.survivors.filter(
       (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
     );
-    const zeroResultAuditCandidates = !previousResult && worthEnriching.length === 0
+    const zeroResultAuditCandidates = worthEnriching.length === 0
       ? selectZeroResultAuditCandidates({
           candidates: cleaned.survivors,
           triageById,
-          budget: Math.min(3, enrichmentBudget()),
+          // Acquisition gets a three-candidate audit. Incremental scans get one
+          // independent deep check so a cached/cheap triage false-negative cannot
+          // silently turn real demand into a valid-looking zero.
+          budget: Math.min(previousResult ? 1 : 3, enrichmentBudget()),
         })
       : [];
     const triageDetail = zeroResultAuditCandidates.length > 0
-      ? `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; lightweight triage selected none, so ${zeroResultAuditCandidates.length} current demand-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for a bounded full-context audit.`
+      ? `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; lightweight triage selected none, so ${zeroResultAuditCandidates.length} high-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for an independent full-context audit.`
       : `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`;
     await setStage(scan, "triage", "complete", triageDetail);
 
@@ -1154,6 +1157,7 @@ export async function runScan(
       triageDuplicateIds: 0,
       triageUnknownIds: 0,
       worthEnriching: worthEnriching.length,
+      zeroResultAuditEscalated: zeroResultAuditCandidates.length,
       requestedForEnrichment: enrichment.diagnostics.requested,
       enrichedSuccessfully: enrichment.diagnostics.enriched,
       enrichmentFailures: enrichment.diagnostics.failed,

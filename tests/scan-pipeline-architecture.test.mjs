@@ -146,9 +146,9 @@ test("scan persists mandatory stage diagnostics and recurring state", () => {
 });
 
 
-test("fresh acquisition scans audit a bounded demand-signal sample before accepting a triage false zero", async () => {
+test("zero-result scans audit a bounded high-signal sample before accepting a triage false zero", async () => {
   const source = await readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8");
-  assert.match(source, /!previousResult && worthEnriching\.length === 0/);
+  assert.match(source, /const zeroResultAuditCandidates = worthEnriching\.length === 0/);
   assert.match(source, /selectZeroResultAuditCandidates/);
-  assert.match(source, /Math\.min\(3, enrichmentBudget\(\)\)/);
+  assert.match(source, /budget: Math\.min\(previousResult \? 1 : 3, enrichmentBudget\(\)\)/);
 });

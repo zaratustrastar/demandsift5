@@ -276,12 +276,30 @@ function zeroResultAuditSignalWeight(value: ConversationTriage["demandSignal"]):
   return 0;
 }
 
+function zeroResultAuditLaneWeight(candidate: RedditDiscoveryCandidate): number {
+  let strongest = 0;
+  for (const lane of candidate.discoveryLanes) {
+    if (lane === "explicit_demand" || lane === "direct_buying_intent") strongest = Math.max(strongest, 45);
+    else if (lane === "switching" || lane === "competitor_switching") strongest = Math.max(strongest, 40);
+    else if (lane === "pain" || lane === "problem_pain") strongest = Math.max(strongest, 35);
+    else if (lane === "category_recommendation") strongest = Math.max(strongest, 32);
+    else if (lane === "workaround") strongest = Math.max(strongest, 30);
+    else if (lane === "timing") strongest = Math.max(strongest, 25);
+  }
+  return strongest;
+}
+
 /**
- * Acquisition-only false-zero guard. Lightweight triage is intentionally cheap
- * and high recall, but it can still under-estimate product fit from a short
- * discovery snippet. If it selects nobody, escalate only a tiny number of
- * candidates where triage itself observed current demand/pain/switching evidence.
- * Deep qualification remains the only path that can create an opportunity.
+ * False-zero guard. Lightweight triage is intentionally cheap and high recall,
+ * but the exact failure we need to defend against is triage missing the demand
+ * signal itself. Therefore the audit has two independent inputs: triage evidence
+ * and the bounded high-signal retrieval lane that produced the candidate.
+ *
+ * This function never creates a lead. It only spends a tiny enrichment/deep-
+ * qualification budget so the strict full-context classifier can confirm or
+ * reject the candidate. Promotional noise is never escalated, and an explicit
+ * triage rejection is only auditable when retrieval came from the strongest
+ * buying/switching lanes.
  */
 export function selectZeroResultAuditCandidates(input: {
   candidates: readonly RedditDiscoveryCandidate[];
@@ -294,20 +312,32 @@ export function selectZeroResultAuditCandidates(input: {
     "evaluating",
     "switching",
     "problem_aware",
+    "informational",
   ]);
 
   return input.candidates
     .flatMap((candidate) => {
       const triage = input.triageById.get(candidate.externalId);
-      if (!triage || triage.worthEnriching || triage.demandSignal === "none") return [];
-      if (!auditableIntents.has(triage.intent)) return [];
-      if (triage.timing !== "current" && triage.timing !== "near_term") return [];
+      if (!triage || triage.worthEnriching || triage.intent === "promotional") return [];
 
-      let priority = intentSelectionWeight(triage.intent);
+      const laneWeight = zeroResultAuditLaneWeight(candidate);
+      const hasTriageSignal = triage.demandSignal !== "none";
+      const highSignalRetrieval = laneWeight >= 30;
+      const strongestRetrieval = laneWeight >= 40;
+      if (!hasTriageSignal && !highSignalRetrieval) return [];
+      if (triage.intent === "irrelevant" && !strongestRetrieval) return [];
+      if (!auditableIntents.has(triage.intent) && triage.intent !== "irrelevant") return [];
+
+      const currentTiming = triage.timing === "current" || triage.timing === "near_term";
+      if (!currentTiming && !highSignalRetrieval) return [];
+
+      let priority = laneWeight;
+      priority += intentSelectionWeight(triage.intent);
       priority += zeroResultAuditSignalWeight(triage.demandSignal);
       priority += fitSelectionWeight(triage.productFit) / 4;
       priority += fitSelectionWeight(triage.replyability) / 4;
-      priority += triage.timing === "current" ? 12 : 8;
+      if (triage.timing === "current") priority += 12;
+      else if (triage.timing === "near_term") priority += 8;
       return [{ candidate, priority }];
     })
     .sort((left, right) => right.priority - left.priority)

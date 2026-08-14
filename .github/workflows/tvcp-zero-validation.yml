@@ -1,0 +1,167 @@
+name: TVCP zero-result validation
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-validation-20260814
+
+jobs:
+  validate-tvcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run fresh TVCP acquisition scan and validate zero-result guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          status_json="$(mktemp)"
+          diagnostics_json="$(mktemp)"
+          report_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$status_json" "$diagnostics_json" "$report_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "tvcp_validation_scan_id=$scan_id"
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$status_json"
+            status="$(python3 - "$status_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+          echo "tvcp_poll=$attempt status=$status"
+
+          if [ "$status" = "complete" ]; then
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id" > "$report_json"
+
+            python3 - "$diagnostics_json" "$report_json" <<'PY'
+          import json, sys
+          aggregate = json.load(open(sys.argv[1]))
+          presented = json.load(open(sys.argv[2]))
+          scan = aggregate.get("scan") or {}
+          diagnostics = aggregate.get("diagnostics") or {}
+          retrieval = aggregate.get("retrieval") or {}
+          decisions = aggregate.get("decisionBreakdown") or {}
+          output = aggregate.get("output") or {}
+          presentation = aggregate.get("presentation") or {}
+          report = presented.get("report") or {}
+          triage = decisions.get("triage") or {}
+
+          if scan.get("status") != "complete":
+              raise SystemExit("TVCP validation failed: scan did not complete.")
+          if not presentation.get("ok") or not report.get("profile"):
+              raise SystemExit("TVCP validation failed: completed report did not render.")
+
+          survivors = int(diagnostics.get("deterministicSurvivors") or 0)
+          submitted = int(diagnostics.get("submittedForTriage") or 0)
+          returned = int(diagnostics.get("triageReturned") or 0)
+          worth = int(diagnostics.get("worthEnriching") or 0)
+          requested = int(diagnostics.get("requestedForEnrichment") or 0)
+          submitted_deep = int(diagnostics.get("submittedForDeepQualification") or 0)
+          deep_returned = int(diagnostics.get("deepQualificationsReturned") or 0)
+
+          if survivors <= 0:
+              raise SystemExit("TVCP validation inconclusive: no credible Reddit candidates survived.")
+          if submitted != survivors or returned != submitted:
+              raise SystemExit("TVCP validation failed: triage did not cover every credible candidate.")
+
+          auditable_intents = {"actively_looking", "evaluating", "switching", "problem_aware"}
+          demand_bearing_not_selected = 0
+          for key, count in triage.items():
+              parts = key.split("|")
+              if len(parts) != 5:
+                  continue
+              selected, intent, signal, _fit, timing = parts
+              if (
+                  selected == "not_selected"
+                  and intent in auditable_intents
+                  and signal != "none"
+                  and timing in {"current", "near_term"}
+              ):
+                  demand_bearing_not_selected += int(count)
+
+          guard_expected = worth == 0 and demand_bearing_not_selected > 0
+          guard_exercised = guard_expected and requested > 0
+          if guard_expected and not guard_exercised:
+              raise SystemExit("TVCP validation failed: current demand signals were dropped at triage again.")
+          if guard_exercised:
+              if requested > 3:
+                  raise SystemExit("TVCP validation failed: zero-result audit exceeded its bounded budget.")
+              if submitted_deep <= 0 or deep_returned != submitted_deep:
+                  raise SystemExit("TVCP validation failed: audited demand signals did not reach complete deep qualification.")
+
+          safe = {
+              "website": scan.get("websiteUrl"),
+              "retrieved": diagnostics.get("retrieved", 0),
+              "normalized": diagnostics.get("normalized", 0),
+              "survivors": survivors,
+              "triageReturned": returned,
+              "worthEnriching": worth,
+              "demandBearingNotSelected": demand_bearing_not_selected,
+              "zeroGuardExpected": guard_expected,
+              "zeroGuardExercised": guard_exercised,
+              "requestedForEnrichment": requested,
+              "enrichedSuccessfully": diagnostics.get("enrichedSuccessfully", 0),
+              "submittedForDeepQualification": submitted_deep,
+              "deepQualificationsReturned": deep_returned,
+              "potentialCustomers": output.get("potentialCustomers", 0),
+              "insights": output.get("insights", 0),
+              "competitorSignals": output.get("competitorSignals", 0),
+              "replies": output.get("replies", 0),
+              "queryCount": retrieval.get("queryCount", 0),
+              "matchedCandidatesByLane": retrieval.get("matchedCandidatesByLane", {}),
+              "worthEnrichingByLane": retrieval.get("worthEnrichingByLane", {}),
+              "triageBreakdown": triage,
+              "deepBreakdown": decisions.get("deepQualification") or {},
+          }
+          print("tvcp_validation=" + json.dumps(safe, separators=(",", ":"), sort_keys=True))
+          PY
+            exit 0
+          fi
+
+          if [ "$status" = "failed" ]; then
+            python3 - "$status_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          print("tvcp_validation_failed")
+          print("error=" + str(scan.get("error") or ""))
+          print("progress=" + json.dumps([
+              {"id": x.get("id"), "status": x.get("status")}
+              for x in (scan.get("progress") or [])
+          ], separators=(",", ":")))
+          PY
+            exit 1
+          fi
+
+          sleep 10
+          done
+
+          echo "TVCP validation timed out" >&2
+          exit 1

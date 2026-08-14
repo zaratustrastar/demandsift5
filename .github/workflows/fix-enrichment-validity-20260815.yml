@@ -1,0 +1,235 @@
+name: Fix enrichment mapping and zero-result validity
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/fix-enrichment-validity-20260815.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Apply systemic enrichment validity patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          provider = Path('lib/providers/reddit.server.ts')
+          text = provider.read_text()
+
+          marker = '''function rawExternalId(item: ApifyRedditItem): string {\n'''
+          helper = '''function redditThreadPermalink(value: string | undefined): string | undefined {\n  if (!value) return undefined;\n  try {\n    const url = new URL(value);\n    const host = url.hostname.toLowerCase();\n    if (host === "redd.it") {\n      url.hash = "";\n      url.search = "";\n      return url.toString();\n    }\n    if (host !== "reddit.com" && !host.endsWith(".reddit.com")) return undefined;\n    const segments = url.pathname.split("/").filter(Boolean);\n    const commentsIndex = segments.findIndex((segment) => segment.toLowerCase() === "comments");\n    if (commentsIndex < 0 || !segments[commentsIndex + 1]) return undefined;\n    const titleIndex = commentsIndex + 2;\n    const end = segments[titleIndex] ? titleIndex + 1 : commentsIndex + 2;\n    url.pathname = `/${segments.slice(0, end).join("/")}/`;\n    url.hash = "";\n    url.search = "";\n    return url.toString();\n  } catch {\n    return undefined;\n  }\n}\n\n'''
+          if 'function redditThreadPermalink(' not in text:
+              if marker not in text:
+                  raise SystemExit('rawExternalId marker not found')
+              text = text.replace(marker, helper + marker, 1)
+
+          pattern = re.compile(r'''function enrichedItemForCandidate\(\n  candidate: RedditDiscoveryCandidate,\n  payload: readonly unknown\[\],\n\): unknown \| undefined \{.*?\n\}\n\nfunction enrichedConversation''', re.S)
+          replacement = '''function enrichedItemForCandidate(\n  candidate: RedditDiscoveryCandidate,\n  payload: readonly unknown[],\n): unknown | undefined {\n  const candidateId = candidate.externalId.replace(/^t[13]_/i, "").toLowerCase();\n  const exact = payload.find((value) => {\n    if (!value || typeof value !== "object" || Array.isArray(value)) return false;\n    const item = value as ApifyRedditItem;\n    const dataType = stringValue(item.dataType, 20).toLowerCase();\n    if (dataType !== candidate.kind) return false;\n    const itemId = rawExternalId(item).replace(/^t[13]_/i, "").toLowerCase();\n    return Boolean(itemId && itemId === candidateId);\n  });\n  if (exact) return exact;\n\n  // Comment deep-links are not guaranteed to be emitted as an item by the Actor\n  // even when the Actor successfully opens the parent thread. Discovery already\n  // verified the matched author's words, so any item from the same Reddit thread\n  // is a safe anchor for adding surrounding context without substituting content.\n  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;\n  if (!postId) return undefined;\n  return payload.find((value) => postIdForItem(value) === postId);\n}\n\nfunction enrichedConversation'''
+          text, n = pattern.subn(replacement, text, count=1)
+          if n != 1:
+              raise SystemExit(f'enrichedItemForCandidate replacement count={n}')
+
+          pattern = re.compile(r'''function enrichedConversation\(\n  candidate: RedditDiscoveryCandidate,\n  enrichedValue: unknown,\n  payload: readonly unknown\[\],\n  provider: string,\n\): EnrichedRedditConversation \| null \{.*?\n\}\n\n/\*\*\n \* Preserve a verified discovery record''', re.S)
+          replacement = '''function enrichedConversation(\n  candidate: RedditDiscoveryCandidate,\n  enrichedValue: unknown,\n  payload: readonly unknown[],\n  provider: string,\n): EnrichedRedditConversation | null {\n  if (!enrichedValue || typeof enrichedValue !== "object" || Array.isArray(enrichedValue)) return null;\n  const item = enrichedValue as ApifyRedditItem;\n  const anchorId = rawExternalId(item).replace(/^t[13]_/i, "").toLowerCase();\n  const candidateId = candidate.externalId.replace(/^t[13]_/i, "").toLowerCase();\n  const anchorKind = stringValue(item.dataType, 20).toLowerCase();\n  const exactItemMatch = anchorKind === candidate.kind && Boolean(anchorId && anchorId === candidateId);\n  const context = structuredContextForCandidate(candidate, payload);\n  const threadContext = flattenStructuredContext(context);\n  const contentHash = contentFingerprint(\n    `${candidate.title ?? ""}\\n${candidate.body}\\n${JSON.stringify(context)}`,\n  );\n  return {\n    provider,\n    sourceMode: candidate.sourceMode,\n    externalId: candidate.externalId,\n    kind: candidate.kind,\n    parentExternalId: candidate.parentExternalId,\n    subreddit: candidate.subreddit,\n    // The discovery candidate remains authoritative. A same-thread Actor item is\n    // only an anchor for surrounding context and must never overwrite the matched\n    // author's title/body/identity with another comment from the thread.\n    title: candidate.title ?? cleanRedditText(item.title, 500) || undefined,\n    body: candidate.body,\n    threadContext: threadContext || undefined,\n    structuredContext: context,\n    author: candidate.author,\n    permalink: candidate.permalink,\n    createdAt: candidate.createdAt,\n    metrics: candidate.metrics,\n    matchedQuery: candidate.matchedQuery,\n    matchedQueries: candidate.matchedQueries,\n    discoveryLanes: candidate.discoveryLanes,\n    provenance: {\n      ...candidate.provenance,\n      provider,\n      contentHash,\n      observedAt: new Date().toISOString(),\n      metadata: {\n        ...(candidate.provenance.metadata ?? {}),\n        enriched: true,\n        enrichmentMatch: exactItemMatch ? "exact-item" : "same-thread-anchor",\n      },\n    },\n  };\n}\n\n/**\n * Preserve a verified discovery record'''
+          text, n = pattern.subn(replacement, text, count=1)
+          if n != 1:
+              raise SystemExit(f'enrichedConversation replacement count={n}')
+
+          start = text.index('  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {')
+          end = text.index('  /** Deprecated compatibility path. The active scan uses discover -> AI -> enrich. */', start)
+          method = '''  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {\n    const candidates = request.candidates.slice(0, this.enrichmentLimit);\n    if (candidates.length === 0) {\n      return {\n        conversations: [],\n        sourceMode: this.sourceMode,\n        diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 },\n      };\n    }\n    const maxComments = Math.max(\n      0,\n      Math.min(request.maxComments ?? this.enrichmentComments, 20),\n    );\n    const buildInput = (batch: readonly RedditDiscoveryCandidate[]): ApifyEnrichmentActorInput => {\n      const threadUrls = [...new Set(batch.flatMap((candidate) => {\n        const url = redditThreadPermalink(candidate.permalink);\n        return url ? [url] : [];\n      }))];\n      return {\n        startUrls: threadUrls.map((url) => ({ url })),\n        skipComments: false,\n        skipUserPosts: true,\n        skipCommunity: true,\n        includeMediaLinks: true,\n        includeNSFW: false,\n        maxItems: Math.min(\n          100,\n          Math.max(\n            APIFY_REDDIT_ENRICHMENT_MIN_ITEMS,\n            Math.max(1, threadUrls.length) * (maxComments + 1),\n          ),\n        ),\n        maxPostCount: Math.max(1, threadUrls.length),\n        maxComments,\n        maxCommunitiesCount: 0,\n        maxUserCount: 0,\n        scrollTimeout: 20,\n        navigationTimeout: 30,\n        debugMode: false,\n        proxy: {\n          useApifyProxy: true,\n          apifyProxyGroups: ["RESIDENTIAL"],\n        },\n      };\n    };\n\n    const primaryInput = buildInput(candidates);\n    if (primaryInput.startUrls.length === 0) {\n      return {\n        conversations: candidates.map((candidate) =>\n          discoveryFallbackConversation(candidate, `apify:${this.actorId}`),\n        ),\n        sourceMode: this.sourceMode,\n        diagnostics: {\n          requested: candidates.length,\n          enriched: 0,\n          failed: candidates.length,\n          fallbackUsed: candidates.length,\n          failureReason: "missing_reddit_thread_urls",\n        },\n      };\n    }\n\n    let payload: unknown[];\n    try {\n      payload = await this.runActor(primaryInput, apifyEnrichmentTimeoutMs(this.timeoutMs));\n    } catch (error) {\n      console.error("Apify Reddit thread enrichment failed", error);\n      const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";\n      return {\n        conversations: candidates.map((candidate) =>\n          discoveryFallbackConversation(candidate, `apify:${this.actorId}`),\n        ),\n        sourceMode: this.sourceMode,\n        diagnostics: {\n          requested: candidates.length,\n          enriched: 0,\n          failed: candidates.length,\n          fallbackUsed: candidates.length,\n          failureReason: `actor_error:${message.slice(0, 500)}`,\n        },\n      };\n    }\n\n    const mapped = new Map<string, EnrichedRedditConversation>();\n    const mapFromPayload = (batch: readonly RedditDiscoveryCandidate[], sourcePayload: readonly unknown[]) => {\n      for (const candidate of batch) {\n        if (mapped.has(candidate.externalId)) continue;\n        const anchor = enrichedItemForCandidate(candidate, sourcePayload);\n        if (!anchor) continue;\n        const conversation = enrichedConversation(\n          candidate,\n          anchor,\n          sourcePayload,\n          `apify:${this.actorId}`,\n        );\n        if (conversation) mapped.set(candidate.externalId, conversation);\n      }\n    };\n\n    mapFromPayload(candidates, payload);\n    const initiallyUnmatched = candidates.filter((candidate) => !mapped.has(candidate.externalId));\n    let recoveryAttempted = false;\n    let recovered = 0;\n    let recoveryPayloadItems = 0;\n    let recoveryError = false;\n\n    // A single bounded recovery run protects all future scans from partial multi-URL\n    // Actor datasets. It is attempted only after a successful paid run whose dataset\n    // could not be mapped, so normal scans retain the one-run cost profile.\n    if (initiallyUnmatched.length > 0) {\n      const recoveryInput = buildInput(initiallyUnmatched);\n      if (recoveryInput.startUrls.length > 0) {\n        recoveryAttempted = true;\n        try {\n          const recoveryPayload = await this.runActor(\n            recoveryInput,\n            apifyEnrichmentTimeoutMs(this.timeoutMs),\n          );\n          recoveryPayloadItems = recoveryPayload.length;\n          const before = mapped.size;\n          mapFromPayload(initiallyUnmatched, recoveryPayload);\n          recovered = mapped.size - before;\n        } catch (error) {\n          recoveryError = true;\n          console.error("Apify Reddit thread enrichment recovery failed", error);\n        }\n      }\n    }\n\n    const conversations = candidates.map((candidate) =>\n      mapped.get(candidate.externalId) ??\n        discoveryFallbackConversation(candidate, `apify:${this.actorId}`),\n    );\n    const failed = candidates.length - mapped.size;\n    return {\n      conversations,\n      sourceMode: this.sourceMode,\n      diagnostics: {\n        requested: candidates.length,\n        enriched: mapped.size,\n        failed,\n        fallbackUsed: failed,\n        ...(failed > 0\n          ? {\n              failureReason:\n                `actor_succeeded_mapping_failure:unmatched=${failed};payload_items=${payload.length};` +\n                `recovery_attempted=${recoveryAttempted ? 1 : 0};recovered=${recovered};` +\n                `recovery_payload_items=${recoveryPayloadItems};recovery_error=${recoveryError ? 1 : 0}`,\n            }\n          : {}),\n      },\n    };\n  }\n\n'''
+          text = text[:start] + method + text[end:]
+          provider.write_text(text)
+
+          workflow = Path('lib/server/scan-workflow.ts')
+          text = workflow.read_text()
+          old = '''    const enrichment = await redditProvider.enrich({\n      candidates: selectedForEnrichment,\n      maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),\n    });\n    await setStage(\n      scan,\n      "enrichment",\n      "complete",\n      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} enriched; ${enrichment.diagnostics.fallbackUsed} verified discovery fallback${enrichment.diagnostics.fallbackUsed === 1 ? "" : "s"} used.`,\n    );\n\n    await setStage(scan, "qualification", "active");\n'''
+          new = '''    const enrichment = await redditProvider.enrich({\n      candidates: selectedForEnrichment,\n      maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),\n    });\n    const requiredFullContextReviews = Math.min(\n      minimumFullContextReviews(lookbackDays),\n      selectedForEnrichment.length,\n    );\n    if (enrichment.diagnostics.enriched < requiredFullContextReviews) {\n      const detail =\n        `Thread context could be verified for only ${enrichment.diagnostics.enriched} of ` +\n        `${selectedForEnrichment.length} selected conversations; ${requiredFullContextReviews} are required. ` +\n        "The scan will not publish a definitive zero or incomplete intelligence report.";\n      await setStage(scan, "enrichment", "failed", detail);\n      throw new ApiError(detail, 502, "reddit_enrichment_failed");\n    }\n    await setStage(\n      scan,\n      "enrichment",\n      "complete",\n      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} received additional thread context; ${enrichment.diagnostics.fallbackUsed} discovery-only fallback${enrichment.diagnostics.fallbackUsed === 1 ? "" : "s"} used.`,\n    );\n\n    await setStage(scan, "qualification", "active");\n'''
+          if old not in text:
+              raise SystemExit('scan enrichment block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    const deepRows = [...deepById.values()];\n    const relevantCompetitorByExternalId = new Map<string, string | null>();\n    const relevantDeepRows = deepRows.filter((row) => {\n'''
+          new = '''    const deepRows = [...deepById.values()];\n    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>\n      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;\n    const incompleteQualifiedLead = deepRows.find((row) =>\n      isQualifiedPotentialCustomer(row.qualification) && !hasVerifiedThreadContext(row.conversation),\n    );\n    if (incompleteQualifiedLead) {\n      throw new ApiError(\n        "A qualified Reddit candidate could not be verified with thread context. The scan will retry rather than publish an incomplete lead.",\n        502,\n        "reddit_enrichment_failed",\n      );\n    }\n    const relevantCompetitorByExternalId = new Map<string, string | null>();\n    const relevantDeepRows = deepRows.filter((row) => {\n      if (!hasVerifiedThreadContext(row.conversation)) return false;\n'''
+          if old not in text:
+              raise SystemExit('deepRows block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''      // A public acquisition opportunity must be both a plausible customer and\n      // appropriate to answer. Non-replyable demand still contributes to the\n      // source-backed intelligence layer, but it must not become a lead card\n      // without the grounded reply promised by the product.\n      if (!isQualifiedPotentialCustomer(qualification)) return [];\n'''
+          new = '''      // A public acquisition opportunity must be both a plausible customer and\n      // appropriate to answer. Non-replyable demand still contributes to the\n      // source-backed intelligence layer, but it must not become a lead card\n      // without the grounded reply promised by the product. Apify discovery-only\n      // fallbacks are never promoted as reply-ready leads.\n      if (!isQualifiedPotentialCustomer(qualification) || !hasVerifiedThreadContext(conversation)) return [];\n'''
+          if old not in text:
+              raise SystemExit('opportunity invariant block not found')
+          text = text.replace(old, new, 1)
+          workflow.write_text(text)
+
+          presenter = Path('lib/server/presenter.ts')
+          text = presenter.read_text()
+          old = '''      qualificationCoverage: {\n        credibleCandidates: result.diagnostics.deterministicSurvivors,\n        fullContextReviewed:\n          result.diagnostics.submittedForDeepQualification + result.diagnostics.reusedUnchanged,\n      },\n'''
+          new = '''      qualificationCoverage: {\n        credibleCandidates: result.diagnostics.deterministicSurvivors,\n        // Only provider-confirmed thread enrichment counts as context coverage.\n        // Discovery-only fallbacks may still be classified internally, but are\n        // never presented to the user as full-context review.\n        fullContextReviewed: result.diagnostics.enrichedSuccessfully,\n      },\n'''
+          if old not in text:
+              raise SystemExit('presenter qualificationCoverage block not found')
+          presenter.write_text(text.replace(old, new, 1))
+
+          dashboard = Path('components/demand-intelligence/ProductDashboard.tsx')
+          text = dashboard.read_text()
+          text = text.replace(
+              'credible recent candidates with full conversation context.',
+              'credible recent candidates with additional Reddit thread context.',
+          )
+          text = text.replace('Full-context reviewed · Source linked', 'Thread-context reviewed · Source linked')
+          dashboard.write_text(text)
+
+          tests = Path('tests/apify-reddit-provider.test.mjs')
+          text = tests.read_text()
+          insert_before = 'test("controlled live enrichment probe opens and maps one selected thread", {'
+          if insert_before not in text:
+              raise SystemExit('live enrichment probe marker not found')
+          regression = r'''
+test("comment enrichment uses same-thread context when Actor omits the exact comment item", async () => {
+  const candidate = {
+    provider: "apify-test",
+    sourceMode: "apify-test",
+    externalId: "missingcomment",
+    kind: "comment",
+    parentExternalId: "t3_abc123",
+    subreddit: "SaaS",
+    title: undefined,
+    body: "I need something simpler for keeping family screen time under control.",
+    author: "parent_user",
+    permalink: "https://www.reddit.com/r/SaaS/comments/abc123/looking_for_demand_intelligence/missingcomment/",
+    createdAt: documentedComment.createdAt,
+    metrics: { score: 3, comments: 1 },
+    matchedQueries: ["family screen time control"],
+    discoveryLanes: ["direct_buying_intent"],
+    provenance: {
+      id: "reddit_apify_missingcomment",
+      kind: "reddit",
+      provider: "apify-test",
+      providerExternalId: "missingcomment",
+      url: "https://www.reddit.com/r/SaaS/comments/abc123/looking_for_demand_intelligence/missingcomment/",
+      excerpt: "I need something simpler for keeping family screen time under control.",
+      contentHash: "hash-missingcomment",
+      observedAt: "2026-08-14T00:00:00.000Z",
+      isMock: false,
+      metadata: { testOnly: true },
+    },
+  };
+  const calls = [];
+  const provider = new redditModule.ApifyRedditTestProvider({
+    actorId: "trudax/reddit-scraper-lite",
+    token: "private-apify-token",
+    fetchImpl: async (url, init = {}) => {
+      const parsedUrl = new URL(url);
+      calls.push({ url: parsedUrl, init, input: init.body ? JSON.parse(init.body) : null });
+      if (parsedUrl.pathname.includes("/actors/") && parsedUrl.pathname.endsWith("/runs")) {
+        return new Response(JSON.stringify({
+          data: { id: "run-comment-thread", status: "SUCCEEDED", defaultDatasetId: "dataset-comment-thread" },
+        }), { status: 201 });
+      }
+      if (parsedUrl.pathname.includes("/datasets/dataset-comment-thread/items")) {
+        // The exact comment is deliberately absent. The post and another comment
+        // prove the Actor opened the correct thread.
+        return new Response(JSON.stringify([documentedActorItem, documentedComment]), { status: 200 });
+      }
+      throw new Error(`Unexpected mocked Apify URL: ${parsedUrl}`);
+    },
+  });
+
+  const result = await provider.enrich({ candidates: [candidate], maxComments: 6 });
+  assert.equal(result.diagnostics.enriched, 1);
+  assert.equal(result.diagnostics.failed, 0);
+  assert.equal(result.conversations[0].externalId, "missingcomment");
+  assert.equal(result.conversations[0].body, candidate.body, "same-thread anchor must not replace the matched author's words");
+  assert.equal(result.conversations[0].structuredContext.matched.body, candidate.body);
+  assert.equal(result.conversations[0].structuredContext.originalPost.externalId, "abc123");
+  assert.equal(result.conversations[0].provenance.metadata.enriched, true);
+  assert.equal(result.conversations[0].provenance.metadata.enrichmentMatch, "same-thread-anchor");
+  const start = calls.find((call) => call.init.method === "POST");
+  assert.ok(start);
+  assert.deepEqual(start.input.startUrls, [{
+    url: "https://www.reddit.com/r/SaaS/comments/abc123/looking_for_demand_intelligence/",
+  }]);
+});
+
+'''
+          if 'comment enrichment uses same-thread context' not in text:
+              text = text.replace(insert_before, regression + insert_before, 1)
+          text = text.replace(
+              r'/^actor_succeeded_mapping_failure:unmatched=1;invalid=0;payload_items=1$/',
+              r'/^actor_succeeded_mapping_failure:unmatched=1;payload_items=1;recovery_attempted=1;recovered=0;recovery_payload_items=1;recovery_error=0$/',
+          )
+          tests.write_text(text)
+
+          trust = Path('tests/demand-intelligence-trust.test.mjs')
+          text = trust.read_text()
+          append = r'''
+
+test("context coverage counts only successful provider enrichment and incomplete floors fail closed", async () => {
+  const [workflow, presenter, dashboard] = await Promise.all([
+    source("lib/server/scan-workflow.ts"),
+    source("lib/server/presenter.ts"),
+    source("components/demand-intelligence/ProductDashboard.tsx"),
+  ]);
+  assert.match(workflow, /enrichment\.diagnostics\.enriched < requiredFullContextReviews/);
+  assert.match(workflow, /reddit_enrichment_failed/);
+  assert.match(workflow, /hasVerifiedThreadContext/);
+  assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
+  assert.match(dashboard, /additional Reddit thread context/);
+  assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
+});
+'''
+          if 'context coverage counts only successful provider enrichment' not in text:
+              text += append
+          trust.write_text(text)
+          PY
+
+          git diff --check
+          git diff --stat
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Focused provider and trust tests
+        run: node --test tests/apify-reddit-provider.test.mjs tests/demand-intelligence-trust.test.mjs
+
+      - name: Build
+        run: npm run build:node
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Full test suite
+        run: node --test tests/*.test.mjs
+
+      - name: Commit and push tested patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts lib/server/scan-workflow.ts lib/server/presenter.ts components/demand-intelligence/ProductDashboard.tsx tests/apify-reddit-provider.test.mjs tests/demand-intelligence-trust.test.mjs
+          git commit -m "Fail closed on incomplete Reddit context"
+          git push origin HEAD:feature/reddit-intelligence-pipeline
+          echo "published_sha=$(git rev-parse HEAD)"

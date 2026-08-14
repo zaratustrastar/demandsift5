@@ -135,6 +135,32 @@ test("missing triage IDs are retried with only the missing records", async () =>
   assert.equal(result.usage.outputTokens, 10);
 });
 
+
+test("triage splits large candidate sets into bounded provider requests", async () => {
+  const calls = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      calls.push(ids);
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 17 }, (_, index) => candidate(`batch-${index + 1}`));
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.deepEqual(calls.map((ids) => ids.length), [8, 8, 1]);
+  assert.deepEqual(result.value.map((row) => row.externalId), candidates.map((row) => row.externalId));
+});
+
 test("an empty length-limited gateway response is retried inside the AI provider", async () => {
   const maxTokens = [];
   const diagnostics = [];
@@ -260,16 +286,62 @@ test("exhausted seller capacity falls back once to a configured compatible model
   }]);
 });
 
-test("Surplus gets a high-quality default analysis fallback without affecting other gateways", () => {
+
+test("a proven provider timeout falls back once to a configured compatible model", async () => {
+  const requestedModels = [];
+  const diagnostics = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    modelFallbacks: {
+      [openai.DEFAULT_OPENAI_MODELS.economyModel]: ["gpt-5.5"],
+    },
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      requestedModels.push(body.model);
+      if (body.model === openai.DEFAULT_OPENAI_MODELS.economyModel) {
+        const error = new Error("The operation was aborted due to timeout");
+        error.name = "TimeoutError";
+        throw error;
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.deepEqual(requestedModels, [openai.DEFAULT_OPENAI_MODELS.economyModel, "gpt-5.5"]);
+  assert.equal(result.model, "gpt-5.5");
+  assert.deepEqual(diagnostics, [{
+    kind: "model_network_timeout_fallback",
+    operation: "conversation_triage",
+    model: openai.DEFAULT_OPENAI_MODELS.economyModel,
+    fallbackModel: "gpt-5.5",
+  }]);
+});
+
+test("Surplus gets high-quality default analysis and economy fallbacks without affecting other gateways", () => {
   const surplus = openai.openAiModelFallbacksFromEnv({
     OPENAI_BASE_URL: "https://api.surplusintelligence.ai/v1",
     OPENAI_ANALYSIS_MODEL: "gpt-5.6-sol",
+    OPENAI_ECONOMY_MODEL: "gpt-5.6-luna",
   });
   const direct = openai.openAiModelFallbacksFromEnv({
     OPENAI_BASE_URL: "https://api.openai.com/v1",
     OPENAI_ANALYSIS_MODEL: "gpt-5.6-sol",
+    OPENAI_ECONOMY_MODEL: "gpt-5.6-luna",
   });
-  assert.deepEqual(surplus, { "gpt-5.6-sol": ["gpt-5.5"] });
+  assert.deepEqual(surplus, {
+    "gpt-5.6-sol": ["gpt-5.5"],
+    "gpt-5.6-luna": ["gpt-5.5"],
+  });
   assert.deepEqual(direct, {});
 });
 

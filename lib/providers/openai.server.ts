@@ -69,7 +69,7 @@ export type OpenAiProviderDiagnosticEvent =
       retryMaxTokens: number;
     }
   | {
-      kind: "model_capacity_fallback";
+      kind: "model_capacity_fallback" | "model_network_timeout_fallback";
       operation: AiOperation;
       model: string;
       fallbackModel: string;
@@ -794,11 +794,13 @@ type ChatTextResult =
 
 const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
 const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
+const TRIAGE_BATCH_SIZE = 8;
 // Marketplace gateways can temporarily have no seller for an otherwise valid
 // model. Retrying those responses over a short backoff window is cheaper and
 // safer than failing the entire scan after an immediate burst of requests.
 const MARKETPLACE_CAPACITY_RETRY_FLOOR = 5;
 const SURPLUS_DEFAULT_ANALYSIS_FALLBACKS = ["gpt-5.5"] as const;
+const SURPLUS_DEFAULT_ECONOMY_FALLBACKS = ["gpt-5.5"] as const;
 
 function structuredChatSystemPrompt(options: {
   system: string;
@@ -870,6 +872,11 @@ function isMarketplaceCapacityError(payload: unknown, status: number): boolean {
   );
 }
 
+function isNetworkTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "TimeoutError" || /timeout|timed out|aborted due to timeout/i.test(error.message);
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -919,7 +926,12 @@ export function openAiModelFallbacksFromEnv(
     : isSurplusGateway(env.OPENAI_BASE_URL) && models.analysisModel === "gpt-5.6-sol"
       ? [...SURPLUS_DEFAULT_ANALYSIS_FALLBACKS]
       : [];
-  const economyFallbacks = commaSeparatedModels(env.OPENAI_ECONOMY_FALLBACK_MODELS);
+  const configuredEconomyFallbacks = commaSeparatedModels(env.OPENAI_ECONOMY_FALLBACK_MODELS);
+  const economyFallbacks = configuredEconomyFallbacks.length > 0
+    ? configuredEconomyFallbacks
+    : isSurplusGateway(env.OPENAI_BASE_URL) && models.economyModel === "gpt-5.6-luna"
+      ? [...SURPLUS_DEFAULT_ECONOMY_FALLBACKS]
+      : [];
   const result: Record<string, string[]> = {};
   const analysis = analysisFallbacks.filter((model) => model !== models.analysisModel);
   const economy = economyFallbacks.filter((model) => model !== models.economyModel);
@@ -1050,6 +1062,16 @@ export class OpenAiProvider implements AiProvider {
           if (attempt < this.maxRetries) {
             await sleep(Math.min(500 * 2 ** attempt, 5_000));
             continue;
+          }
+          const fallbackModel = models[modelIndex + 1];
+          if (isNetworkTimeoutError(error) && model && fallbackModel) {
+            await this.onDiagnostic?.({
+              kind: "model_network_timeout_fallback",
+              operation,
+              model,
+              fallbackModel,
+            });
+            break;
           }
           throw lastError;
         }
@@ -1338,23 +1360,28 @@ export class OpenAiProvider implements AiProvider {
     if (new Set(expectedIds).size !== expectedIds.length) {
       throw new OpenAiProviderError("Triage input contains duplicate externalIds.");
     }
-    const pending = new Set(expectedIds);
     const collected = new Map<string, TriagedConversation>();
     const attempts: AiProviderResult<TriagedConversation[]>[] = [];
     const retries = Math.max(0, Math.min(request.coverageRetries ?? 2, 3));
 
-    for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
-      const result = await this.triageAttempt(request, pending);
-      attempts.push(result);
-      for (const item of result.value) {
-        collected.set(item.externalId, item);
-        pending.delete(item.externalId);
+    // Keep marketplace requests small enough to finish comfortably inside the
+    // provider timeout. One oversized 25-35 candidate JSON response can time out
+    // after Reddit discovery has already succeeded and waste the whole scan.
+    for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
+      const pending = new Set(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
+      for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
+        const result = await this.triageAttempt(request, pending);
+        attempts.push(result);
+        for (const item of result.value) {
+          collected.set(item.externalId, item);
+          pending.delete(item.externalId);
+        }
       }
-    }
-    if (pending.size > 0) {
-      throw new OpenAiProviderError(
-        `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
-      );
+      if (pending.size > 0) {
+        throw new OpenAiProviderError(
+          `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
+        );
+      }
     }
     const usage = combineTokenUsage(attempts.map((attempt) => attempt.usage));
     return {

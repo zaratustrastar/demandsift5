@@ -1,0 +1,309 @@
+name: Apply runtime queue recovery v2
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - .github/workflows/apply-runtime-queue-recovery-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Apply recovery patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def one(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"{path}: expected one literal match, found {n}")
+              p.write_text(text.replace(old, new, 1))
+
+          def one_re(path, pattern, replacement):
+              p = Path(path)
+              text = p.read_text()
+              updated, n = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if n != 1:
+                  raise SystemExit(f"{path}: expected one regex match, found {n}")
+              p.write_text(updated)
+
+          one(
+              "lib/server/scan-workflow.ts",
+              'export async function runScan(scanId: string): Promise<ScanRecord> {\n  const repository = getStateRepository();\n  const claim = await repository.beginScanRun(scanId);\n  if (claim.state === "missing" || !claim.scan) {\n    throw new ApiError("Scan was not found.", 404, "scan_not_found");\n  }\n  if (claim.state === "complete") return claim.scan;\n  if (claim.state === "running") return claim.scan;\n  const scan = claim.scan;\n',
+              'export async function runScan(\n  scanId: string,\n  options: { resumeRunning?: boolean } = {},\n): Promise<ScanRecord> {\n  const repository = getStateRepository();\n  const claim = await repository.beginScanRun(scanId);\n  if (claim.state === "missing" || !claim.scan) {\n    throw new ApiError("Scan was not found.", 404, "scan_not_found");\n  }\n  if (claim.state === "complete") return claim.scan;\n  if (claim.state === "running" && !options.resumeRunning) return claim.scan;\n  const scan = claim.scan;\n',
+          )
+
+          one_re(
+              "app/api/internal/jobs/[jobId]/execute/route.ts",
+              r'async function executeClaimedScan\(scanId: string\): Promise<void> \{.*?\n\}\n\nfunction executionSnapshot',
+              '''const activeScanExecutions = new Map<string, Promise<void>>();
+
+          async function executeClaimedScan(
+            scanId: string,
+            resumeRunning = false,
+          ): Promise<void> {
+            try {
+              await runScan(scanId, { resumeRunning });
+            } catch (error) {
+              // runScan durably records the failed scan before rejecting. The worker
+              // observes that terminal state through short polling requests, so this
+              // background task must never become an unhandled rejection.
+              if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
+                console.error("Background scan exhausted structured AI recovery.");
+                return;
+              }
+              console.error("Background scan execution failed.", error);
+            }
+          }
+
+          function ensureClaimedScanExecution(
+            scanId: string,
+            resumeRunning = false,
+          ): Promise<void> {
+            const existing = activeScanExecutions.get(scanId);
+            if (existing) return existing;
+            const execution = executeClaimedScan(scanId, resumeRunning);
+            activeScanExecutions.set(scanId, execution);
+            void execution.finally(() => {
+              if (activeScanExecutions.get(scanId) === execution) {
+                activeScanExecutions.delete(scanId);
+              }
+            });
+            return execution;
+          }
+
+          function executionSnapshot''',
+          )
+
+          one_re(
+              "app/api/internal/jobs/[jobId]/execute/route.ts",
+              r'    if \(scan\.status === "complete" \|\| scan\.status === "failed" \|\| scan\.status === "running"\) \{.*?\n    \}\n\n    // The VPS is a persistent Node process, not a request-scoped serverless',
+              '''    if (scan.status === "complete" || scan.status === "failed") {
+              return Response.json(executionSnapshot(job, scan), {
+                status: 200,
+                headers: { "cache-control": "no-store" },
+              });
+            }
+            if (scan.status === "running") {
+              // Repeated worker polls reuse an execution already registered in this
+              // web process. After a web restart the registry is empty, so resume the
+              // persisted run instead of leaving the serial queue blocked forever.
+              void ensureClaimedScanExecution(scan.id, true);
+              return Response.json(executionSnapshot(job, scan), {
+                status: 202,
+                headers: { "cache-control": "no-store" },
+              });
+            }
+
+            // The VPS is a persistent Node process, not a request-scoped serverless''',
+          )
+          one(
+              "app/api/internal/jobs/[jobId]/execute/route.ts",
+              '    void executeClaimedScan(scan.id);\n',
+              '    void ensureClaimedScanExecution(scan.id, false);\n',
+          )
+
+          one_re(
+              "scripts/background-worker.mjs",
+              r'export function jobExecutionConfiguration\(environment = process\.env\) \{.*?\n\}\n\nexport async function claimJob',
+              '''export function jobExecutionConfiguration(environment = process.env) {
+            const timeoutSeconds = boundedNumber(
+              environment.BACKGROUND_JOB_TIMEOUT_SECONDS,
+              1_200,
+              1_200,
+              1_800,
+            );
+            const heartbeatSeconds = boundedNumber(
+              environment.BACKGROUND_JOB_HEARTBEAT_SECONDS,
+              15,
+              5,
+              60,
+            );
+            const configuredStaleSeconds = boundedNumber(
+              environment.BACKGROUND_JOB_LEASE_STALE_SECONDS,
+              90,
+              45,
+              300,
+            );
+            return {
+              timeoutSeconds,
+              heartbeatSeconds,
+              staleSeconds: Math.max(configuredStaleSeconds, heartbeatSeconds * 3),
+            };
+          }
+
+          export async function refreshJobLease(sql, jobId, workerIdValue) {
+            const rows = await sql`
+              UPDATE background_jobs
+              SET locked_at = now(),
+                  updated_at = now()
+              WHERE id = ${jobId}
+                AND status = 'running'
+                AND locked_by = ${workerIdValue}
+              RETURNING id
+            `;
+            return rows.length > 0;
+          }
+
+          export async function maintainJobLease(sql, job, workerIdValue, signal, heartbeatMs) {
+            while (!signal.aborted) {
+              await waitForNextPoll(signal, heartbeatMs);
+              if (signal.aborted) return;
+              try {
+                const refreshed = await refreshJobLease(sql, job.id, workerIdValue);
+                if (!refreshed) {
+                  log("warn", "job_lease_lost", { jobId: job.id });
+                  return;
+                }
+              } catch (error) {
+                log("warn", "job_lease_refresh_failed", {
+                  jobId: job.id,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
+          }
+
+          export async function claimJob''',
+          )
+
+          one_re(
+              "scripts/background-worker.mjs",
+              r'      log\("info", "job_claimed", \{\n        jobId: job\.id,\n        type: job\.type,\n        attempt: job\.attempts,\n        maxAttempts: job\.max_attempts,\n      \}\);\n      try \{\n        const result = await executeScanJob\(job, queueSignal\);\n        await completeJob\(sql, job\);\n        log\("info", "job_succeeded", \{ jobId: job\.id, scanId: result\.scanId \}\);\n      \} catch \(error\) \{\n        const disposition = jobFailureDisposition\(job, error\);\n        await failJob\(sql, job, error, disposition\);\n        log\("error", "job_failed", \{\n          jobId: job\.id,\n          attempt: job\.attempts,\n          retryable: disposition\.retryable,\n          terminal: disposition\.terminal,\n          message: error instanceof Error \? error\.message : String\(error\),\n        \}\);\n      \}',
+              '''      log("info", "job_claimed", {
+                jobId: job.id,
+                type: job.type,
+                attempt: job.attempts,
+                maxAttempts: job.max_attempts,
+              });
+              const leaseController = new AbortController();
+              const leaseSignal = AbortSignal.any([queueSignal, leaseController.signal]);
+              const { heartbeatSeconds } = jobExecutionConfiguration();
+              const leaseTask = maintainJobLease(
+                sql,
+                job,
+                workerId,
+                leaseSignal,
+                heartbeatSeconds * 1_000,
+              );
+              try {
+                const result = await executeScanJob(job, queueSignal);
+                await completeJob(sql, job);
+                log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
+              } catch (error) {
+                const disposition = jobFailureDisposition(job, error);
+                await failJob(sql, job, error, disposition);
+                log("error", "job_failed", {
+                  jobId: job.id,
+                  attempt: job.attempts,
+                  retryable: disposition.retryable,
+                  terminal: disposition.terminal,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              } finally {
+                leaseController.abort("job finished");
+                await leaseTask;
+              }''',
+          )
+
+          one(
+              "deploy/vps.env.example",
+              'BACKGROUND_JOB_POLL_MS=2000\nBACKGROUND_JOB_TIMEOUT_SECONDS=900\nBACKGROUND_JOB_STALE_SECONDS=1200\n',
+              'BACKGROUND_JOB_POLL_MS=2000\nBACKGROUND_JOB_TIMEOUT_SECONDS=900\nBACKGROUND_JOB_HEARTBEAT_SECONDS=15\nBACKGROUND_JOB_LEASE_STALE_SECONDS=90\n',
+          )
+
+          one_re(
+              "tests/scan-pipeline-architecture.test.mjs",
+              r'test\("long-running scans start durably and are observed through short polling requests", \(\) => \{.*?\n\}\);',
+              '''test("long-running scans start durably and recover an orphaned running execution", () => {
+            assert.equal(executorRoute.includes("ReadableStream"), false);
+            assert.match(executorRoute, /activeScanExecutions/);
+            assert.match(executorRoute, /ensureClaimedScanExecution\\(scan\\.id, false\\)/);
+            assert.match(executorRoute, /ensureClaimedScanExecution\\(scan\\.id, true\\)/);
+            assert.match(executorRoute, /status: "starting", complete: false/);
+            assert.match(executorRoute, /export async function GET/);
+            assert.match(executorRoute, /executionSnapshot\\(job, scan\\)/);
+            assert.match(source, /options: \\{ resumeRunning\\?: boolean \\} = \\{\\}/);
+            assert.match(source, /claim\\.state === "running" && !options\\.resumeRunning/);
+          });''',
+          )
+
+          one(
+              "tests/background-worker-monitoring.test.mjs",
+              '  jobExecutionConfiguration,\n  jobFailureDisposition,\n',
+              '  jobExecutionConfiguration,\n  jobFailureDisposition,\n  refreshJobLease,\n',
+          )
+          one_re(
+              "tests/background-worker-monitoring.test.mjs",
+              r'test\("scan execution timeout and stale-lock windows cannot overlap", \(\) => \{.*?\n\}\);',
+              '''test("long scan timeout is independent from the heartbeat lease", () => {
+            assert.deepEqual(jobExecutionConfiguration({}), {
+              timeoutSeconds: 1_200,
+              heartbeatSeconds: 15,
+              staleSeconds: 90,
+            });
+            assert.deepEqual(jobExecutionConfiguration({
+              BACKGROUND_JOB_TIMEOUT_SECONDS: "1800",
+              BACKGROUND_JOB_HEARTBEAT_SECONDS: "20",
+              BACKGROUND_JOB_LEASE_STALE_SECONDS: "120",
+            }), {
+              timeoutSeconds: 1_800,
+              heartbeatSeconds: 20,
+              staleSeconds: 120,
+            });
+          });
+
+          test("job lease heartbeat only refreshes a still-owned running job", async () => {
+            let query = "";
+            const sql = async (strings) => {
+              query = strings.join("?").replace(/\\s+/gu, " ").trim();
+              return [{ id: "job_owned" }];
+            };
+            assert.equal(await refreshJobLease(sql, "job_owned", "worker_owned"), true);
+            assert.match(query, /UPDATE background_jobs SET locked_at = now\\(\\)/u);
+            assert.match(query, /status = 'running'/u);
+            assert.match(query, /locked_by = \\?/u);
+          });''',
+          )
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused recovery tests
+        run: node --test tests/background-worker-monitoring.test.mjs tests/scan-pipeline-architecture.test.mjs
+
+      - name: Run full validation
+        run: |
+          npm run build
+          npm run lint
+          npm test
+
+      - name: Commit to feature branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/server/scan-workflow.ts app/api/internal/jobs/'[jobId]'/execute/route.ts scripts/background-worker.mjs deploy/vps.env.example tests/scan-pipeline-architecture.test.mjs tests/background-worker-monitoring.test.mjs
+          git diff --cached --check
+          git commit -m 'Recover orphaned scan jobs safely'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

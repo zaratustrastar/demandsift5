@@ -1,0 +1,88 @@
+name: Fix browser scan polling resilience
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/fix-browser-polling-resilience-20260815.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Patch browser polling and add regression coverage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('components/ThreadlineExperience.tsx')
+          source = path.read_text()
+
+          type_anchor = 'type AccessLevel = "free" | "pass" | "core";\n'
+          constants = '''type AccessLevel = "free" | "pass" | "core";\n\nconst SCAN_POLL_INTERVAL_MS = 3_000;\nconst SCAN_POLL_BACKOFF_BASE_MS = 1_500;\nconst SCAN_POLL_BACKOFF_MAX_MS = 10_000;\n'''
+          if 'const SCAN_POLL_INTERVAL_MS' not in source:
+              if type_anchor not in source:
+                  raise SystemExit('AccessLevel anchor not found')
+              source = source.replace(type_anchor, constants, 1)
+
+          domain_anchor = '''function safeDomain(value: string) {\n  try {\n    const withProtocol = /^https?:\\/\\//i.test(value) ? value : `https://${value}`;\n    return new URL(withProtocol).hostname.replace(/^www\\./, "");\n  } catch {\n    return "your website";\n  }\n}\n'''
+          helper = domain_anchor + '''\nfunction isTransientPollFailure(error: unknown): boolean {\n  if (error instanceof TypeError) return true;\n  if (!(error instanceof Error)) return false;\n  return /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(error.message);\n}\n'''
+          if 'function isTransientPollFailure' not in source:
+              if domain_anchor not in source:
+                  raise SystemExit('safeDomain anchor not found')
+              source = source.replace(domain_anchor, helper, 1)
+
+          old = '''        while (!cancelled) {\n          const response = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });\n          const latest = (await response.json()) as ApiScanResponse;\n          if (!response.ok) throw new Error(latest.error?.message ?? "The scan could not be updated.");\n          setScanResponse(latest);\n          setScanProgress(latest.scan.progress);\n          if (latest.scan.status === "complete" && latest.report) {\n            setAccessLevel(effectiveAccessLevel(latest.access));\n            setView("report");\n            return;\n          }\n          if (latest.scan.status === "failed") {\n            throw new Error(latest.scan.error ?? "The scan stopped before completion.");\n          }\n          await new Promise<void>((resolve) => {\n            pollTimer = window.setTimeout(resolve, 700);\n          });\n        }\n'''
+
+          new = '''        let transientPollFailures = 0;\n        while (!cancelled) {\n          try {\n            const response = await fetch(\n              `/api/scans/${created.scan.id}?statusOnly=1`,\n              { cache: "no-store" },\n            );\n            if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {\n              throw new TypeError(`Transient scan polling response (${response.status}).`);\n            }\n            const latest = (await response.json()) as ApiScanResponse;\n            if (!response.ok) {\n              throw new Error(latest.error?.message ?? "The scan could not be updated.");\n            }\n            setScanProgress(latest.scan.progress);\n\n            if (latest.scan.status === "complete") {\n              const reportResponse = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });\n              if (\n                reportResponse.status === 408 ||\n                reportResponse.status === 425 ||\n                reportResponse.status === 429 ||\n                reportResponse.status >= 500\n              ) {\n                throw new TypeError(`Transient scan report response (${reportResponse.status}).`);\n              }\n              const completed = (await reportResponse.json()) as ApiScanResponse;\n              if (!reportResponse.ok || !completed.report) {\n                throw new Error(completed.error?.message ?? "The completed scan report could not be loaded.");\n              }\n              setScanResponse(completed);\n              setScanProgress(completed.scan.progress);\n              setAccessLevel(effectiveAccessLevel(completed.access));\n              setView("report");\n              return;\n            }\n            if (latest.scan.status === "failed") {\n              throw new Error(latest.scan.error ?? "The scan stopped before completion.");\n            }\n            transientPollFailures = 0;\n          } catch (pollError) {\n            if (!isTransientPollFailure(pollError)) throw pollError;\n            transientPollFailures += 1;\n            const retryDelay = Math.min(\n              SCAN_POLL_BACKOFF_MAX_MS,\n              SCAN_POLL_BACKOFF_BASE_MS * 2 ** Math.min(transientPollFailures - 1, 3),\n            );\n            await new Promise<void>((resolve) => {\n              pollTimer = window.setTimeout(resolve, retryDelay);\n            });\n            continue;\n          }\n\n          await new Promise<void>((resolve) => {\n            pollTimer = window.setTimeout(resolve, SCAN_POLL_INTERVAL_MS);\n          });\n        }\n'''
+
+          if old not in source:
+              if '?statusOnly=1' not in source or 'transientPollFailures' not in source:
+                  raise SystemExit('Original browser polling block not found')
+          else:
+              source = source.replace(old, new, 1)
+
+          path.write_text(source)
+
+          test = Path('tests/browser-scan-polling-resilience.test.mjs')
+          test.write_text('''import assert from "node:assert/strict";\nimport { readFile } from "node:fs/promises";\nimport test from "node:test";\n\nconst experience = await readFile(\n  new URL("../components/ThreadlineExperience.tsx", import.meta.url),\n  "utf8",\n);\n\nfunction scanLoopSource() {\n  const start = experience.indexOf("async function begin()");\n  const end = experience.indexOf("async function refreshScan", start);\n  assert.ok(start >= 0 && end > start, "browser scan loop must exist");\n  return experience.slice(start, end);\n}\n\ntest("browser polling mirrors the lightweight acceptance status endpoint at a bounded cadence", () => {\n  const loop = scanLoopSource();\n  assert.match(loop, /\\?statusOnly=1/);\n  assert.match(experience, /const SCAN_POLL_INTERVAL_MS = 3_000/);\n  assert.match(loop, /window\\.setTimeout\\(resolve, SCAN_POLL_INTERVAL_MS\\)/);\n  assert.doesNotMatch(loop, /window\\.setTimeout\\(resolve, 700\\)/);\n});\n\ntest("transient transport and proxy failures retry instead of immediately replacing the scan with an error screen", () => {\n  const loop = scanLoopSource();\n  assert.match(experience, /function isTransientPollFailure/);\n  assert.match(loop, /transientPollFailures \+= 1/);\n  assert.match(loop, /SCAN_POLL_BACKOFF_MAX_MS/);\n  assert.match(loop, /if \(!isTransientPollFailure\(pollError\)\) throw pollError/);\n  assert.match(loop, /response\.status === 429/);\n  assert.match(loop, /response\.status >= 500/);\n});\n\ntest("completed status is followed by one full report fetch before rendering", () => {\n  const loop = scanLoopSource();\n  const statusFetch = loop.indexOf("?statusOnly=1");\n  const complete = loop.indexOf('latest.scan.status === "complete"');\n  const reportFetch = loop.indexOf('fetch(`/api/scans/${created.scan.id}`', complete);\n  const reportView = loop.indexOf('setView("report")', reportFetch);\n  assert.ok(statusFetch >= 0 && complete > statusFetch && reportFetch > complete && reportView > reportFetch);\n});\n''')
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify focused regression
+        run: node --test tests/browser-scan-polling-resilience.test.mjs
+
+      - name: Build
+        run: npm run build:node
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Commit validated fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add components/ThreadlineExperience.tsx tests/browser-scan-polling-resilience.test.mjs
+          if git diff --cached --quiet; then
+            echo "Polling resilience fix already present."
+            exit 0
+          fi
+          git commit -m "Make browser scan polling resilient"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

@@ -1,0 +1,336 @@
+name: Repair TVCP scan reliability
+
+on:
+  push:
+    branches:
+      - fix-tvcp-scan-reliability-20260816
+    paths:
+      - .github/workflows/repair-tvcp-scan-reliability.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-tvcp-scan-reliability-20260816
+          fetch-depth: 0
+
+      - name: Patch Reddit recall and triage exhaustion recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          # --- Reddit discovery: actually retrieve recent comments ---
+          path = Path('lib/providers/reddit.server.ts')
+          source = path.read_text()
+
+          old_type = '''type ApifySearchActorInput = {
+            searches: string[];
+            ignoreStartUrls: true;
+            skipComments: true;
+            skipUserPosts: true;
+            skipCommunity: true;
+            includeMediaLinks: false;
+            searchPosts: true;
+            searchComments: true;
+            searchCommunities: false;
+            searchUsers: false;
+            searchMedia: false;
+            sort: "relevance";
+            time: "day" | "week" | "month" | "year" | "all";
+            includeNSFW: false;'''
+          new_type = '''type ApifySearchActorInput = {
+            searches: string[];
+            ignoreStartUrls: true;
+            skipUserPosts: true;
+            skipCommunity: true;
+            includeMediaLinks: false;
+            searchPosts: true;
+            searchComments: true;
+            searchCommunities: false;
+            searchUsers: false;
+            searchMedia: false;
+            sort: "relevance" | "new";
+            time: "day" | "week" | "month" | "year" | "all";
+            postDateLimit?: string;
+            commentDateLimit?: string;
+            includeNSFW: false;'''
+          if old_type not in source:
+              raise SystemExit('Apify search input type anchor changed')
+          source = source.replace(old_type, new_type, 1)
+
+          old_budget = '''    const maxItems = Math.min(
+                this.maximumItems,
+                Math.max(30, Math.min(36, request.limit * 2)),
+              );'''
+          new_budget = '''    const maxItems = Math.min(
+                this.maximumItems,
+                Math.max(40, Math.min(50, request.limit * 2)),
+              );
+              const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
+                ? Date.parse(request.since)
+                : null;
+              const dateLimit = sinceMs === null
+                ? undefined
+                : new Date(sinceMs).toISOString().slice(0, 10);'''
+          if old_budget not in source:
+              raise SystemExit('Apify discovery budget anchor changed')
+          source = source.replace(old_budget, new_budget, 1)
+
+          old_input = '''    const discoveryInput: ApifySearchActorInput = {
+                searches,
+                ignoreStartUrls: true,
+                skipComments: true,
+                skipUserPosts: true,
+                skipCommunity: true,
+                includeMediaLinks: false,
+                searchPosts: true,
+                searchComments: true,
+                searchCommunities: false,
+                searchUsers: false,
+                searchMedia: false,
+                sort: "relevance",
+                time: boundedSearchTime(this.timeRange, request.since),
+                includeNSFW: false,
+                maxItems,
+                // Trudax applies maxPostCount across the whole Actor run, not once per
+                // search phrase. Dividing this by the query count silently starves a
+                // nine-lane scan to only a handful of posts before AI triage can run.
+                // Keep it aligned with the already-bounded global item budget.
+                maxPostCount: maxItems,
+                maxComments: 0,'''
+          new_input = '''    const discoveryInput: ApifySearchActorInput = {
+                searches,
+                ignoreStartUrls: true,
+                skipUserPosts: true,
+                skipCommunity: true,
+                includeMediaLinks: false,
+                searchPosts: true,
+                searchComments: true,
+                searchCommunities: false,
+                searchUsers: false,
+                searchMedia: false,
+                // Recent demand matters more than historic relevance ranking. Trudax's
+                // `time` filter only bounds posts, so give comment search the same
+                // explicit cutoff and do not combine searchComments with skipComments.
+                sort: "new",
+                time: boundedSearchTime(this.timeRange, request.since),
+                ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),
+                includeNSFW: false,
+                maxItems,
+                maxPostCount: maxItems,
+                // Keep traversal bounded while allowing direct recent comment search.
+                maxComments: 3,'''
+          if old_input not in source:
+              raise SystemExit('Apify discovery input anchor changed')
+          source = source.replace(old_input, new_input, 1)
+          path.write_text(source)
+
+          test_path = Path('tests/apify-reddit-provider.test.mjs')
+          test = test_path.read_text()
+          old_assertions = '''  assert.equal(discovery.searchPosts, true);
+            assert.equal(discovery.searchComments, true);
+            assert.equal(discovery.skipComments, true);
+            assert.equal(discovery.includeMediaLinks, false);
+            assert.equal(discovery.maxComments, 0);
+            assert.equal(discovery.maxItems, 36);
+            assert.equal(discovery.maxPostCount, 36);
+            assert.equal(
+              discovery.maxPostCount,
+              discovery.maxItems,
+              "the Actor-wide post cap must not be divided by the number of searches",
+            );
+            assert.equal(startCall.url.searchParams.get("maxItems"), "36");
+            assert.equal(startCall.url.searchParams.get("timeout"), "570");
+            assert.equal(discovery.time, "week");
+            assert.equal(Object.hasOwn(discovery, "postDateLimit"), false);
+            assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);'''
+          new_assertions = '''  assert.equal(discovery.searchPosts, true);
+            assert.equal(discovery.searchComments, true);
+            assert.equal(Object.hasOwn(discovery, "skipComments"), false);
+            assert.equal(discovery.includeMediaLinks, false);
+            assert.equal(discovery.sort, "new");
+            assert.equal(discovery.maxComments, 3);
+            assert.equal(discovery.maxItems, 40);
+            assert.equal(discovery.maxPostCount, 40);
+            assert.equal(startCall.url.searchParams.get("maxItems"), "40");
+            assert.equal(startCall.url.searchParams.get("timeout"), "570");
+            assert.equal(discovery.time, "week");
+            assert.match(discovery.postDateLimit, /^\\d{4}-\\d{2}-\\d{2}$/);
+            assert.equal(discovery.commentDateLimit, discovery.postDateLimit);'''
+          if old_assertions not in test:
+              raise SystemExit('Apify regression assertion anchor changed')
+          test = test.replace(old_assertions, new_assertions, 1)
+          test_path.write_text(test)
+
+          # --- AI triage: split a batch rather than fail the whole scan on length ---
+          path = Path('lib/providers/openai.server.ts')
+          source = path.read_text()
+          if 'const TRIAGE_BATCH_SIZE = 8;' not in source:
+              raise SystemExit('triage batch constant changed')
+          source = source.replace('const TRIAGE_BATCH_SIZE = 8;', 'const TRIAGE_BATCH_SIZE = 4;', 1)
+
+          error_anchor = '''function isRetryableStructuredOutputError(error: unknown): error is OpenAiProviderError {
+            if (!(error instanceof OpenAiProviderError) || error.status !== undefined) return false;
+            if (isMalformedStructuredJson(error)) return true;
+            return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/.test(error.message);
+          }
+'''
+          error_replacement = error_anchor + '''
+          function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderError {
+            return error instanceof OpenAiProviderError
+              && error.status === undefined
+              && /(?:finish_reason=length|incomplete response(?::|.*)\\s*(?:max_tokens|max_output_tokens))/i.test(error.message);
+          }
+'''
+          if error_anchor not in source:
+              raise SystemExit('structured error helper anchor changed')
+          source = source.replace(error_anchor, error_replacement, 1)
+
+          old_loop = '''    // Keep marketplace requests small enough to finish comfortably inside the
+              // provider timeout. One oversized 25-35 candidate JSON response can time out
+              // after Reddit discovery has already succeeded and waste the whole scan.
+              for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
+                const pending = new Set(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
+                for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
+                  const result = await this.triageAttempt(request, pending);
+                  attempts.push(result);
+                  for (const item of result.value) {
+                    collected.set(item.externalId, item);
+                    pending.delete(item.externalId);
+                  }
+                }
+                if (pending.size > 0) {
+                  throw new OpenAiProviderError(
+                    `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
+                  );
+                }
+              }'''
+          new_loop = '''    // Keep marketplace requests small. If even a bounded structured response
+              // exhausts the gateway's output budget, recursively split only that batch.
+              // A single oversized provider response must never discard the rest of a scan.
+              const processBatch = async (batchIds: readonly string[]): Promise<void> => {
+                const pending = new Set(batchIds);
+                try {
+                  for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
+                    const result = await this.triageAttempt(request, pending);
+                    attempts.push(result);
+                    for (const item of result.value) {
+                      collected.set(item.externalId, item);
+                      pending.delete(item.externalId);
+                    }
+                  }
+                } catch (error) {
+                  if (isStructuredLengthExhaustion(error) && pending.size > 1) {
+                    const remaining = [...pending];
+                    const middle = Math.ceil(remaining.length / 2);
+                    await processBatch(remaining.slice(0, middle));
+                    await processBatch(remaining.slice(middle));
+                    return;
+                  }
+                  throw error;
+                }
+                if (pending.size > 0) {
+                  throw new OpenAiProviderError(
+                    `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
+                  );
+                }
+              };
+
+              for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
+                await processBatch(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
+              }'''
+          if old_loop not in source:
+              raise SystemExit('triage loop anchor changed')
+          source = source.replace(old_loop, new_loop, 1)
+          path.write_text(source)
+
+          test_path = Path('tests/openai-intelligence-pipeline.test.mjs')
+          test = test_path.read_text()
+          if 'assert.deepEqual(calls.map((ids) => ids.length), [8, 8, 1]);' not in test:
+              raise SystemExit('triage batch regression anchor changed')
+          test = test.replace(
+              'assert.deepEqual(calls.map((ids) => ids.length), [8, 8, 1]);',
+              'assert.deepEqual(calls.map((ids) => ids.length), [4, 4, 4, 4, 1]);',
+              1,
+          )
+
+          marker = 'test("an empty length-limited gateway response is retried inside the AI provider", async () => {'
+          if marker not in test:
+              raise SystemExit('OpenAI length regression insertion anchor changed')
+          regression = r'''test("triage splits a persistently length-limited batch instead of failing the scan", async () => {
+            const calls = [];
+            const provider = new openai.OpenAiProvider({
+              apiKey: "test-key",
+              apiStyle: "chat",
+              fetchImpl: async (_url, init) => {
+                const body = JSON.parse(init.body);
+                const user = JSON.parse(body.messages[1].content);
+                const ids = user.candidates.map((row) => row.externalId);
+                calls.push(ids);
+                if (ids.length > 2) {
+                  return new Response(JSON.stringify({
+                    id: "chat_exhausted",
+                    choices: [{ finish_reason: "length", message: { content: "" } }],
+                    usage: { prompt_tokens: 10, completion_tokens: body.max_tokens },
+                  }), { status: 200, headers: { "content-type": "application/json" } });
+                }
+                return chatResponse({ triage: ids.map(triageItem) });
+              },
+            });
+
+            const candidates = [candidate("a"), candidate("b"), candidate("c"), candidate("d")];
+            const result = await provider.triageConversations({
+              business,
+              candidates,
+              models: openai.DEFAULT_OPENAI_MODELS,
+              coverageRetries: 0,
+            });
+
+            assert.deepEqual(calls.map((ids) => ids.length), [4, 4, 4, 2, 2]);
+            assert.deepEqual(result.value.map((row) => row.externalId), ["a", "b", "c", "d"]);
+          });
+
+          '''
+          test = test.replace(marker, regression + marker, 1)
+          test_path.write_text(test)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused regressions
+        run: >-
+          node --test
+          tests/apify-reddit-provider.test.mjs
+          tests/openai-intelligence-pipeline.test.mjs
+          tests/browser-scan-polling-resilience.test.mjs
+          tests/reddit-intelligence-pipeline.test.mjs
+
+      - name: Build
+        run: npm run build:node
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Commit validated repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts lib/providers/openai.server.ts tests/apify-reddit-provider.test.mjs tests/openai-intelligence-pipeline.test.mjs
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'No source changes required.'
+            exit 0
+          fi
+          git commit -m 'Harden TVCP Reddit recall and AI triage'
+          git push origin HEAD:fix-tvcp-scan-reliability-20260816

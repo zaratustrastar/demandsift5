@@ -45,7 +45,7 @@ jobs:
 
       - name: Focused Reddit provider regressions
         working-directory: target
-        run: node --test tests/reddit-provider.test.mjs
+        run: node --test tests/apify-reddit-provider.test.mjs
 
       - name: Build
         working-directory: target
@@ -65,7 +65,7 @@ jobs:
           set -Eeuo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lib/providers/reddit.server.ts tests/reddit-provider.test.mjs
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
           git diff --cached --check
           git commit -m "Preserve narrow qualifiers in Reddit search planning"
           git push origin HEAD:feature/reddit-intelligence-pipeline

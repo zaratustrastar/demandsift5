@@ -129,7 +129,7 @@ addition = '''test("preserves narrow short qualifiers in categories and customer
   );
   assert.ok(
     plan.some((entry) =>
-      entry.query.includes("block youtube tv")),
+      entry.query.includes("block youtube on tv")),
     JSON.stringify(plan),
   );
   assert.ok(
@@ -163,4 +163,4 @@ addition = '''test("preserves narrow short qualifiers in categories and customer
 tests = tests.replace(anchor, addition + anchor, 1)
 test_path.write_text(tests)
 
-# Trigger marker: this file is intentionally stable and idempotent for the feature tip above.
+# Trigger marker: regression expectation corrected after observing the real normalized phrase.

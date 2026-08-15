@@ -14,6 +14,10 @@ import styles from "./ThreadlineExperience.module.css";
 type View = "landing" | "scanning" | "restoring" | "report" | "error";
 type AccessLevel = "free" | "pass" | "core";
 
+const SCAN_POLL_INTERVAL_MS = 3_000;
+const SCAN_POLL_BACKOFF_BASE_MS = 1_500;
+const SCAN_POLL_BACKOFF_MAX_MS = 10_000;
+
 const disconnectedReddit: RedditConnectionStatus = {
   configured: false,
   connected: false,
@@ -72,6 +76,12 @@ function safeDomain(value: string) {
   } catch {
     return "your website";
   }
+}
+
+function isTransientPollFailure(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (!(error instanceof Error)) return false;
+  return /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(error.message);
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -534,22 +544,61 @@ export function ThreadlineExperience() {
           return;
         }
 
+        let transientPollFailures = 0;
         while (!cancelled) {
-          const response = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });
-          const latest = (await response.json()) as ApiScanResponse;
-          if (!response.ok) throw new Error(latest.error?.message ?? "The scan could not be updated.");
-          setScanResponse(latest);
-          setScanProgress(latest.scan.progress);
-          if (latest.scan.status === "complete" && latest.report) {
-            setAccessLevel(effectiveAccessLevel(latest.access));
-            setView("report");
-            return;
+          try {
+            const response = await fetch(
+              `/api/scans/${created.scan.id}?statusOnly=1`,
+              { cache: "no-store" },
+            );
+            if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
+              throw new TypeError(`Transient scan polling response (${response.status}).`);
+            }
+            const latest = (await response.json()) as ApiScanResponse;
+            if (!response.ok) {
+              throw new Error(latest.error?.message ?? "The scan could not be updated.");
+            }
+            setScanProgress(latest.scan.progress);
+
+            if (latest.scan.status === "complete") {
+              const reportResponse = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });
+              if (
+                reportResponse.status === 408 ||
+                reportResponse.status === 425 ||
+                reportResponse.status === 429 ||
+                reportResponse.status >= 500
+              ) {
+                throw new TypeError(`Transient scan report response (${reportResponse.status}).`);
+              }
+              const completed = (await reportResponse.json()) as ApiScanResponse;
+              if (!reportResponse.ok || !completed.report) {
+                throw new Error(completed.error?.message ?? "The completed scan report could not be loaded.");
+              }
+              setScanResponse(completed);
+              setScanProgress(completed.scan.progress);
+              setAccessLevel(effectiveAccessLevel(completed.access));
+              setView("report");
+              return;
+            }
+            if (latest.scan.status === "failed") {
+              throw new Error(latest.scan.error ?? "The scan stopped before completion.");
+            }
+            transientPollFailures = 0;
+          } catch (pollError) {
+            if (!isTransientPollFailure(pollError)) throw pollError;
+            transientPollFailures += 1;
+            const retryDelay = Math.min(
+              SCAN_POLL_BACKOFF_MAX_MS,
+              SCAN_POLL_BACKOFF_BASE_MS * 2 ** Math.min(transientPollFailures - 1, 3),
+            );
+            await new Promise<void>((resolve) => {
+              pollTimer = window.setTimeout(resolve, retryDelay);
+            });
+            continue;
           }
-          if (latest.scan.status === "failed") {
-            throw new Error(latest.scan.error ?? "The scan stopped before completion.");
-          }
+
           await new Promise<void>((resolve) => {
-            pollTimer = window.setTimeout(resolve, 700);
+            pollTimer = window.setTimeout(resolve, SCAN_POLL_INTERVAL_MS);
           });
         }
       } catch (error) {

@@ -11,6 +11,7 @@ import type {
   RedditEnrichmentRequest,
   RedditEnrichmentResponse,
   RedditProvider,
+  RedditSearchConcepts,
   RedditSearchPlanEntry,
   RedditSearchRequest,
   RedditSearchResponse,
@@ -227,6 +228,193 @@ const PROBLEM_TOKEN_STOP_WORDS = new Set([
   "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
 ]);
 
+/**
+ * Cross-industry concept synonyms. Keys are canonical concept phrases; values
+ * are the surface forms real posts actually use. This exists because a market
+ * qualifier is rarely written the same way twice: someone shopping for an
+ * Android TV parental control writes "television", "smart TV" or "Chromecast"
+ * far more often than the vendor's own category label.
+ *
+ * Business-specific vocabulary is derived from the crawled profile at runtime;
+ * this table only supplies the generic equivalences that no profile states.
+ */
+type ConceptKind = "market" | "problem";
+
+interface ConceptEntry {
+  kind: ConceptKind;
+  variants: readonly string[];
+}
+
+/**
+ * Cross-industry concept synonyms, each tagged with the kind of evidence it
+ * supplies. The tagging matters: a category label such as "Android TV parental
+ * control app" contains both a market concept ("tv") and a problem concept
+ * ("parental control"). If they are pooled, a phone thread mentioning parental
+ * controls satisfies the market requirement and the gate is back where it
+ * started. Market evidence and problem evidence must come from different
+ * concepts to be independent.
+ *
+ * Business-specific vocabulary is derived from the crawled profile at runtime;
+ * this table only supplies generic equivalences no profile states.
+ */
+const CONCEPT_SYNONYMS: ReadonlyMap<string, ConceptEntry> = new Map([
+  // Market concepts - devices, platforms, domains.
+  ["tv", { kind: "market", variants: ["tv", "tvs", "television", "televisions", "smart tv", "google tv", "android tv", "apple tv", "fire tv", "firestick", "chromecast", "roku", "set top box", "streaming box", "living room tv"] }],
+  ["vr", { kind: "market", variants: ["vr", "virtual reality", "headset", "oculus", "meta quest", "quest"] }],
+  ["ar", { kind: "market", variants: ["ar", "augmented reality"] }],
+  ["pc", { kind: "market", variants: ["pc", "desktop", "windows machine"] }],
+  ["os", { kind: "market", variants: ["os", "operating system"] }],
+  ["phone", { kind: "market", variants: ["phone", "phones", "mobile", "smartphone", "handset"] }],
+  ["tablet", { kind: "market", variants: ["tablet", "tablets", "ipad"] }],
+  ["ai", { kind: "market", variants: ["ai", "artificial intelligence", "llm", "llms", "gpt", "machine learning", "chatbot"] }],
+  ["hr", { kind: "market", variants: ["hr", "human resources", "people ops", "hris"] }],
+  ["crm", { kind: "market", variants: ["crm", "customer relationship", "sales pipeline"] }],
+  ["seo", { kind: "market", variants: ["seo", "search rankings", "organic traffic", "serp"] }],
+  ["ui", { kind: "market", variants: ["ui", "user interface"] }],
+  ["ux", { kind: "market", variants: ["ux", "user experience", "usability"] }],
+  ["qa", { kind: "market", variants: ["qa", "quality assurance"] }],
+  ["bi", { kind: "market", variants: ["bi", "business intelligence", "dashboards"] }],
+  ["b2b", { kind: "market", variants: ["b2b", "business to business"] }],
+  // Problem and use-case concepts.
+  ["parental control", { kind: "problem", variants: ["parental control", "parental controls", "parental lock", "child lock", "kids mode", "restricted mode", "content restrictions", "block apps", "lock apps"] }],
+  ["screen time", { kind: "problem", variants: ["screen time", "screentime", "time limit", "time limits", "daily limit", "usage limit", "watching too long", "too much time", "hours a day", "outside allowed hours"] }],
+  ["kids watching", { kind: "problem", variants: ["kids watching", "kid watching", "children watching", "kids watch", "kid watches", "children watch", "my kids watch", "my son watches", "my daughter watches"] }],
+  ["block youtube", { kind: "problem", variants: ["block youtube", "blocking youtube", "restrict youtube", "youtube kids"] }],
+  ["time tracking", { kind: "problem", variants: ["time tracking", "timesheet", "log hours"] }],
+  ["scheduling", { kind: "problem", variants: ["scheduling", "book a time", "appointments"] }],
+  ["invoicing", { kind: "problem", variants: ["invoicing", "invoices", "billing", "get paid"] }],
+]);
+
+/** Generic words that cannot on their own identify a market. */
+const GENERIC_CONCEPT_TOKENS = new Set([
+  "app", "apps", "business", "company", "online", "platform", "product",
+  "service", "services", "software", "solution", "solutions", "system",
+  "systems", "tool", "tools", "best", "top", "free", "new",
+]);
+
+const BUILT_IN_INTENT_VARIANTS: readonly string[] = [
+  "recommend", "recommendation", "recommendations", "looking for", "any suggestions",
+  "suggestions", "alternative", "alternatives", "how can i", "how do i", "need a",
+  "need help", "what do you use", "anyone using", "which tool", "worth it",
+];
+
+/** Adjacent word pairs, so "android tv" survives as a unit. */
+function adjacentBigrams(value: string): string[] {
+  const words = normalizeSearchText(value).split(" ").filter(Boolean);
+  const pairs: string[] = [];
+  for (let index = 0; index + 1 < words.length; index += 1) {
+    pairs.push(`${words[index]} ${words[index + 1]}`);
+  }
+  return pairs;
+}
+
+/** Function words that carry no concept meaning on their own. */
+const CONCEPT_FUNCTION_WORDS = new Set([
+  "a", "an", "and", "any", "are", "as", "at", "be", "by", "do", "for", "from",
+  "get", "has", "have", "how", "in", "is", "it", "its", "my", "no", "not", "of",
+  "on", "or", "our", "so", "the", "their", "this", "to", "too", "up", "was",
+  "what", "when", "why", "with", "you", "your",
+]);
+
+/** Singular form, so "parental controls" reaches the "parental control" entry. */
+function singular(word: string): string {
+  if (word.length > 3 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 3 && word.endsWith("ses")) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
+function lemmatize(phrase: string): string {
+  return phrase.split(" ").map(singular).join(" ");
+}
+
+/**
+ * Every lexicon key a phrase touches. Both the literal and the lemmatised form
+ * are tried: profiles say "parental controls" while the lexicon is keyed on the
+ * singular, and missing that hit used to collapse the phrase to bare tokens.
+ */
+function lexiconHits(normalized: string): Array<[string, ConceptEntry]> {
+  const candidates = [normalized, ...adjacentBigrams(normalized), ...normalized.split(" ")];
+  const hits: Array<[string, ConceptEntry]> = [];
+  for (const candidate of candidates) {
+    for (const key of [candidate, lemmatize(candidate)]) {
+      const entry = CONCEPT_SYNONYMS.get(key);
+      if (entry && !hits.some(([seen]) => seen === key)) hits.push([key, entry]);
+    }
+  }
+  return hits;
+}
+
+/**
+ * Expand grounded phrases into the surface forms a real post might use,
+ * restricted to one kind of evidence. Tokens belonging to the opposite kind
+ * are excluded so the two requirements stay independent.
+ */
+function conceptVariants(phrases: readonly string[], kind: ConceptKind): string[] {
+  const variants = new Set<string>();
+  const add = (value: string) => {
+    const normalized = normalizeSearchText(value);
+    if (normalized.length >= 2) variants.add(normalized);
+  };
+
+  for (const phrase of phrases) {
+    const normalized = normalizeSearchText(phrase);
+    if (!normalized) continue;
+
+    const hits = lexiconHits(normalized);
+    const matching = hits.filter(([, entry]) => entry.kind === kind);
+    for (const [, entry] of matching) {
+      for (const variant of entry.variants) add(variant);
+    }
+
+    // Words already claimed by the opposite kind must not leak across.
+    const claimedByOther = new Set(
+      hits
+        .filter(([, entry]) => entry.kind !== kind)
+        .flatMap(([key]) => key.split(" ")),
+    );
+    const distinctive = normalized
+      .split(" ")
+      .filter(
+        (token) =>
+          token.length >= 2 &&
+          !PROBLEM_TOKEN_STOP_WORDS.has(token) &&
+          !GENERIC_CONCEPT_TOKENS.has(token) &&
+          !claimedByOther.has(token),
+      );
+
+    if (matching.length > 0) continue;
+
+    // No lexicon hit: fall back to the profile's own wording. Bigrams are used
+    // in preference to single tokens, because one bare token ("android") is
+    // usually the neighbouring market rather than this problem.
+    const bigrams = adjacentBigrams(normalized).filter((bigram) => {
+      const words = bigram.split(" ");
+      if (words.some((word) => claimedByOther.has(word))) return false;
+      if (words.some((word) => CONCEPT_FUNCTION_WORDS.has(word))) return false;
+      if (words.every((word) => GENERIC_CONCEPT_TOKENS.has(word))) return false;
+      return true;
+    });
+    if (bigrams.length > 0) {
+      for (const bigram of bigrams) add(bigram);
+      continue;
+    }
+    for (const token of distinctive.filter((token) => !CONCEPT_FUNCTION_WORDS.has(token))) {
+      add(token);
+    }
+  }
+  return [...variants].slice(0, 40);
+}
+
+/** True when any variant appears in the text as a whole word or phrase. */
+function matchesAnyVariant(text: string, variants: readonly string[]): boolean {
+  const padded = ` ${text} `;
+  return variants.some((variant) => {
+    if (!variant) return false;
+    return padded.includes(` ${variant} `);
+  });
+}
+
 function problemTokens(value: string): string[] {
   return normalizeSearchText(value)
     .split(" ")
@@ -252,9 +440,12 @@ function boundedPlanEntry(
   lane: RedditSearchLane,
   query: string,
   seed?: string,
+  concepts?: RedditSearchConcepts,
 ): RedditSearchPlanEntry | null {
   const cleaned = query.replace(/\s+/g, " ").trim().slice(0, 300);
-  return cleaned.length >= 2 ? { lane, query: cleaned, ...(seed ? { seed } : {}) } : null;
+  return cleaned.length >= 2
+    ? { lane, query: cleaned, ...(seed ? { seed } : {}), ...(concepts ? { concepts } : {}) }
+    : null;
 }
 
 /**
@@ -372,8 +563,62 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
 
   const seenQueries = new Set<string>();
 
+  /**
+   * Market evidence is shared by every entry and comes from the category the
+   * business actually sells into. Problem evidence is specific to the seed the
+   * entry was built from, so each search demands its own use case rather than
+   * any use case.
+   */
+  const marketVariants = conceptVariants(
+    [...categories.slice(0, 2), ...productTerms.slice(0, 2)],
+    "market",
+  );
+  const intentVariants = [
+    ...new Set([...conceptVariants(request.queries.buyerIntent ?? [], "problem"), ...BUILT_IN_INTENT_VARIANTS]),
+  ];
+
+  /**
+   * Problem evidence is the union of the business's use-case vocabulary rather
+   * than only the seed that produced this query. A thread about screen time is
+   * relevant to a parental-control product even when the search that surfaced
+   * it was seeded from a different pain. Precision still comes from the market
+   * requirement; seed specificity continues to influence score, not admission.
+   */
+  const problemVariants = conceptVariants(
+    [
+      ...problems.slice(0, 6),
+      ...jobs.slice(0, 4),
+      ...categories.slice(0, 2),
+    ],
+    "problem",
+  );
+
+  /**
+   * Concept gating applies only where the market has a distinguishing concept -
+   * a device, platform or domain that posts actually name ("tv", "hr", "ai").
+   * That is precisely where token counting failed, because the one qualifier
+   * separating two markets was outvoted by shared generic words.
+   *
+   * A category like "project management software" has no such qualifier: buyers
+   * describe the pain without ever naming the category, so demanding market
+   * evidence in the text would discard real demand. Those profiles keep the
+   * existing token behaviour.
+   */
+  const hasDistinguishingMarket = [...categories.slice(0, 2), ...productTerms.slice(0, 2)].some(
+    (phrase) =>
+      lexiconHits(normalizeSearchText(phrase)).some(([, entry]) => entry.kind === "market"),
+  );
+
+  const conceptsFor = (seed?: string): RedditSearchConcepts | undefined => {
+    if (!seed || !hasDistinguishingMarket || marketVariants.length === 0) return undefined;
+    const seedProblem = conceptVariants([seed], "problem");
+    const problem = [...new Set([...problemVariants, ...seedProblem])];
+    if (problem.length === 0) return undefined;
+    return { market: marketVariants, problem, intent: intentVariants };
+  };
+
   const push = (lane: DemandLane, query: string, seed?: string) => {
-    const entry = boundedPlanEntry(lane, query, seed);
+    const entry = boundedPlanEntry(lane, query, seed, conceptsFor(seed));
     if (!entry) return;
 
     const key = normalizeSearchText(entry.query);
@@ -558,7 +803,7 @@ export function buildApifyRedditSearches(request: RedditSearchRequest): string[]
   return buildApifyRedditSearchPlan(request).map((entry) => entry.query);
 }
 
-function searchPlanMatches(
+export function searchPlanMatches(
   title: string | undefined,
   body: string,
   plan: readonly RedditSearchPlanEntry[],
@@ -602,6 +847,7 @@ function searchPlanMatches(
       entry.lane === "competitor_switching" ||
       entry.lane === "switching" ||
       entry.lane === "brand_competitor_mentions";
+    const isBrandLane = entry.lane === "brand_competitor_mentions";
     const isDemandLane =
       entry.lane === "direct_buying_intent" ||
       entry.lane === "explicit_demand" ||
@@ -614,7 +860,42 @@ function searchPlanMatches(
           ? seedTokens.length
           : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));
 
-    if (seed.length >= 4 && text.includes(seed)) {
+    const concepts = entry.concepts;
+    if (concepts && concepts.market.length > 0) {
+      /**
+       * Concept gate. Counting how many seed tokens appear cannot tell one
+       * market from its neighbour - "android tv parental control app" matches
+       * an Android *phone* thread on most of its tokens, and requiring "2 of N"
+       * let exactly that through. Require the two things that actually make a
+       * conversation ours: evidence of the market, and evidence of the problem.
+       * Each accepts synonyms, so "television" or "screen time" still count.
+       */
+      const marketMatched = matchesAnyVariant(text, concepts.market);
+      if (!marketMatched) return [];
+
+      // Concepts add requirements; they never relax existing ones. A competitor
+      // or brand lane still has to see the name itself, otherwise market plus
+      // generic intent would admit any on-topic chatter.
+      if ((isCompetitorLane || isBrandLane) && matched < seedTokens.length) return [];
+
+      const problemMatched =
+        concepts.problem.length === 0 || matchesAnyVariant(text, concepts.problem);
+      const intentMatched = matchesAnyVariant(text, concepts.intent ?? []);
+
+      // Naming a competitor or the brand is itself use-case evidence, so those
+      // lanes may substitute buying intent for an explicit problem statement.
+      const problemSatisfied =
+        problemMatched || ((isCompetitorLane || isBrandLane) && intentMatched);
+      if (!problemSatisfied) return [];
+
+      const exactSeed = seed.length >= 4 && text.includes(seed);
+      seedScore =
+        (exactSeed ? 4 : 0) +
+        2 + // market evidence
+        (problemMatched ? 2 : 0) +
+        (intentMatched ? 1 : 0) +
+        Math.min(matched, 3);
+    } else if (seed.length >= 4 && text.includes(seed)) {
       seedScore = seedTokens.length + 4;
     } else {
       if (matched < required) return [];

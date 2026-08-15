@@ -163,10 +163,30 @@ export interface RedditSearchRequest {
   since?: string;
 }
 
+/**
+ * Concept evidence a candidate must show for a plan entry to match.
+ *
+ * Token counting cannot distinguish a market from its neighbour: "android tv
+ * parental control app" overlaps an Android *phone* thread on most of its
+ * tokens, and the one token that separates the two markets carries no more
+ * weight than the rest. Concepts express the requirement directly - market
+ * evidence AND problem evidence - and each concept accepts synonyms, so a
+ * thread saying "television" or "screen time" still matches.
+ */
+export interface RedditSearchConcepts {
+  /** Market/category variants. At least one must appear in the candidate. */
+  market: string[];
+  /** Problem or use-case variants. At least one must appear. */
+  problem: string[];
+  /** Buying-intent variants. Never required; contributes to score only. */
+  intent?: string[];
+}
+
 export interface RedditSearchPlanEntry {
   lane: RedditSearchLane;
   query: string;
   seed?: string;
+  concepts?: RedditSearchConcepts;
 }
 
 export type ProviderRejectionReason =

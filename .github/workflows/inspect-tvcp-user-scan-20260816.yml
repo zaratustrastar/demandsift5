@@ -15,17 +15,18 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Read loopback-only TVCP production diagnostics
+      - name: Read authenticated TVCP production diagnostics
         shell: bash
         run: |
           set -Eeuo pipefail
           app_host='demandsift.143-244-154-139.sslip.io'
+          diagnostic_key='DStvcp-9wP4-kH72-zQe8-fR3v-Xm61-aC0N'
           tmp="$(mktemp)"
           trap 'rm -f "$tmp"' EXIT
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 45); do
             code="$(curl --silent --show-error --output "$tmp" --write-out '%{http_code}' \
               --resolve "$app_host:443:127.0.0.1" \
-              "https://$app_host/internal-vps-diagnostics/tvcp" || true)"
+              "https://$app_host/internal-vps-diagnostics/tvcp?key=$diagnostic_key" || true)"
             if [ "$code" = "200" ]; then
               python3 - "$tmp" <<'PY'
           import json, sys

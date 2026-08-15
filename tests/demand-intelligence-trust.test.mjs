@@ -73,7 +73,17 @@ test("market-intelligence review has a bounded full-context floor independent of
   assert.equal(/minimumFullContextReviews\(lookbackDays\)/.test(workflow), false);
   // Enrichment must be over-selected so one miss cannot fail a healthy scan.
   assert.match(workflow, /enrichmentSelectionTarget/);
-  assert.match(workflow, /allowedEnrichmentFailures/);
+  // Misses are recovered by enriching a replacement candidate rather than by
+  // tolerating a shortfall, so the confidence target is met and not lowered.
+  assert.match(workflow, /const replacementCandidate =/);
+  assert.match(workflow, /verifiedContextCount\(\) < requiredFullContextReviews/);
+  // A shortfall degrades to a limited-coverage result, never a definitive zero.
+  assert.match(workflow, /coverageLimited/);
+  assert.equal(
+    /allowedEnrichmentFailures/.test(workflow),
+    false,
+    "the failure-tolerance helper was superseded by replacement enrichment",
+  );
   assert.match(workflow, /intelligenceCoverageReviews/);
   assert.match(pipeline, /selectCandidatesForIntelligenceReview/);
   assert.match(pipeline, /const laneOrder: RedditSearchLane\[\]/);

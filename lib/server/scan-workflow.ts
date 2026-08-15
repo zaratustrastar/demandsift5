@@ -925,8 +925,10 @@ export async function runScan(
       ...intelligenceReviewCandidates,
     ];
     let intelligenceCoverageReviews = intelligenceReviewCandidates.length;
+    // Review depth is chosen independently of the lookback window, so
+    // narrowing the scan to 7 days cannot quietly halve verification quality.
     const requiredFullContextReviews = Math.min(
-      minimumFullContextReviews(lookbackDays),
+      requiredReviews,
       cleaned.survivors.length,
       enrichmentBudget(),
     );

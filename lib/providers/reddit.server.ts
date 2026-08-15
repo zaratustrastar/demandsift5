@@ -69,7 +69,6 @@ type ApifyRedditItem = {
 type ApifySearchActorInput = {
   searches: string[];
   ignoreStartUrls: true;
-  skipComments: true;
   skipUserPosts: true;
   skipCommunity: true;
   includeMediaLinks: false;
@@ -78,8 +77,10 @@ type ApifySearchActorInput = {
   searchCommunities: false;
   searchUsers: false;
   searchMedia: false;
-  sort: "relevance";
+  sort: "relevance" | "new";
   time: "day" | "week" | "month" | "year" | "all";
+  postDateLimit?: string;
+  commentDateLimit?: string;
   includeNSFW: false;
   maxItems: number;
   maxPostCount: number;
@@ -1628,15 +1629,20 @@ export class ApifyRedditTestProvider implements RedditProvider {
     const searches = searchPlan.map((entry) => entry.query);
     const maxItems = Math.min(
       this.maximumItems,
-      Math.max(30, Math.min(36, request.limit * 2)),
+      Math.max(40, Math.min(50, request.limit * 2)),
     );
+    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
+      ? Date.parse(request.since)
+      : null;
+    const dateLimit = sinceMs === null
+      ? undefined
+      : new Date(sinceMs).toISOString().slice(0, 10);
     const subreddit = request.subreddits?.length === 1
       ? request.subreddits[0]?.replace(/^r\//i, "").trim()
       : undefined;
     const discoveryInput: ApifySearchActorInput = {
       searches,
       ignoreStartUrls: true,
-      skipComments: true,
       skipUserPosts: true,
       skipCommunity: true,
       includeMediaLinks: false,
@@ -1645,16 +1651,17 @@ export class ApifyRedditTestProvider implements RedditProvider {
       searchCommunities: false,
       searchUsers: false,
       searchMedia: false,
-      sort: "relevance",
+      // Recent demand matters more than historic relevance ranking. Trudax's
+      // `time` filter only bounds posts, so give comment search the same
+      // explicit cutoff and never combine searchComments with skipComments.
+      sort: "new",
       time: boundedSearchTime(this.timeRange, request.since),
+      ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),
       includeNSFW: false,
       maxItems,
-      // Trudax applies maxPostCount across the whole Actor run, not once per
-      // search phrase. Dividing this by the query count silently starves a
-      // nine-lane scan to only a handful of posts before AI triage can run.
-      // Keep it aligned with the already-bounded global item budget.
       maxPostCount: maxItems,
-      maxComments: 0,
+      // Keep traversal bounded while allowing direct recent comment search.
+      maxComments: 3,
       maxCommunitiesCount: 0,
       maxUserCount: 0,
       scrollTimeout: 20,
@@ -1676,9 +1683,6 @@ export class ApifyRedditTestProvider implements RedditProvider {
     const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 600_000));
     const payload = await this.runActor(discoveryInput, discoveryTimeoutMs);
     const rejectedByReason = emptyProviderRejections();
-    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
-      ? Date.parse(request.since)
-      : null;
     const parsed: ApifyCandidate[] = [];
     for (const value of payload) {
       const result = candidateFromApify(value, searchPlan);

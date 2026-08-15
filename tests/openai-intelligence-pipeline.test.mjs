@@ -157,8 +157,41 @@ test("triage splits large candidate sets into bounded provider requests", async 
     coverageRetries: 0,
   });
 
-  assert.deepEqual(calls.map((ids) => ids.length), [8, 8, 1]);
+  assert.deepEqual(calls.map((ids) => ids.length), [4, 4, 4, 4, 1]);
   assert.deepEqual(result.value.map((row) => row.externalId), candidates.map((row) => row.externalId));
+});
+
+test("triage splits a persistently length-limited batch instead of failing the scan", async () => {
+  const calls = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      calls.push(ids);
+      if (ids.length > 2) {
+        return new Response(JSON.stringify({
+          id: "chat_exhausted",
+          choices: [{ finish_reason: "length", message: { content: "" } }],
+          usage: { prompt_tokens: 10, completion_tokens: body.max_tokens },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+
+  const candidates = [candidate("a"), candidate("b"), candidate("c"), candidate("d")];
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.deepEqual(calls.map((ids) => ids.length), [4, 4, 4, 2, 2]);
+  assert.deepEqual(result.value.map((row) => row.externalId), ["a", "b", "c", "d"]);
 });
 
 test("an empty length-limited gateway response is retried inside the AI provider", async () => {

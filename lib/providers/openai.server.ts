@@ -802,7 +802,7 @@ type ChatTextResult =
 
 const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
 const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
-const TRIAGE_BATCH_SIZE = 8;
+const TRIAGE_BATCH_SIZE = 4;
 // Marketplace gateways can temporarily have no seller for an otherwise valid
 // model. Retrying those responses over a short backoff window is cheaper and
 // safer than failing the entire scan after an immediate burst of requests.
@@ -867,6 +867,12 @@ function isRetryableStructuredOutputError(error: unknown): error is OpenAiProvid
   if (!(error instanceof OpenAiProviderError) || error.status !== undefined) return false;
   if (isMalformedStructuredJson(error)) return true;
   return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/.test(error.message);
+}
+
+function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderError {
+  return error instanceof OpenAiProviderError
+    && error.status === undefined
+    && /(?:finish_reason=length|incomplete response(?::|.*)\s*(?:max_tokens|max_output_tokens))/i.test(error.message);
 }
 
 function apiErrorMessage(payload: unknown, status: number): string {
@@ -1380,24 +1386,39 @@ export class OpenAiProvider implements AiProvider {
     const attempts: AiProviderResult<TriagedConversation[]>[] = [];
     const retries = Math.max(0, Math.min(request.coverageRetries ?? 2, 3));
 
-    // Keep marketplace requests small enough to finish comfortably inside the
-    // provider timeout. One oversized 25-35 candidate JSON response can time out
-    // after Reddit discovery has already succeeded and waste the whole scan.
-    for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
-      const pending = new Set(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
-      for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
-        const result = await this.triageAttempt(request, pending);
-        attempts.push(result);
-        for (const item of result.value) {
-          collected.set(item.externalId, item);
-          pending.delete(item.externalId);
+    // Keep marketplace requests small. If even a bounded structured response
+    // exhausts the gateway's output budget, recursively split only that batch.
+    // One oversized provider response must never discard the rest of a scan.
+    const processBatch = async (batchIds: readonly string[]): Promise<void> => {
+      const pending = new Set(batchIds);
+      try {
+        for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
+          const result = await this.triageAttempt(request, pending);
+          attempts.push(result);
+          for (const item of result.value) {
+            collected.set(item.externalId, item);
+            pending.delete(item.externalId);
+          }
         }
+      } catch (error) {
+        if (isStructuredLengthExhaustion(error) && pending.size > 1) {
+          const remaining = [...pending];
+          const middle = Math.ceil(remaining.length / 2);
+          await processBatch(remaining.slice(0, middle));
+          await processBatch(remaining.slice(middle));
+          return;
+        }
+        throw error;
       }
       if (pending.size > 0) {
         throw new OpenAiProviderError(
           `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
         );
       }
+    };
+
+    for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
+      await processBatch(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
     }
     const usage = combineTokenUsage(attempts.map((attempt) => attempt.usage));
     return {

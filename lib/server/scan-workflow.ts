@@ -16,12 +16,14 @@ import {
   isRelevantMarketConversation,
   legacyClassificationFromDeep,
   opportunityRankScore,
+  researchScore,
   potentialCustomerIntentFromQualification,
   selectCandidatesForEnrichment,
   selectCandidatesForIntelligenceReview,
   selectZeroResultAuditCandidates,
 } from "@/lib/intelligence/reddit-pipeline";
 import { contentFingerprint, isUsefulSearchPhrase } from "@/lib/intelligence/opportunity-ranking";
+import { clusterThemes } from "@/lib/intelligence/theme-clustering";
 import {
   DEFAULT_PREFILTER_FLOOR,
   cosineSimilarity,
@@ -40,6 +42,7 @@ import type {
   Provenance,
   ReplyRecord,
   ScanBusinessProfile,
+  ConversationThemeRecord,
   ScanDiagnostics,
   ScanRecord,
   ScanResult,
@@ -1138,6 +1141,46 @@ export async function runScan(
       };
     }));
 
+    /**
+     * Recurring themes are aggregated from the whole relevant corpus rather
+     * than from qualified leads, so a pain reported by people who will never
+     * buy still shapes the research view. A conversation contributes to the
+     * struggle set, the request set, or both, matching how it was labelled.
+     */
+    const themeWeight = (qualification: DeepQualification): number =>
+      researchScore(qualification);
+    const themeInputs = relevantDeepRows.flatMap((row) => {
+      const qualification = row.qualification;
+      const text = [
+        qualification.problemSummary,
+        row.conversation.title,
+        row.conversation.body,
+      ]
+        .filter((value): value is string => Boolean(value && value.trim()))
+        .join(" ")
+        .slice(0, 2_000);
+      const sourceId = row.conversation.provenance.id;
+      const weight = themeWeight(qualification);
+
+      const isStruggle =
+        qualification.intelligenceTags.includes("problem_signal") ||
+        qualification.intelligenceTags.includes("workaround") ||
+        qualification.demandSignals.includes("pain");
+      const isRequest =
+        qualification.intelligenceTags.includes("product_feedback") ||
+        qualification.demandSignals.includes("explicit_demand");
+
+      return [
+        ...(isStruggle ? [{ sourceId, text, kind: "struggle" as const, weight }] : []),
+        ...(isRequest ? [{ sourceId, text, kind: "request" as const, weight }] : []),
+      ];
+    });
+
+    const conversationThemes: ConversationThemeRecord[] = [
+      ...clusterThemes(themeInputs, "struggle", { maxThemes: 5, minimumConversations: 2 }),
+      ...clusterThemes(themeInputs, "request", { maxThemes: 4, minimumConversations: 2 }),
+    ].map((theme) => ({ id: createId("theme"), ...theme }));
+
     const rawOpportunities: OpportunityRecord[] = deepRows.flatMap((row) => {
       const { conversation, qualification } = row;
       // A public acquisition opportunity must be both a plausible customer and
@@ -1289,7 +1332,9 @@ export async function runScan(
           ...fallbackInsightSet.insights.filter((fallback) =>
             !generatedInsights.some((generatedInsight) => generatedInsight.title === fallback.title),
           ),
-        ].slice(0, 3);
+          // The report shows 3-5 market findings; the cap was 3, which discarded
+          // grounded insights the model had already evidenced.
+        ].slice(0, 5);
 
         const generatedCompetitor = generated.value.competitorSignals.find((signal) =>
           relevantDeepRows.some((row) => {
@@ -1500,6 +1545,7 @@ export async function runScan(
     scan.result = {
       profile,
       insights: insightSet.insights,
+      conversationThemes,
       marketIntelligence,
       competitorWeakness: insightSet.weakness,
       opportunities,

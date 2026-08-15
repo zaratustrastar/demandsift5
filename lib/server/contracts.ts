@@ -298,9 +298,23 @@ export type ScanDiagnostics = {
   repliesGenerated: number;
 };
 
+/**
+ * A recurring theme across the relevant corpus, always carrying the sources
+ * that support it so the report can show evidence under every aggregation.
+ */
+export type ConversationThemeRecord = {
+  id: string;
+  label: string;
+  kind: "struggle" | "request";
+  conversationCount: number;
+  sourceIds: string[];
+};
+
 export type ScanResult = {
   profile: ScanBusinessProfile;
   insights: DemandInsightRecord[];
+  /** Aggregated pains and requests derived from the relevant corpus. */
+  conversationThemes: ConversationThemeRecord[];
   marketIntelligence: MarketIntelligenceRecord[];
   competitorWeakness: CompetitorWeaknessRecord;
   opportunities: OpportunityRecord[];

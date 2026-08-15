@@ -230,6 +230,11 @@ export async function presentScan(scan: ScanRecord) {
     report: {
       profile: result.profile,
       insights: visibleInsights,
+      // Themes are aggregations over the relevant corpus. Older stored results
+      // predate them, so an absent field is an empty list rather than an error.
+      conversationThemes: (result.conversationThemes ?? []).filter(
+        (theme) => theme.sourceIds.length > 0,
+      ),
       relevantConversations: visibleRelevantConversations.map((conversation) =>
         publicRelevantConversation(conversation, redditSourceById.get(conversation.sourceId))
       ),

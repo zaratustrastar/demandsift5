@@ -28,6 +28,46 @@ jobs:
           set -Eeuo pipefail
           python3 .github/scripts/apply_mvp_transparency_recovery.py
           sed -i 's/    let selectedForEnrichment = \[/    const selectedForEnrichment = [/' lib/server/scan-workflow.ts
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/demand-intelligence-trust.test.mjs")
+          text = path.read_text()
+          old = '''test("context coverage counts only successful provider enrichment and incomplete floors fail closed", async () => {
+            const [workflow, presenter, dashboard] = await Promise.all([
+              source("lib/server/scan-workflow.ts"),
+              source("lib/server/presenter.ts"),
+              source("components/demand-intelligence/ProductDashboard.tsx"),
+            ]);
+            assert.match(workflow, /enrichment\.diagnostics\.enriched < requiredFullContextReviews/);
+            assert.match(workflow, /reddit_enrichment_failed/);
+            assert.match(workflow, /hasVerifiedThreadContext/);
+            assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
+            assert.match(dashboard, /additional Reddit thread context/);
+            assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
+          });
+          '''
+          new = '''test("context coverage counts only verified enrichment and degrades to limited coverage after bounded recovery", async () => {
+            const [workflow, presenter, dashboard] = await Promise.all([
+              source("lib/server/scan-workflow.ts"),
+              source("lib/server/presenter.ts"),
+              source("components/demand-intelligence/ProductDashboard.tsx"),
+            ]);
+            assert.match(workflow, /verifiedContextCount\(\) < requiredFullContextReviews/);
+            assert.match(workflow, /enrichmentReplacementAttempts/);
+            assert.match(workflow, /coverageLimited/);
+            assert.match(workflow, /hasVerifiedThreadContext/);
+            assert.doesNotMatch(workflow, /throw new ApiError\(detail, 502, "reddit_enrichment_failed"\)/);
+            assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
+            assert.match(dashboard, /additional Reddit thread context/);
+            assert.match(dashboard, /not a definitive zero/);
+            assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
+          });
+          '''
+          if old not in text:
+              raise SystemExit("missing old context-coverage trust test")
+          path.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -62,6 +102,7 @@ jobs:
             components/demand-intelligence/ProductDashboard.tsx \
             components/ThreadlineExperience.tsx \
             tests/scan-pipeline-architecture.test.mjs \
+            tests/demand-intelligence-trust.test.mjs \
             tests/mvp-scan-transparency.test.mjs
           if git diff --cached --quiet; then
             echo "No implementation changes to commit."

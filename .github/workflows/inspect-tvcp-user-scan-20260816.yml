@@ -15,19 +15,13 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Inspect release wrapper and known TVCP scan
+      - name: Inspect safe privileged diagnostic permissions
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "wrapper_path=$(readlink -f /usr/local/sbin/demandsift-release || true)"
-          ls -l /usr/local/sbin/demandsift-release || true
-          if [ -r /usr/local/sbin/demandsift-release ]; then
-            grep -nE 'diagnose|scan-status|recent|case.*command_name|allowed commands' /usr/local/sbin/demandsift-release || true
-          fi
-          echo '--- known TVCP scan status ---'
-          sudo -n /usr/local/sbin/demandsift-release scan-status scan_2826862b83b8424c98f252577242bf38 || true
-          echo '--- known TVCP scan aggregate diagnostics ---'
-          sudo -n /usr/local/sbin/demandsift-release diagnose scan_2826862b83b8424c98f252577242bf38 || true
-          echo '--- production env metadata only ---'
-          stat -c '%A %U:%G %n' /opt/demandsift5/deploy/vps.env 2>/dev/null || true
-          stat -c '%A %U:%G %n' /opt/demandsift5/deploy/compose.vps.yaml 2>/dev/null || true
+          sudo -n -l || true
+          echo '--- installed wrapper diagnostic implementation ---'
+          sed -n '115,170p' /usr/local/sbin/demandsift-release || true
+          echo '--- source checkout wrapper metadata ---'
+          stat -c '%A %U:%G %n' /opt/demandsift5-pr1/deploy/demandsift-release 2>/dev/null || true
+          stat -c '%A %U:%G %n' /opt/demandsift5/deploy/demandsift-release 2>/dev/null || true

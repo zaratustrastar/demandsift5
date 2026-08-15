@@ -22,51 +22,48 @@ jobs:
           ref: feature/reddit-intelligence-pipeline
           fetch-depth: 0
 
-      - name: Apply implementation
+      - name: Fix verifier runtime ordering
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 .github/scripts/apply_mvp_transparency_recovery.py
-          sed -i 's/    let selectedForEnrichment = \[/    const selectedForEnrichment = [/' lib/server/scan-workflow.ts
           python3 - <<'PY'
           from pathlib import Path
-
-          path = Path("tests/demand-intelligence-trust.test.mjs")
+          path = Path("lib/server/scan-workflow.ts")
           text = path.read_text()
-          old = '''test("context coverage counts only successful provider enrichment and incomplete floors fail closed", async () => {
-            const [workflow, presenter, dashboard] = await Promise.all([
-              source("lib/server/scan-workflow.ts"),
-              source("lib/server/presenter.ts"),
-              source("components/demand-intelligence/ProductDashboard.tsx"),
-            ]);
-            assert.match(workflow, /enrichment\.diagnostics\.enriched < requiredFullContextReviews/);
-            assert.match(workflow, /reddit_enrichment_failed/);
-            assert.match(workflow, /hasVerifiedThreadContext/);
-            assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
-            assert.match(dashboard, /additional Reddit thread context/);
-            assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
-          });
-          '''
-          new = '''test("context coverage counts only verified enrichment and degrades to limited coverage after bounded recovery", async () => {
-            const [workflow, presenter, dashboard] = await Promise.all([
-              source("lib/server/scan-workflow.ts"),
-              source("lib/server/presenter.ts"),
-              source("components/demand-intelligence/ProductDashboard.tsx"),
-            ]);
-            assert.match(workflow, /verifiedContextCount\(\) < requiredFullContextReviews/);
-            assert.match(workflow, /enrichmentReplacementAttempts/);
-            assert.match(workflow, /coverageLimited/);
-            assert.match(workflow, /hasVerifiedThreadContext/);
-            assert.doesNotMatch(workflow, /throw new ApiError\(detail, 502, "reddit_enrichment_failed"\)/);
-            assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
-            assert.match(dashboard, /additional Reddit thread context/);
-            assert.match(dashboard, /not a definitive zero/);
-            assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
-          });
-          '''
-          if old not in text:
-              raise SystemExit("missing old context-coverage trust test")
-          path.write_text(text.replace(old, new, 1))
+          late = '''    const deepRows = [...deepById.values()];
+    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
+      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
+'''
+          if late not in text:
+              raise SystemExit("late verifier fragment not found")
+          text = text.replace(late, '''    const deepRows = [...deepById.values()];
+''', 1)
+          anchor = '''    const requiredFullContextReviews = Math.min(
+      minimumFullContextReviews(lookbackDays),
+      cleaned.survivors.length,
+      enrichmentBudget(),
+    );
+
+'''
+          replacement = '''    const requiredFullContextReviews = Math.min(
+      minimumFullContextReviews(lookbackDays),
+      cleaned.survivors.length,
+      enrichmentBudget(),
+    );
+    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
+      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
+
+'''
+          if anchor not in text:
+              raise SystemExit("coverage anchor not found")
+          text = text.replace(anchor, replacement, 1)
+          path.write_text(text)
+
+          test_path = Path("tests/scan-pipeline-architecture.test.mjs")
+          tests = test_path.read_text()
+          if "thread context verifier is initialized before enrichment recovery uses it" not in tests:
+              tests += '''\n\ntest("thread context verifier is initialized before enrichment recovery uses it", () => {\n  const verifier = position("const hasVerifiedThreadContext =");\n  const initialEnrichment = position("const initialEnrichment = await redditProvider.enrich(");\n  const absorb = position("const absorbEnrichment =");\n  assert.ok(verifier < initialEnrichment);\n  assert.ok(verifier < absorb);\n});\n'''
+              test_path.write_text(tests)
           PY
 
       - name: Set up Node
@@ -87,26 +84,16 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Commit implementation
+      - name: Commit runtime fix
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name "zaratustrastar"
           git config user.email "114620206+zaratustrastar@users.noreply.github.com"
-          git add \
-            lib/server/contracts.ts \
-            lib/server/scan-workflow.ts \
-            lib/server/presenter.ts \
-            components/demand-intelligence/types.ts \
-            components/demand-intelligence/from-scan.ts \
-            components/demand-intelligence/ProductDashboard.tsx \
-            components/ThreadlineExperience.tsx \
-            tests/scan-pipeline-architecture.test.mjs \
-            tests/demand-intelligence-trust.test.mjs \
-            tests/mvp-scan-transparency.test.mjs
+          git add lib/server/scan-workflow.ts tests/scan-pipeline-architecture.test.mjs
           if git diff --cached --quiet; then
-            echo "No implementation changes to commit."
+            echo "No runtime changes to commit."
             exit 0
           fi
-          git commit -m "Keep partial scans useful and expose MVP scan trace"
+          git commit -m "Fix enrichment recovery runtime ordering"
           git push origin HEAD:feature/reddit-intelligence-pipeline

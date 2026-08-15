@@ -277,7 +277,13 @@ export interface OpportunityClassification {
   buyerIntent: number;
   customerProblem: number;
   competitorComplaint: number;
-  semanticSimilarity: number;
+  /**
+   * LLM-estimated fit between the conversation and what the product solves.
+   * Named `semanticSimilarity` historically, which invited confusion with the
+   * embedding cosine distance computed during the prefilter. Those are
+   * different measurements: this is a judgement, that is a vector angle.
+   */
+  solutionFit: number;
   recommendedAction: RecommendedAction;
   communityRisk: CommunityRisk;
   problemSummary?: string;

@@ -530,15 +530,95 @@ function timingScore(value: DeepQualification["timing"]): number {
 }
 
 /** Ranking is intentionally downstream of categorical lead qualification. */
+function percent(value: number): number {
+  return Math.round(Math.max(0, Math.min(value, 1)) * 100);
+}
+
+function communityRiskPenalty(risk: DeepQualification["communityRisk"]): number {
+  if (risk === "high") return 0.6;
+  if (risk === "medium") return 0.25;
+  if (risk === "unknown") return 0.1;
+  return 0;
+}
+
+/**
+ * A conversation is useful in several independent ways, so it gets several
+ * independent scores.
+ *
+ * A single blended "opportunity" number forced these into competition: a
+ * thread that is excellent to reply to but whose author is not a buyer scored
+ * the same as a strong lead in a community hostile to promotion, and neither
+ * could be ranked properly for its actual purpose. Replyability in particular
+ * used to contribute 20% of lead score, which inflated leads purely because
+ * they were easy to answer.
+ */
+export function leadScore(qualification: DeepQualification): number {
+  return percent(
+    fitScore(qualification.productFit) * 0.3 +
+      intentScore(qualification.intent) * 0.25 +
+      fitScore(qualification.painSeverity) * 0.2 +
+      timingScore(qualification.timing) * 0.15 +
+      fitScore(qualification.evidenceQuality) * 0.1,
+  );
+}
+
+/**
+ * How worthwhile it is to reply, independent of whether the author is a buyer.
+ * Community hostility is a direct penalty rather than a separate flag so a
+ * risky thread cannot rank highly merely because it is on-topic.
+ */
+export function replyScore(qualification: DeepQualification): number {
+  const base =
+    fitScore(qualification.replyability) * 0.4 +
+    fitScore(qualification.productFit) * 0.2 +
+    fitScore(qualification.painSeverity) * 0.2 +
+    fitScore(qualification.evidenceQuality) * 0.2;
+  return percent(base * (1 - communityRiskPenalty(qualification.communityRisk)));
+}
+
+/**
+ * Competitor intelligence value. Requires a named competitor in the source:
+ * competitor claims stay grounded, so an unnamed grumble scores zero.
+ */
+export function competitorScore(qualification: DeepQualification): number {
+  if (!qualification.competitorMentioned) return 0;
+  const switching = qualification.demandSignals.includes("switching") ? 0.35 : 0;
+  const tagged = qualification.intelligenceTags.includes("competitor_intelligence") ? 0.2 : 0;
+  const objection = qualification.intelligenceTags.includes("objection") ? 0.1 : 0;
+  return percent(
+    0.2 + switching + tagged + objection + fitScore(qualification.evidenceQuality) * 0.15,
+  );
+}
+
+/**
+ * Value as market/customer research. Deliberately independent of lead value so
+ * insights can be drawn from the whole relevant corpus rather than only from
+ * qualified buyers.
+ */
+export function researchScore(qualification: DeepQualification): number {
+  const researchTags = [
+    "problem_signal",
+    "product_feedback",
+    "market_insight",
+    "workaround",
+    "objection",
+  ] as const;
+  const tagCoverage =
+    researchTags.filter((tag) => qualification.intelligenceTags.includes(tag)).length /
+    researchTags.length;
+  return percent(
+    tagCoverage * 0.45 +
+      fitScore(qualification.evidenceQuality) * 0.3 +
+      fitScore(qualification.painSeverity) * 0.25,
+  );
+}
+
+/**
+ * @deprecated Retained so stored reports and existing call sites keep working.
+ * New code should use the purpose-specific score it actually means.
+ */
 export function opportunityRankScore(qualification: DeepQualification): number {
-  const score =
-    fitScore(qualification.productFit) * 0.25 +
-    intentScore(qualification.intent) * 0.2 +
-    fitScore(qualification.painSeverity) * 0.15 +
-    timingScore(qualification.timing) * 0.1 +
-    fitScore(qualification.evidenceQuality) * 0.1 +
-    fitScore(qualification.replyability) * 0.2;
-  return Math.round(Math.max(0, Math.min(score, 1)) * 100);
+  return leadScore(qualification);
 }
 
 export function potentialCustomerIntentFromQualification(
@@ -567,7 +647,7 @@ export function legacyClassificationFromDeep(
     buyerIntent,
     customerProblem: fitScore(qualification.painSeverity),
     competitorComplaint,
-    semanticSimilarity: 0,
+    solutionFit: 0,
     recommendedAction: qualification.shouldReply
       ? "reply_helpfully"
       : qualification.leadStatus === "potential_customer"

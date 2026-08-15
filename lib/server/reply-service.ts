@@ -128,7 +128,7 @@ function qualifiedOpportunity(
       buyerIntent: opportunity.intent === "actively-looking" ? 1 : opportunity.intent === "evaluating" ? 0.75 : 0.5,
       customerProblem: opportunity.painSeverity === "high" ? 1 : opportunity.painSeverity === "medium" ? 0.65 : 0.4,
       competitorComplaint: opportunity.competitorComplaint ? 1 : 0,
-      semanticSimilarity: 0,
+      solutionFit: 0,
       recommendedAction: opportunity.shouldReply ? "reply_helpfully" : "monitor",
       communityRisk: opportunity.communityRisk,
       problemSummary: opportunity.customerProblem,

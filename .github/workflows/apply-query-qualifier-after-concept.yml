@@ -1,0 +1,54 @@
+name: Apply Reddit query qualifier preservation
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-query-qualifier-after-concept.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    if: github.actor == 'zaratustrastar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Preserve critical short qualifiers in Reddit queries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'H4sIAN1KgGoC/9VXW2/bNhR+9684FYpWwhy5zdA9JHCHrguw7tIYidE9GFlKS7TNWhJVknLiJf7vO4cUJcVxUGfFgC5AaJLnwnPjd6iZkjmUzCwyMQWRl1IZGOGy1ythaGdhgKRBqeRKpFzpgeJpKkysuVpxFRsdRD3Drw1yl7HiLL2kVRj1ejLDORMZUoIgAAikCvoQCE3jlLtRFHM34QX9ZryYm8WapgW/oh9tmDLNRDczK9i7iI5Rdw95//OjUCvLaY9ZCrOcUyufShrndlzY08TMjvYgYTlzu5+786TTJy1dW7mqtKPVfcVb18QMmkAW0oAogAJ8hPIAignN4XytDc9ProUJ0WBZHlxJlQIrkoVUVmYmqyJt80Q/mKoyYwkPvfI++CD24WWdPUz6NOO5i+qsKhIjZAH17lgueaHDFcsqfgTaKAxT5CeTC7hBCxU3lSrQBpWzTPzNzzlTyWJMBWLlIutFrMuMbIegXs9EZrgKQ0NHRDB8DXYWu5TB6yF8D8+ewZPR2elPv5/8cTk+/e3k/eX5+HR0+efp2c/n8YLpWjg67m18hXy77hw+1p26KrxHexTGHTcfUxy1oKuPZuFLJGGGz6Va+5uXyEIb8Lsn16XiWlOYh/BAbCkeN9ZoJ2uchcNdiUH3iRG9d/HQPobD4RBeRD5BQXDcUah5xhPDU3LOCelMoHMv+nAYdRlTrhMlSoOBaVhnokg7mbPcAIO/wh+PWFne4r++xViZGdbErZYzc8UUv9U28LdGyswOOno6iA3XptbUt3o63nSOpkrwJseiSLIKiR2GKGo8istKL7okp7COQsP1SYrCliORNw1gfrOps4yDAYzQAOoywAtZzRcwV1SqmMjG8owV84rNOZ4MS85LyJlacgOfK7yfM4HtKvbKTq5ZXmboQ/CmSJUUKYw/YONTvDAsI/uNkhlgPgPIK/SFrkYis4yVmtR7NQGrpRtREon3K7dX/89yu6nNIMmGtQWvV21BTrbJB/DyAr1r1R3XuniGYf1CHW/2reYaDZuy2AMOd5T5IzDRSztQbFceFTW3+bfXqq0Lno79BaFFHYntdtE2jHoJcK8g6G9XS+yQ9+km/Zq/Obip1B/ad9UXfbl72YkU3VNUZ8jq2ucV0+p/RFZIymXEzSgbZXylhOHuUUoD7tHN0M3r1q4G6FfCS3Mwx1weOBQ54PTixW17leL8k3vqanPZGICSd968VpCu83N7+4LPFcdyRAuLguCyrAFNAxa6EQmih17Qi/sebAXPKWS1uiZg9dEuaq0l3w1BUZB7X3toH8LIYzrTKGViuXRlaFZJOUKVsZY5D0OEPrW2vHYWuzMJyoNMyiWdixAFHizNajfU1hX46/np+9i1FDFbh/4sS7XX/F8Y02JZsBSphitmkgXZhbYgRkIm8VUffa0BHL+B1g+F48lD4bjTO/YzoeevXs6WnAjUlT3wNMhQf5tNK5Glb0rUc2Y33DuVpEKP5WSh4PqoAXege5xWiRlzleP+JKg75lv6PPEnXfQb9qlCd3Ywd1hqjW+dsD1uskNTgv0WE6lGDkisvoKQgsGUG0RCxBuD30fdw6s1V+8Kg2EkbsUTmee8SBk96XWXEwklNwK7CuntEPi1rY/GhYa08ZNM5ALVH75wGxuXBkpk6HIxaZGfX5e2PV2AnMHE8k+CN+8wI4mqBH1Cgm/X9uOzWxViJ1dtzyT45QwLh2VrvLv6QSULtYup0fHhDAzCrAOE+v2wrWKldvA0GkZvIZcFxZHoVLhb4mWyzWBlL6I7T8TSla6v4raEXcvfumdg+b+IOT74TUP7+PTGK94cwdObrctFSqPNx86zaNOj7BKIemjVdxtHjbVR7x82QlXUMREAAA==' | base64 -d | gzip -d > /tmp/apply-query-qualifiers.py
+          python3 /tmp/apply-query-qualifiers.py
+          git diff --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - run: npm ci
+      - run: node --test tests/concept-gate-market-evidence.test.mjs
+      - run: node --test tests/apify-reddit-provider.test.mjs
+      - run: node --test tests/reddit-intelligence-pipeline.test.mjs
+      - run: npm run build
+      - run: npm run lint
+      - run: node --test tests/*.test.mjs
+      - run: git diff --check
+
+      - name: Commit fully verified qualifier preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts tests/concept-gate-market-evidence.test.mjs
+          git commit -m "Preserve critical qualifiers in Reddit search planning"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

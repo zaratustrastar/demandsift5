@@ -30,30 +30,12 @@ jobs:
           from pathlib import Path
           path = Path("lib/server/scan-workflow.ts")
           text = path.read_text()
-          late = '''    const deepRows = [...deepById.values()];
-    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
-      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
-'''
+          late = "    const deepRows = [...deepById.values()];\n    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>\n      conversation.sourceMode !== \"apify-test\" || conversation.provenance.metadata?.enriched === true;\n"
           if late not in text:
               raise SystemExit("late verifier fragment not found")
-          text = text.replace(late, '''    const deepRows = [...deepById.values()];
-''', 1)
-          anchor = '''    const requiredFullContextReviews = Math.min(
-      minimumFullContextReviews(lookbackDays),
-      cleaned.survivors.length,
-      enrichmentBudget(),
-    );
-
-'''
-          replacement = '''    const requiredFullContextReviews = Math.min(
-      minimumFullContextReviews(lookbackDays),
-      cleaned.survivors.length,
-      enrichmentBudget(),
-    );
-    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
-      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
-
-'''
+          text = text.replace(late, "    const deepRows = [...deepById.values()];\n", 1)
+          anchor = "    const requiredFullContextReviews = Math.min(\n      minimumFullContextReviews(lookbackDays),\n      cleaned.survivors.length,\n      enrichmentBudget(),\n    );\n\n"
+          replacement = "    const requiredFullContextReviews = Math.min(\n      minimumFullContextReviews(lookbackDays),\n      cleaned.survivors.length,\n      enrichmentBudget(),\n    );\n    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>\n      conversation.sourceMode !== \"apify-test\" || conversation.provenance.metadata?.enriched === true;\n\n"
           if anchor not in text:
               raise SystemExit("coverage anchor not found")
           text = text.replace(anchor, replacement, 1)
@@ -62,7 +44,7 @@ jobs:
           test_path = Path("tests/scan-pipeline-architecture.test.mjs")
           tests = test_path.read_text()
           if "thread context verifier is initialized before enrichment recovery uses it" not in tests:
-              tests += '''\n\ntest("thread context verifier is initialized before enrichment recovery uses it", () => {\n  const verifier = position("const hasVerifiedThreadContext =");\n  const initialEnrichment = position("const initialEnrichment = await redditProvider.enrich(");\n  const absorb = position("const absorbEnrichment =");\n  assert.ok(verifier < initialEnrichment);\n  assert.ok(verifier < absorb);\n});\n'''
+              tests += "\n\ntest(\"thread context verifier is initialized before enrichment recovery uses it\", () => {\n  const verifier = position(\"const hasVerifiedThreadContext =\");\n  const initialEnrichment = position(\"const initialEnrichment = await redditProvider.enrich(\");\n  const absorb = position(\"const absorbEnrichment =\");\n  assert.ok(verifier < initialEnrichment);\n  assert.ok(verifier < absorb);\n});\n"
               test_path.write_text(tests)
           PY
 

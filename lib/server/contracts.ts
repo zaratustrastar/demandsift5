@@ -262,6 +262,11 @@ export type ScanDiagnostics = {
   providerRejectedByReason: Record<string, number>;
   deterministicRejectedByReason: Record<string, number>;
   deterministicSurvivors: number;
+  /** Embedding prefilter: how the pool was narrowed before LLM classification. */
+  embeddingScored: number;
+  embeddingDroppedBelowFloor: number;
+  embeddingDroppedOverBudget: number;
+  classifiedCandidates: number;
   reusedUnchanged: number;
   reusedTriageOnly: number;
   submittedForTriage: number;

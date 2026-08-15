@@ -81,12 +81,39 @@ test("acquisition retrieves a corpus rather than a handful of candidates", () =>
   assert.equal(source.includes("limit: 25,"), false);
 });
 
-test("active scan does not use embeddings or legacy deterministic ranking", () => {
-  assert.equal(source.includes("embedTextsWithOpenAi"), false);
-  assert.equal(source.includes(".embed("), false);
+test("active scan does not use legacy deterministic ranking", () => {
   assert.equal(source.includes("rankConversations("), false);
   assert.equal(source.includes("candidateDiscoveryScore"), false);
   assert.equal(source.includes("semanticSimilarities"), false);
+});
+
+/**
+ * Embeddings were previously banned here because the pipeline only handled
+ * 30-50 candidates and cosine similarity used as a relevance *decision* loses
+ * indirectly expressed pain. Acquisition is now 200-300 candidates, so they
+ * return strictly as a high-recall prefilter: they order candidates and drop
+ * the obviously unrelated tail, while the LLM still decides relevance.
+ */
+test("embeddings prefilter candidates before classification but never decide relevance", () => {
+  const prefilter = position("prioritizeCandidates(");
+  const triage = position("aiProvider.triageConversations(");
+  assert.ok(prefilter < triage, "prefilter must run before LLM classification");
+
+  // The prefilter only narrows the pool; it must not set relevance or score.
+  assert.equal(source.includes("relevant: similarity"), false);
+  assert.equal(source.includes("solutionFit: similarity"), false);
+
+  // Cheap deterministic cleaning still runs first.
+  assert.ok(position("cleanDiscoveryCandidates(") < prefilter);
+
+  // Failure of the embedding layer must not drop candidates.
+  assert.match(source, /let prefilteredSurvivors = cleaned\.survivors;/);
+  assert.match(source, /Embedding prefilter unavailable/);
+});
+
+test("the classified pool is bounded so acquisition volume cannot blow up LLM cost", () => {
+  assert.match(source, /triageCandidateBudget\(\)/);
+  assert.match(source, /classifiedCandidates: prefilteredSurvivors\.length/);
 });
 
 test("active scan does not use batch reply generation", () => {

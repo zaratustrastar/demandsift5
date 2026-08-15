@@ -22,6 +22,11 @@ import {
   selectZeroResultAuditCandidates,
 } from "@/lib/intelligence/reddit-pipeline";
 import { contentFingerprint, isUsefulSearchPhrase } from "@/lib/intelligence/opportunity-ranking";
+import {
+  DEFAULT_PREFILTER_FLOOR,
+  cosineSimilarity,
+  prioritizeCandidates,
+} from "@/lib/intelligence/embedding-prefilter";
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
 import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
@@ -523,6 +528,36 @@ function buildFallbackInsights(
  * relevance qualification, so retrieval optimises for useful business-relevant
  * conversations rather than leads alone.
  */
+/**
+ * Maximum candidates forwarded to LLM relevance classification. The embedding
+ * prefilter keeps this bounded while acquisition volume grows.
+ */
+function triageCandidateBudget(): number {
+  const value = Number(process.env.REDDIT_TRIAGE_BUDGET ?? 120);
+  return Number.isFinite(value) ? Math.max(20, Math.min(Math.trunc(value), 400)) : 120;
+}
+
+function embeddingPrefilterFloor(): number {
+  const value = Number(process.env.REDDIT_EMBEDDING_PREFILTER_FLOOR);
+  return Number.isFinite(value) ? Math.max(0, Math.min(value, 0.5)) : DEFAULT_PREFILTER_FLOOR;
+}
+
+/** What the business is about, embedded once and compared to each candidate. */
+function businessEmbeddingQuery(business: BusinessUnderstanding): string {
+  const parts = [
+    business.productCategory.value,
+    ...business.productTerms.value,
+    ...business.customerProblemLanguage.value,
+    ...business.problemsSolved.value,
+    ...(business.jobsToBeDone?.value ?? []),
+  ].filter((value) => typeof value === "string" && value.trim().length > 0);
+  return [...new Set(parts)].join("\n").slice(0, 6_000);
+}
+
+function candidateEmbeddingText(candidate: RedditDiscoveryCandidate): string {
+  return `${candidate.title ?? ""}\n${candidate.body ?? ""}`.trim().slice(0, 4_000);
+}
+
 function acquisitionCandidateTarget(): number {
   const value = Number(process.env.REDDIT_ACQUISITION_CANDIDATES ?? 250);
   return Number.isFinite(value) ? Math.max(25, Math.min(Math.trunc(value), 400)) : 250;
@@ -734,12 +769,68 @@ export async function runScan(
     );
 
     await setStage(scan, "triage", "active");
+
+    /**
+     * Embedding prefilter. This orders candidates and removes only the
+     * obviously unrelated tail; it never decides business relevance, because
+     * cosine similarity systematically undervalues indirectly expressed pain.
+     * The LLM still makes every relevance decision, just on a bounded pool.
+     * Any failure here is non-fatal and keeps the full pool.
+     */
+    const embeddingSimilarityById = new Map<string, number>();
+    let prefilterDiagnostics: ReturnType<typeof prioritizeCandidates>["diagnostics"] | null = null;
+    let prefilteredSurvivors = cleaned.survivors;
+
+    if (aiProvider && cleaned.survivors.length > triageCandidateBudget()) {
+      try {
+        const embedded = await aiProvider.embed({
+          texts: [
+            businessEmbeddingQuery(business),
+            ...cleaned.survivors.map(candidateEmbeddingText),
+          ],
+          models,
+          workspaceId: scan.workspaceId,
+        });
+        usage.push(usageRecord(embedded, "embedding"));
+        const [profileVector, ...candidateVectors] = embedded.value;
+        if (profileVector && candidateVectors.length === cleaned.survivors.length) {
+          cleaned.survivors.forEach((candidate, index) => {
+            embeddingSimilarityById.set(
+              candidate.externalId,
+              cosineSimilarity(profileVector, candidateVectors[index]),
+            );
+          });
+        }
+      } catch (error) {
+        console.error("Embedding prefilter unavailable; classifying the full pool", error);
+      }
+
+      if (embeddingSimilarityById.size > 0) {
+        const outcome = prioritizeCandidates(
+          cleaned.survivors.map((candidate) => ({
+            externalId: candidate.externalId,
+            similarity: embeddingSimilarityById.get(candidate.externalId) ?? null,
+          })),
+          {
+            budget: triageCandidateBudget(),
+            floor: embeddingPrefilterFloor(),
+            minimumPool: Math.min(cleaned.survivors.length, 40),
+          },
+        );
+        prefilterDiagnostics = outcome.diagnostics;
+        const retained = new Set(outcome.retained);
+        prefilteredSurvivors = cleaned.survivors.filter((candidate) =>
+          retained.has(candidate.externalId),
+        );
+      }
+    }
+
     const triageById = new Map<string, ConversationTriage>();
     let reusedUnchanged = 0;
     let reusedTriageOnly = 0;
     const needsTriage: RedditDiscoveryCandidate[] = [];
 
-    for (const candidate of cleaned.survivors) {
+    for (const candidate of prefilteredSurvivors) {
       const previous = previousStates.get(`${candidate.provider}:${candidate.externalId}`);
       if (
         previous &&
@@ -775,10 +866,10 @@ export async function runScan(
       }
     }
 
-    if (cleaned.survivors.some((candidate) => !triageById.has(candidate.externalId))) {
+    if (prefilteredSurvivors.some((candidate) => !triageById.has(candidate.externalId))) {
       throw new Error("Triage coverage is incomplete. The scan will not report a valid zero-result outcome.");
     }
-    const worthEnriching = cleaned.survivors.filter(
+    const worthEnriching = prefilteredSurvivors.filter(
       (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
     );
     const zeroResultAuditCandidates = worthEnriching.length === 0
@@ -792,8 +883,8 @@ export async function runScan(
         })
       : [];
     const triageDetail = zeroResultAuditCandidates.length > 0
-      ? `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; lightweight triage selected none, so ${zeroResultAuditCandidates.length} high-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for an independent full-context audit.`
-      : `${cleaned.survivors.length} of ${cleaned.survivors.length} credible candidates were accounted for; ${worthEnriching.length} warranted full-context review.`;
+      ? `${prefilteredSurvivors.length} of ${cleaned.survivors.length} credible candidates were read in full; lightweight triage selected none, so ${zeroResultAuditCandidates.length} high-signal candidate${zeroResultAuditCandidates.length === 1 ? " was" : "s were"} escalated for an independent full-context audit.`
+      : `${prefilteredSurvivors.length} of ${cleaned.survivors.length} credible candidates were read in full; ${worthEnriching.length} warranted full-context review.`;
     await setStage(scan, "triage", "complete", triageDetail);
 
     await setStage(scan, "enrichment", "active");
@@ -1302,7 +1393,7 @@ export async function runScan(
     );
 
     const generatedReplyIds = new Set(replies.filter((reply) => reply.content.trim()).map((reply) => reply.opportunityId));
-    const processedRedditState: ProcessedRedditState[] = cleaned.survivors.map((candidate) => {
+    const processedRedditState: ProcessedRedditState[] = prefilteredSurvivors.map((candidate) => {
       const previous = previousStates.get(`${candidate.provider}:${candidate.externalId}`);
       const deep = deepById.get(candidate.externalId);
       const contextHash = deep ? structuredContextHash(deep.conversation) : null;
@@ -1369,6 +1460,10 @@ export async function runScan(
       providerRejectedByReason: discovery.diagnostics.rejectedByReason,
       deterministicRejectedByReason: cleaned.rejectedByReason,
       deterministicSurvivors: cleaned.survivors.length,
+      embeddingScored: prefilterDiagnostics?.scored ?? 0,
+      embeddingDroppedBelowFloor: prefilterDiagnostics?.droppedBelowFloor ?? 0,
+      embeddingDroppedOverBudget: prefilterDiagnostics?.droppedOverBudget ?? 0,
+      classifiedCandidates: prefilteredSurvivors.length,
       reusedUnchanged,
       reusedTriageOnly,
       submittedForTriage: needsTriage.length,

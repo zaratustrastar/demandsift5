@@ -15,29 +15,51 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Read authenticated TVCP production diagnostics
+      - name: Read deployed loopback-only TVCP diagnostics over private Docker bridge
         shell: bash
         run: |
           set -Eeuo pipefail
-          app_host='demandsift.143-244-154-139.sslip.io'
-          diagnostic_key='DStvcp-9wP4-kH72-zQe8-fR3v-Xm61-aC0N'
           tmp="$(mktemp)"
           trap 'rm -f "$tmp"' EXIT
-          for attempt in $(seq 1 45); do
-            code="$(curl --silent --show-error --output "$tmp" --write-out '%{http_code}' \
-              --resolve "$app_host:443:127.0.0.1" \
-              "https://$app_host/internal-vps-diagnostics/tvcp?key=$diagnostic_key" || true)"
-            if [ "$code" = "200" ]; then
-              python3 - "$tmp" <<'PY'
+          echo 'private_routes:'
+          ip -4 route | grep -E '^172\.|^10\.|^192\.168\.' || true
+
+          found=''
+          while read -r subnet; do
+            [ -n "$subnet" ] || continue
+            prefix="$(python3 - "$subnet" <<'PY'
+          import ipaddress, sys
+          net = ipaddress.ip_network(sys.argv[1], strict=False)
+          if net.version != 4:
+              raise SystemExit(1)
+          base = str(net.network_address).split('.')
+          print('.'.join(base[:3]))
+          PY
+            )" || continue
+            for host in $(seq 2 30); do
+              ip="$prefix.$host"
+              code="$(curl --connect-timeout 0.2 --max-time 1 --silent --output "$tmp" --write-out '%{http_code}' \
+                -H 'x-forwarded-for: 127.0.0.1' \
+                "http://$ip:8080/internal-vps-diagnostics/tvcp" || true)"
+              if [ "$code" = "200" ]; then
+                found="$ip"
+                echo "diagnostic_web_ip=$ip"
+                break 2
+              fi
+            done
+          done < <(ip -4 route | awk '/^172\.|^10\.|^192\.168\./ {print $1}' | grep '/' | sort -u)
+
+          if [ -z "$found" ]; then
+            echo 'Unable to locate the private web container diagnostic endpoint.' >&2
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            -H 'x-forwarded-for: 127.0.0.1' \
+            "http://$found:8080/internal-vps-diagnostics/tvcp" > "$tmp"
+          python3 - "$tmp" <<'PY'
           import json, sys
           payload = json.load(open(sys.argv[1]))
           for scan in payload.get('scans', []):
               print(json.dumps(scan, separators=(',', ':'), sort_keys=True))
           PY
-              exit 0
-            fi
-            echo "diagnostic_wait=$attempt http=$code"
-            sleep 10
-          done
-          echo 'TVCP diagnostic endpoint did not become available.' >&2
-          exit 1

@@ -1,0 +1,99 @@
+name: Diagnose TVCP zero-result funnel
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-network-20260815
+    paths:
+      - .github/workflows/diagnose-tvcp-quality-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run TVCP scan and print sanitized funnel diagnostics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          status_json="$(mktemp)"
+          report_json="$(mktemp)"
+          diag_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$status_json" "$report_json" "$diag_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1]))
+          print((p.get('scan') or {}).get('id') or '')
+          PY
+          )"
+          test -n "$scan_id"
+          echo "scan_id=$scan_id"
+
+          for attempt in $(seq 1 160); do
+            curl --fail-with-body --silent --show-error --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$status_json"
+            status="$(python3 - "$status_json" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1]))
+          print((p.get('scan') or {}).get('status') or '')
+          PY
+          )"
+            echo "poll=$attempt status=$status"
+            if [ "$status" = "failed" ]; then
+              python3 - "$status_json" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1])); s=p.get('scan') or {}
+          print('failure=' + str(s.get('error') or ''))
+          print('progress=' + json.dumps([{ 'id':x.get('id'), 'status':x.get('status'), 'detail':x.get('detail') } for x in (s.get('progress') or [])], ensure_ascii=False))
+          PY
+              exit 1
+            fi
+            if [ "$status" = "complete" ]; then
+              break
+            fi
+            sleep 6
+          done
+
+          curl --fail-with-body --silent --show-error --cookie "$cookie_jar" \
+            "$APP_URL/api/scans/$scan_id" > "$report_json"
+          curl --fail-with-body --silent --show-error --cookie "$cookie_jar" \
+            "$APP_URL/acceptance-diagnostics" > "$diag_json"
+
+          python3 - "$report_json" "$diag_json" <<'PY'
+          import json, sys
+          report_payload=json.load(open(sys.argv[1]))
+          diag=json.load(open(sys.argv[2]))
+          report=report_payload.get('report') or {}
+          profile=report.get('profile') or {}
+          print('=== profile ===')
+          for key in ['name','summary','productCategory','targetAudience','problemsSolved','jobsToBeDone','likelyWorkarounds','triggerEvents','customerProblemLanguage','features','competitors','irrelevantTopics','brandTerms','ambiguityRisks']:
+              print(f'{key}=' + json.dumps(profile.get(key), ensure_ascii=False))
+          print('=== diagnostics ===')
+          print(json.dumps(diag.get('diagnostics') or {}, ensure_ascii=False, sort_keys=True))
+          print('=== retrieval ===')
+          print(json.dumps(diag.get('retrieval') or {}, ensure_ascii=False, sort_keys=True))
+          print('=== triage ===')
+          print(json.dumps((diag.get('decisionBreakdown') or {}).get('triage') or {}, ensure_ascii=False, sort_keys=True))
+          print('=== deep ===')
+          print(json.dumps((diag.get('decisionBreakdown') or {}).get('deepQualification') or {}, ensure_ascii=False, sort_keys=True))
+          print('=== output ===')
+          print(json.dumps(diag.get('output') or {}, ensure_ascii=False, sort_keys=True))
+          print('=== progress ===')
+          print(json.dumps((diag.get('scan') or {}).get('progress') or [], ensure_ascii=False))
+          PY

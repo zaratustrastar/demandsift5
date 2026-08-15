@@ -797,6 +797,8 @@ export async function runScan(
       cleaned.survivors.length,
       enrichmentBudget(),
     );
+    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
+      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
 
     // Enrichment is useful context, not an all-or-nothing website-analysis gate.
     // If one selected Reddit URL cannot be expanded, try the next-best candidate
@@ -965,8 +967,6 @@ export async function runScan(
     }
 
     const deepRows = [...deepById.values()];
-    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
-      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
     // A discovery-only fallback may still look promising to deep AI. Keep that
     // provisional judgment in the transparent scan trace, but never promote it
     // to a public lead or market-intelligence claim without verified thread context.

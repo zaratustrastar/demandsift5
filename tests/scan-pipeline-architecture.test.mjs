@@ -164,3 +164,12 @@ test("zero-result scans audit a bounded high-signal sample before accepting a tr
   assert.match(source, /selectZeroResultAuditCandidates/);
   assert.match(source, /budget: Math\.min\(previousResult \? 2 : 3, enrichmentBudget\(\)\)/);
 });
+
+
+test("thread context verifier is initialized before enrichment recovery uses it", () => {
+  const verifier = position("const hasVerifiedThreadContext =");
+  const initialEnrichment = position("const initialEnrichment = await redditProvider.enrich(");
+  const absorb = position("const absorbEnrichment =");
+  assert.ok(verifier < initialEnrichment);
+  assert.ok(verifier < absorb);
+});

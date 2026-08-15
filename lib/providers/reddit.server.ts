@@ -1446,7 +1446,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
     this.actorId = apifyActorId(input.actorId);
     this.token = input.token.trim();
     if (!this.token) throw new Error("APIFY_TOKEN is required for the Apify Reddit test provider.");
-    this.maximumItems = Math.max(1, Math.min(100, Math.trunc(input.maximumItems ?? 50)));
+    this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(0, Math.min(20, Math.trunc(input.enrichmentComments ?? 6)));
     this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
@@ -1585,18 +1585,29 @@ export class ApifyRedditTestProvider implements RedditProvider {
         throw new Error("The Apify Reddit test run completed without a dataset.");
       }
 
-      const datasetEndpoint = new URL(
-        `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
-        "https://api.apify.com",
-      );
-      datasetEndpoint.searchParams.set("clean", "true");
-      datasetEndpoint.searchParams.set("format", "json");
-      datasetEndpoint.searchParams.set("limit", String(Math.min(100, actorInput.maxItems)));
+      // Apify returns dataset items in pages. A single 100-item request used to
+      // silently truncate larger runs, so acquisition could never exceed 100
+      // records no matter what the actor produced.
+      const datasetPageSize = 100;
+      const wanted = Math.max(1, actorInput.maxItems);
+      const payload: unknown[] = [];
+      for (let offset = 0; offset < wanted; offset += datasetPageSize) {
+        const datasetEndpoint = new URL(
+          `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
+          "https://api.apify.com",
+        );
+        datasetEndpoint.searchParams.set("clean", "true");
+        datasetEndpoint.searchParams.set("format", "json");
+        datasetEndpoint.searchParams.set("limit", String(Math.min(datasetPageSize, wanted - offset)));
+        datasetEndpoint.searchParams.set("offset", String(offset));
 
-      const datasetResponse = await safeGet(datasetEndpoint);
-      const payload = await readJson(datasetResponse, 5_000_000);
-      if (!Array.isArray(payload)) {
-        throw new Error("The Apify Reddit test provider returned an invalid dataset.");
+        const datasetResponse = await safeGet(datasetEndpoint);
+        const page = await readJson(datasetResponse, 5_000_000);
+        if (!Array.isArray(page)) {
+          throw new Error("The Apify Reddit test provider returned an invalid dataset.");
+        }
+        payload.push(...page);
+        if (page.length < Math.min(datasetPageSize, wanted - offset)) break;
       }
       if (usablePartialDataset && payload.length === 0) {
         throw new Error("The timed-out Apify Reddit test run did not retain any usable records.");
@@ -1627,10 +1638,11 @@ export class ApifyRedditTestProvider implements RedditProvider {
       throw new Error("The company context did not produce any usable Reddit search lanes.");
     }
     const searches = searchPlan.map((entry) => entry.query);
-    const maxItems = Math.min(
-      this.maximumItems,
-      Math.max(40, Math.min(50, request.limit * 2)),
-    );
+    // Acquisition volume must track the requested limit. This was clamped to 36,
+    // then to 50, regardless of what the pipeline asked for, which starved every
+    // downstream stage; the provider-level `maximumItems` remains the real bound.
+    // The floor of 40 keeps small requests above the actor's useful minimum.
+    const maxItems = Math.min(this.maximumItems, Math.max(40, request.limit));
     const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
       ? Date.parse(request.since)
       : null;
@@ -2142,7 +2154,7 @@ export function createRedditProviderFromEnv(
     return new ApifyRedditTestProvider({
       actorId: required(env.APIFY_REDDIT_ACTOR_ID, "APIFY_REDDIT_ACTOR_ID"),
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
-      maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 50, 1, 100),
+      maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 250, 1, 400),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),

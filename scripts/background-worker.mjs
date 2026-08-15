@@ -64,6 +64,17 @@ function boundedNumber(value, fallback, minimum, maximum) {
     : fallback;
 }
 
+/**
+ * Recurring monitoring is off for the MVP, which is a single user-triggered
+ * 7-day scan. The scheduler machinery is retained (nothing enrols scans into
+ * `runtime_monitoring_schedules` today, so it is dormant either way) but it no
+ * longer starts unless explicitly enabled, so the guarantee is enforced rather
+ * than incidental.
+ */
+export function monitoringSchedulerEnabled(environment = process.env) {
+  return String(environment.MONITORING_SCHEDULER_ENABLED ?? "").trim().toLowerCase() === "true";
+}
+
 export function monitoringConfiguration(environment = process.env) {
   const passIntervalHours = boundedNumber(
     environment.MONITOR_PASS_INTERVAL_HOURS,
@@ -904,7 +915,12 @@ async function runQueueWorker(databaseUrl, signal) {
   const boundedPollMs = Number.isFinite(pollMs) ? Math.max(250, Math.min(pollMs, 30_000)) : 2_000;
   const queueController = new AbortController();
   const queueSignal = AbortSignal.any([signal, queueController.signal]);
-  const scheduler = runMonitoringScheduler(sql, queueSignal);
+  const scheduler = monitoringSchedulerEnabled()
+    ? runMonitoringScheduler(sql, queueSignal)
+    : Promise.resolve();
+  if (!monitoringSchedulerEnabled()) {
+    log("info", "monitor_scheduler_disabled", { reason: "single_on_demand_scan_mvp" });
+  }
   log("info", "queue_worker_started", { pollMs: boundedPollMs });
   try {
     while (!queueSignal.aborted) {

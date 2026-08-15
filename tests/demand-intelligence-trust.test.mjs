@@ -66,7 +66,14 @@ test("market-intelligence review has a bounded full-context floor independent of
     source("lib/server/scan-workflow.ts"),
     source("lib/intelligence/reddit-pipeline.ts"),
   ]);
-  assert.match(workflow, /minimumFullContextReviews\(lookbackDays\)/);
+  // The floor is now independent of the lookback window as well as of lead
+  // triage: shortening the window to 7 days must not lower review depth.
+  assert.match(workflow, /function minimumFullContextReviews\(\): number/);
+  assert.match(workflow, /minimumFullContextReviews\(\)/);
+  assert.equal(/minimumFullContextReviews\(lookbackDays\)/.test(workflow), false);
+  // Enrichment must be over-selected so one miss cannot fail a healthy scan.
+  assert.match(workflow, /enrichmentSelectionTarget/);
+  assert.match(workflow, /allowedEnrichmentFailures/);
   assert.match(workflow, /intelligenceCoverageReviews/);
   assert.match(pipeline, /selectCandidatesForIntelligenceReview/);
   assert.match(pipeline, /const laneOrder: RedditSearchLane\[\]/);

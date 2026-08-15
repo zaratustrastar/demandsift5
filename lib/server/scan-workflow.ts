@@ -518,15 +518,42 @@ function buildFallbackInsights(
   return { insights, weakness };
 }
 
+/**
+ * Candidate volume for the acquisition scan. Segmentation happens after
+ * relevance qualification, so retrieval optimises for useful business-relevant
+ * conversations rather than leads alone.
+ */
+function acquisitionCandidateTarget(): number {
+  const value = Number(process.env.REDDIT_ACQUISITION_CANDIDATES ?? 250);
+  return Number.isFinite(value) ? Math.max(25, Math.min(Math.trunc(value), 400)) : 250;
+}
+
 function enrichmentBudget(): number {
   const value = Number(process.env.REDDIT_ENRICHMENT_BUDGET ?? process.env.APIFY_REDDIT_ENRICHMENT_LIMIT ?? 8);
   return Number.isFinite(value) ? Math.max(1, Math.min(Math.trunc(value), 20)) : 8;
 }
 
-function minimumFullContextReviews(lookbackDays: number): number {
+/**
+ * How many conversations must be read with full thread context before the scan
+ * is allowed to publish - in particular before it may publish a definitive
+ * zero. Deliberately independent of the lookback window: shortening the window
+ * to 7 days must not silently halve verification quality.
+ */
+function minimumFullContextReviews(): number {
   const configured = Number(process.env.REDDIT_MINIMUM_FULL_CONTEXT_REVIEWS);
   if (Number.isFinite(configured)) return Math.max(0, Math.min(Math.trunc(configured), enrichmentBudget()));
-  return lookbackDays >= 30 ? 4 : 2;
+  return 4;
+}
+
+/**
+ * Enrichment is probabilistic: threads get deleted, subreddits go private and
+ * the scraper is occasionally rate limited. Selecting exactly the minimum meant
+ * `required === selected`, so a single miss failed the entire scan after all
+ * upstream work had already been paid for. Select with headroom instead.
+ */
+function enrichmentSelectionTarget(required: number): number {
+  const headroom = Math.max(2, Math.ceil(required * 0.5));
+  return Math.min(enrichmentBudget(), required + headroom);
 }
 
 export async function createScan(workspaceId: string, websiteUrl: string): Promise<ScanRecord> {
@@ -644,7 +671,10 @@ export async function runScan(
       : null;
     // The acquisition scan establishes a real demand baseline. Recurring scans
     // remain incremental and search only the latest seven-day window.
-    const lookbackDays = previousResult ? 7 : 30;
+    // MVP: one user-triggered scan covering the previous 7 days. Review depth
+    // is chosen independently of this window (see minimumFullContextReviews),
+    // so narrowing the window cannot quietly lower verification quality.
+    const lookbackDays = 7;
     const since = new Date(Date.parse(scan.createdAt) - lookbackDays * 86_400_000).toISOString();
     await setStage(scan, "discovery", "active");
     const discovery = await redditProvider.discover({
@@ -670,7 +700,7 @@ export async function runScan(
         excludedTerms: business.irrelevantTopics.value,
         ambiguityRisks: business.ambiguityRisks.value,
       },
-      limit: 25,
+      limit: acquisitionCandidateTarget(),
       since,
     }).catch((error) => {
       const message = error instanceof Error ? error.message : "Unknown Reddit discovery failure.";
@@ -775,10 +805,11 @@ export async function runScan(
           budget: enrichmentBudget(),
         });
     const primaryIds = new Set(primaryEnrichmentCandidates.map((candidate) => candidate.externalId));
+    const requiredReviews = minimumFullContextReviews();
     const intelligenceReviewBudget = Math.max(
       0,
       Math.min(
-        minimumFullContextReviews(lookbackDays) - primaryEnrichmentCandidates.length,
+        enrichmentSelectionTarget(requiredReviews) - primaryEnrichmentCandidates.length,
         enrichmentBudget() - primaryEnrichmentCandidates.length,
       ),
     );

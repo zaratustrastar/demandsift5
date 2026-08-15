@@ -52,10 +52,33 @@ test("running scan polling does not invoke completed-report presentation", () =>
   assert.match(scanStatusRoute, /searchParams\.get\("statusOnly"\) === "1"/);
 });
 
-test("the acquisition scan uses a 30-day baseline while monitoring stays incremental", () => {
-  assert.match(source, /const lookbackDays = previousResult \? 7 : 30/);
+test("the MVP is a single on-demand scan over the previous 7 days", () => {
+  assert.match(source, /const lookbackDays = 7;/);
   assert.match(source, /lookbackDays \* 86_400_000/);
   assert.match(source, /windowDays: lookbackDays/);
+  // Review depth must not ride on the window.
+  assert.equal(/minimumFullContextReviews\(lookbackDays\)/.test(source), false);
+});
+
+test("completing a scan does not schedule another scan", () => {
+  // The MVP is user-triggered only. `enqueueScanRun` exists for the initial
+  // POST /api/scans enqueue, so the check is that nothing in the run path
+  // schedules a successor once a scan finishes.
+  const runScanAt = source.indexOf("export async function runScan");
+  assert.ok(runScanAt > 0, "runScan not found");
+  const runPath = source.slice(runScanAt);
+  for (const fragment of ["enqueueScanRun(", "enqueueScan(", "setInterval(", "cron"]) {
+    assert.equal(
+      runPath.includes(fragment),
+      false,
+      `the scan run path should not contain ${fragment}`,
+    );
+  }
+});
+
+test("acquisition retrieves a corpus rather than a handful of candidates", () => {
+  assert.match(source, /acquisitionCandidateTarget\(\)/);
+  assert.equal(source.includes("limit: 25,"), false);
 });
 
 test("active scan does not use embeddings or legacy deterministic ranking", () => {
@@ -165,11 +188,21 @@ test("zero-result scans audit a bounded high-signal sample before accepting a tr
   assert.match(source, /budget: Math\.min\(previousResult \? 2 : 3, enrichmentBudget\(\)\)/);
 });
 
-
 test("thread context verifier is initialized before enrichment recovery uses it", () => {
   const verifier = position("const hasVerifiedThreadContext =");
   const initialEnrichment = position("const initialEnrichment = await redditProvider.enrich(");
   const absorb = position("const absorbEnrichment =");
   assert.ok(verifier < initialEnrichment);
   assert.ok(verifier < absorb);
+});
+
+test("recurring monitoring is disabled unless explicitly enabled", async () => {
+  const worker = await readFile(
+    new URL("../scripts/background-worker.mjs", import.meta.url),
+    "utf8",
+  );
+  const { monitoringSchedulerEnabled } = await import("../scripts/background-worker.mjs");
+  assert.equal(monitoringSchedulerEnabled({}), false, "scheduler must be off by default");
+  assert.equal(monitoringSchedulerEnabled({ MONITORING_SCHEDULER_ENABLED: "true" }), true);
+  assert.match(worker, /monitoringSchedulerEnabled\(\)\s*\?\s*runMonitoringScheduler/);
 });

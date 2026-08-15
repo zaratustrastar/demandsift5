@@ -226,6 +226,8 @@ const PROBLEM_TOKEN_STOP_WORDS = new Set([
   "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",
   "the", "their", "this", "using", "with", "without", "your", "a", "an", "to", "of",
   "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
+  "am", "as", "at", "by", "do", "go", "he", "if", "in", "it", "me", "my", "no",
+  "on", "so", "up", "us", "we",
 ]);
 
 /**
@@ -418,7 +420,7 @@ function matchesAnyVariant(text: string, variants: readonly string[]): boolean {
 function problemTokens(value: string): string[] {
   return normalizeSearchText(value)
     .split(" ")
-    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
+    .filter((token) => token.length >= 2 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
 }
 
 function naturalKeywordPhrase(value: string, maximumWords = 5): string {
@@ -484,11 +486,18 @@ export function buildApifyRedditSearchPlan(request: RedditSearchRequest): Reddit
   const categoryExpression = (value: string): string => {
     const tokens = problemTokens(value);
     if (tokens.length === 0) return "";
-    const selected = tokens.slice(0, 2);
+
+    // Preserve enough grounded category language to keep market qualifiers.
+    // Example: "Android TV parental control app" must not collapse to
+    // "android parental app".
+    const selected = tokens.slice(0, 5);
     const descriptor = tokens.find((token) =>
       /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
     );
-    if (descriptor && !selected.includes(descriptor)) selected.push(descriptor);
+    if (descriptor && !selected.includes(descriptor)) {
+      if (selected.length >= 5) selected[selected.length - 1] = descriptor;
+      else selected.push(descriptor);
+    }
     return selected.join(" ");
   };
 
@@ -829,14 +838,7 @@ export function searchPlanMatches(
     const seed = normalizeSearchText(entry.seed ?? "");
     if (!seed) return [];
 
-    const seedTokens = seed
-      .split(" ")
-      .filter(
-        (token) =>
-          token.length >= 3 &&
-          !PROBLEM_TOKEN_STOP_WORDS.has(token),
-      )
-      .slice(0, 6);
+    const seedTokens = problemTokens(seed).slice(0, 6);
 
     if (seedTokens.length === 0) return [];
 

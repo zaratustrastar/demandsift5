@@ -234,3 +234,46 @@ test("profiles without a distinguishing market keep the token behaviour", () => 
     "genuine project-management demand was dropped",
   );
 });
+
+
+test("query planning preserves critical short market qualifiers", () => {
+  assert.ok(
+    tvcpPlan.some((entry) => entry.query === "looking for android tv parental control app"),
+    JSON.stringify(tvcpPlan),
+  );
+  assert.ok(
+    tvcpPlan.some((entry) => entry.query.includes("kids watching tv too long")),
+    JSON.stringify(tvcpPlan),
+  );
+  assert.ok(
+    tvcpPlan.every((entry) => entry.query !== "looking for android parental app"),
+    JSON.stringify(tvcpPlan),
+  );
+
+  const makePlan = (category) =>
+    reddit.buildApifyRedditSearchPlan({
+      queries: {
+        productTerms: ["ExampleCo", category],
+        brandTerms: ["ExampleCo"],
+        productCategories: [category],
+        customerProblems: ["need a better setup"],
+        buyerIntent: ["recommendations"],
+        competitors: [],
+        excludedTerms: [],
+      },
+      limit: 20,
+    });
+
+  for (const [category, expected] of [
+    ["AI recruiting software", "looking for ai recruiting software"],
+    ["HR analytics software", "looking for hr analytics software"],
+    ["VR training platform", "looking for vr training platform"],
+    ["PC monitoring app", "looking for pc monitoring app"],
+  ]) {
+    const plan = makePlan(category);
+    assert.ok(
+      plan.some((entry) => entry.query === expected),
+      `${category}: ${JSON.stringify(plan)}`,
+    );
+  }
+});

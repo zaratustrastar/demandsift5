@@ -500,21 +500,17 @@ test("discovery is lightweight and does not perform enrichment", async () => {
 
   assert.equal(discovery.searchPosts, true);
   assert.equal(discovery.searchComments, true);
-  assert.equal(discovery.skipComments, true);
+  assert.equal(Object.hasOwn(discovery, "skipComments"), false);
   assert.equal(discovery.includeMediaLinks, false);
-  assert.equal(discovery.maxComments, 0);
-  assert.equal(discovery.maxItems, 36);
-  assert.equal(discovery.maxPostCount, 36);
-  assert.equal(
-    discovery.maxPostCount,
-    discovery.maxItems,
-    "the Actor-wide post cap must not be divided by the number of searches",
-  );
-  assert.equal(startCall.url.searchParams.get("maxItems"), "36");
+  assert.equal(discovery.sort, "new");
+  assert.equal(discovery.maxComments, 3);
+  assert.equal(discovery.maxItems, 40);
+  assert.equal(discovery.maxPostCount, 40);
+  assert.equal(startCall.url.searchParams.get("maxItems"), "40");
   assert.equal(startCall.url.searchParams.get("timeout"), "570");
   assert.equal(discovery.time, "week");
-  assert.equal(Object.hasOwn(discovery, "postDateLimit"), false);
-  assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);
+  assert.match(discovery.postDateLimit, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(discovery.commentDateLimit, discovery.postDateLimit);
   assert.deepEqual(discovery.proxy.apifyProxyGroups, ["RESIDENTIAL"]);
 
   assert.equal(calls[1].init.method, "GET");

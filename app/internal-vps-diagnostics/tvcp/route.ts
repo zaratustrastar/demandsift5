@@ -3,11 +3,9 @@ import { desc, ilike } from "drizzle-orm";
 import { getDb } from "@/db";
 import { runtimeScans } from "@/db/postgres/schema";
 
-const TEMP_DIAGNOSTIC_KEY = "DStvcp-9wP4-kH72-zQe8-fR3v-Xm61-aC0N";
-
-function hasDiagnosticAccess(request: Request): boolean {
-  const url = new URL(request.url);
-  return url.searchParams.get("key") === TEMP_DIAGNOSTIC_KEY;
+function isLoopbackRequest(request: Request): boolean {
+  const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "";
+  return forwardedFor === "127.0.0.1" || forwardedFor === "::1" || forwardedFor === "::ffff:127.0.0.1";
 }
 
 function boundedText(value: unknown, limit = 500): string {
@@ -15,7 +13,7 @@ function boundedText(value: unknown, limit = 500): string {
 }
 
 export async function GET(request: Request) {
-  if (!hasDiagnosticAccess(request)) {
+  if (!isLoopbackRequest(request)) {
     return new Response("Not found", {
       status: 404,
       headers: { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow" },
@@ -34,7 +32,7 @@ export async function GET(request: Request) {
     .from(runtimeScans)
     .where(ilike(runtimeScans.websiteUrl, "%tvcp.app%"))
     .orderBy(desc(runtimeScans.createdAt))
-    .limit(12);
+    .limit(4);
 
   const scans = rows.map((row) => {
     const scan = row.record;
@@ -47,46 +45,57 @@ export async function GET(request: Request) {
       updatedAt: row.updatedAt.toISOString(),
       error: boundedText(scan.error),
       progress: scan.progress.map((stage) => ({ id: stage.id, status: stage.status })),
+      profile: result
+        ? {
+            name: result.profile.name,
+            productCategory: result.profile.productCategory ?? null,
+            summary: boundedText(result.profile.summary, 600),
+            targetAudience: result.profile.targetAudience.slice(0, 12),
+            problemsSolved: result.profile.problemsSolved.slice(0, 12),
+            jobsToBeDone: result.profile.jobsToBeDone?.slice(0, 12) ?? [],
+            customerProblemLanguage: result.profile.customerProblemLanguage?.slice(0, 16) ?? [],
+            features: result.profile.features.slice(0, 16),
+            competitors: result.profile.competitors.slice(0, 12),
+            irrelevantTopics: result.profile.irrelevantTopics.slice(0, 12),
+            ambiguityRisks: result.profile.ambiguityRisks?.slice(0, 12) ?? [],
+          }
+        : null,
+      searchPlan: result?.retrievalDiagnostics?.searchPlan ?? [],
+      queryCountsByLane: result?.retrievalDiagnostics?.queryCountsByLane ?? {},
+      matchedCandidatesByLane: result?.retrievalDiagnostics?.matchedCandidatesByLane ?? {},
+      worthEnrichingByLane: result?.retrievalDiagnostics?.worthEnrichingByLane ?? {},
+      matchedCandidatesByQuery: result?.retrievalDiagnostics?.matchedCandidatesByQuery ?? {},
+      worthEnrichingByQuery: result?.retrievalDiagnostics?.worthEnrichingByQuery ?? {},
+      candidates: result?.processedRedditState.map((candidate) => ({
+        externalId: candidate.externalId,
+        title: boundedText(candidate.title, 240),
+        excerpt: boundedText(candidate.excerpt, 420),
+        subreddit: candidate.subreddit,
+        canonicalPermalink: candidate.canonicalPermalink,
+        sourceCreatedAt: candidate.sourceCreatedAt,
+        matchedQueries: candidate.matchedQueries,
+        discoveryLanes: candidate.discoveryLanes,
+        triage: {
+          relevant: candidate.triage.relevant,
+          intent: candidate.triage.intent,
+          demandSignal: candidate.triage.demandSignal,
+          problem: boundedText(candidate.triage.problem, 240),
+          productFit: candidate.triage.productFit,
+          timing: candidate.triage.timing,
+          replyability: candidate.triage.replyability,
+          worthEnriching: candidate.triage.worthEnriching,
+          reason: boundedText(candidate.triage.reason, 420),
+        },
+      })) ?? [],
       dataMode: result?.dataMode ?? null,
-      diagnostics: result
-        ? {
-            retrieved: result.diagnostics.retrieved,
-            normalized: result.diagnostics.normalized,
-            deterministicSurvivors: result.diagnostics.deterministicSurvivors,
-            submittedForTriage: result.diagnostics.submittedForTriage,
-            triageReturned: result.diagnostics.triageReturned,
-            worthEnriching: result.diagnostics.worthEnriching,
-            requestedForEnrichment: result.diagnostics.requestedForEnrichment,
-            enrichedSuccessfully: result.diagnostics.enrichedSuccessfully,
-            enrichmentFailures: result.diagnostics.enrichmentFailures,
-            submittedForDeepQualification: result.diagnostics.submittedForDeepQualification,
-            deepQualificationsReturned: result.diagnostics.deepQualificationsReturned,
-            potentialCustomerConversations: result.diagnostics.potentialCustomerConversations,
-            uniquePotentialCustomers: result.diagnostics.uniquePotentialCustomers,
-            repliesGenerated: result.diagnostics.repliesGenerated,
-          }
-        : null,
-      retrieval: result?.retrievalDiagnostics
-        ? {
-            provider: result.retrievalDiagnostics.provider,
-            queryCount: result.retrievalDiagnostics.queryCount,
-            fetchedCandidates: result.retrievalDiagnostics.fetchedCandidates,
-            normalizedCandidates: result.retrievalDiagnostics.normalizedCandidates,
-            locallyMatchedCandidates: result.retrievalDiagnostics.locallyMatchedCandidates,
-            enrichmentAttempts: result.retrievalDiagnostics.enrichmentAttempts,
-            enrichedConversations: result.retrievalDiagnostics.enrichedConversations,
-            qualifiedOpportunities: result.retrievalDiagnostics.qualifiedOpportunities,
-          }
-        : null,
+      diagnostics: result?.diagnostics ?? null,
       output: result
         ? {
             opportunities: result.opportunities.length,
             potentialCustomers: result.potentialCustomers?.total ?? result.opportunities.length,
             insights: result.insights.length,
             competitorSignals: result.competitorWeakness?.verified ? 1 : 0,
-            replies: result.replies.filter(
-              (reply) => typeof reply.content === "string" && reply.content.trim().length > 0,
-            ).length,
+            replies: result.replies.filter((reply) => reply.content.trim().length > 0).length,
           }
         : null,
     };

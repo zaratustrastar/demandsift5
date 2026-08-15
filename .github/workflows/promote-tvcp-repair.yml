@@ -1,0 +1,58 @@
+name: Promote validated TVCP repair
+
+on:
+  push:
+    branches:
+      - feature-staging-tvcp-diagnostics-20260816
+    paths:
+      - .github/workflows/promote-tvcp-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - name: Bring in validated repair and detailed forensic endpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch origin \
+            fix-tvcp-scan-reliability-20260816 \
+            feature-staging-tvcp-diagnostics-20260816
+          git checkout origin/fix-tvcp-scan-reliability-20260816 -- \
+            lib/providers/reddit.server.ts \
+            lib/providers/openai.server.ts \
+            tests/apify-reddit-provider.test.mjs \
+            tests/openai-intelligence-pipeline.test.mjs
+          git checkout origin/feature-staging-tvcp-diagnostics-20260816 -- \
+            app/internal-vps-diagnostics/tvcp/route.ts
+      - name: Install dependencies
+        run: npm ci
+      - name: Run focused regressions
+        run: node --test tests/apify-reddit-provider.test.mjs tests/openai-intelligence-pipeline.test.mjs tests/browser-scan-polling-resilience.test.mjs tests/reddit-intelligence-pipeline.test.mjs
+      - name: Build
+        run: npm run build:node
+      - name: Lint
+        run: npm run lint
+      - name: Commit and push feature repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            lib/providers/reddit.server.ts \
+            lib/providers/openai.server.ts \
+            tests/apify-reddit-provider.test.mjs \
+            tests/openai-intelligence-pipeline.test.mjs \
+            app/internal-vps-diagnostics/tvcp/route.ts
+          git diff --cached --check
+          git commit -m 'Fix TVCP retrieval and triage reliability'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

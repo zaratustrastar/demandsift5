@@ -258,6 +258,31 @@ export async function presentScan(scan: ScanRecord) {
         // Discovery-only fallbacks may still be classified internally, but are
         // never presented to the user as full-context review.
         fullContextReviewed: result.diagnostics.enrichedSuccessfully,
+        requiredFullContextReviews: result.diagnostics.requiredFullContextReviews ?? 0,
+        limited: result.diagnostics.coverageLimited ?? false,
+      },
+      // MVP transparency: expose every credible candidate that reached AI triage,
+      // its exact public Reddit destination, search attribution, and decisions.
+      // This is intentionally not paywalled while retrieval/qualification quality
+      // is being validated. Raw provider-invalid records remain counts only.
+      scanEvidence: {
+        searchPlan: result.retrievalDiagnostics?.searchPlan ?? [],
+        diagnostics: result.diagnostics,
+        candidates: result.processedRedditState.map((state) => ({
+          externalId: state.externalId,
+          title: state.title,
+          excerpt: state.excerpt,
+          subreddit: state.subreddit,
+          author: state.author,
+          permalink: state.canonicalPermalink,
+          sourceCreatedAt: state.sourceCreatedAt,
+          matchedQueries: state.matchedQueries,
+          discoveryLanes: state.discoveryLanes,
+          fullContextVerified:
+            state.threadContextVerified ?? Boolean(state.contextHash && state.deepQualification),
+          triage: state.triage,
+          deepQualification: state.deepQualification,
+        })),
       },
       lockedOpportunityPreviews: lockedOpportunities.map((opportunity) => ({
         id: opportunity.id,

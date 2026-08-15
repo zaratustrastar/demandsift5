@@ -243,6 +243,8 @@ export type ProcessedRedditState = {
   discoveryLanes: RedditSearchLane[];
   contentHash: string;
   contextHash: string | null;
+  /** True only when the provider returned enough thread data to verify context. */
+  threadContextVerified?: boolean;
   firstSeenAt: string;
   lastSeenAt: string;
   lastAnalyzedAt: string;
@@ -274,6 +276,11 @@ export type ScanDiagnostics = {
   enrichedSuccessfully: number;
   enrichmentFailures: number;
   enrichmentFailureReason?: string;
+  requiredFullContextReviews: number;
+  coverageLimited: boolean;
+  enrichmentReplacementAttempts: number;
+  enrichmentReplacementSuccesses: number;
+  unverifiedPotentialCustomerSignals: number;
   submittedForDeepQualification: number;
   deepQualificationsReturned: number;
   deepQualificationMissing: number;

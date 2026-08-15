@@ -87,12 +87,13 @@ test("paid Reddit discovery failures surface a terminal machine-readable error",
   assert.ok(source.includes("Reddit discovery failed: ${message}"));
 });
 
-test("incomplete Reddit thread expansion fails closed before a definitive report", () => {
-  assert.ok(source.includes("enrichment.diagnostics.fallbackUsed"));
+test("incomplete Reddit thread expansion retries replacements and continues with limited coverage", () => {
   assert.ok(source.includes("requiredFullContextReviews"));
-  assert.ok(source.includes("enrichment.diagnostics.enriched < requiredFullContextReviews"));
-  assert.ok(source.includes('"reddit_enrichment_failed"'));
+  assert.ok(source.includes("enrichmentReplacementAttempts"));
+  assert.ok(source.includes("enrichmentReplacementSuccesses"));
+  assert.ok(source.includes("coverageLimited"));
   assert.ok(source.includes("hasVerifiedThreadContext"));
+  assert.equal(source.includes('throw new ApiError(detail, 502, "reddit_enrichment_failed")'), false);
 });
 
 test("deep qualification is reused only after source and structured context are verified unchanged", () => {

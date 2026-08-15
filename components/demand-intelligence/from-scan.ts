@@ -5,6 +5,7 @@ import type {
   NavigationSection,
   RedditDemandDemoData,
   RedditOpportunity,
+  ScanEvidence,
 } from "./types";
 
 type ApiSource = {
@@ -134,7 +135,10 @@ type ApiReport = {
   qualificationCoverage?: {
     credibleCandidates: number;
     fullContextReviewed: number;
+    requiredFullContextReviews?: number;
+    limited?: boolean;
   };
+  scanEvidence?: ScanEvidence;
   lockedOpportunityPreviews: Array<{
     id: string;
     subreddit: string;
@@ -483,6 +487,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       newSincePreviousDemandDrop: report.storedCounts.opportunities,
     },
     qualificationCoverage: report.qualificationCoverage,
+    scanEvidence: report.scanEvidence,
     lockedResults,
     lockedCounts,
     metrics: {

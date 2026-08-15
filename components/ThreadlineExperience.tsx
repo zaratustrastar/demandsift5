@@ -428,7 +428,7 @@ export function ThreadlineExperience() {
           setAccessLevel(effectiveAccessLevel(latest.access));
 
           if (latest.scan.status === "failed") {
-            throw new Error(latest.scan.error ?? "Website analysis failed.");
+            throw new Error(latest.scan.error ?? "The scan stopped before completion.");
           }
           if (latest.scan.status === "complete" && latest.report) {
             setView("report");
@@ -546,7 +546,7 @@ export function ThreadlineExperience() {
             return;
           }
           if (latest.scan.status === "failed") {
-            throw new Error(latest.scan.error ?? "Website analysis failed.");
+            throw new Error(latest.scan.error ?? "The scan stopped before completion.");
           }
           await new Promise<void>((resolve) => {
             pollTimer = window.setTimeout(resolve, 700);
@@ -555,7 +555,7 @@ export function ThreadlineExperience() {
       } catch (error) {
         if (cancelled) return;
         window.clearTimeout(pollTimer);
-        setErrorMessage(error instanceof Error ? error.message : "Website analysis failed.");
+        setErrorMessage(error instanceof Error ? error.message : "The scan stopped before completion.");
         setView("error");
       }
     }
@@ -812,10 +812,10 @@ export function ThreadlineExperience() {
         <section className={`${styles.scanPanel} ${styles.errorPanel}`}>
           <div className={styles.errorMark}>!</div>
           <div className={styles.scanKicker}>Safe analysis stopped</div>
-          <h1>We couldn’t analyze that website</h1>
+          <h1>The scan stopped before every check finished</h1>
           <p>{errorMessage}</p>
-          <button className={styles.tryAgain} type="button" onClick={() => setView("landing")}>Try another website</button>
-          <div className={styles.domainSafety}>No Reddit results or business claims were created for this failed scan.</div>
+          <button className={styles.tryAgain} type="button" onClick={() => setView("landing")}>Run another scan</button>
+          <div className={styles.domainSafety}>Completed stages remain recorded. Unverified findings are never promoted as definitive leads.</div>
         </section>
       </main>
     );

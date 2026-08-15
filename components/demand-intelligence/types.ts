@@ -253,6 +253,69 @@ export interface SearchVisibilityOpportunity {
   provenanceIds: string[];
 }
 
+export interface ScanEvidenceCandidate {
+  externalId: string;
+  title: string | null;
+  excerpt: string;
+  subreddit: string;
+  author: string | null;
+  permalink: string | null;
+  sourceCreatedAt: string;
+  matchedQueries: string[];
+  discoveryLanes: string[];
+  fullContextVerified: boolean;
+  triage: {
+    relevant: boolean;
+    intent: string;
+    demandSignal: string;
+    productFit: string;
+    timing: string;
+    replyability: string;
+    worthEnriching: boolean;
+    reason: string;
+  };
+  deepQualification: null | {
+    leadStatus: string;
+    demandSignals: string[];
+    intelligenceTags: string[];
+    productFit: string;
+    painSeverity: string;
+    intent: string;
+    timing: string;
+    evidenceQuality: string;
+    replyability: string;
+    whyItMatters: string;
+    shouldReply: boolean;
+  };
+}
+
+export interface ScanEvidence {
+  searchPlan: Array<{ lane: string; query: string; seed?: string }>;
+  diagnostics: {
+    retrieved: number;
+    normalized: number;
+    deterministicSurvivors: number;
+    providerRejectedByReason: Record<string, number>;
+    deterministicRejectedByReason: Record<string, number>;
+    submittedForTriage: number;
+    triageReturned: number;
+    worthEnriching: number;
+    requestedForEnrichment: number;
+    enrichedSuccessfully: number;
+    enrichmentFailures: number;
+    requiredFullContextReviews?: number;
+    coverageLimited?: boolean;
+    enrichmentReplacementAttempts?: number;
+    enrichmentReplacementSuccesses?: number;
+    unverifiedPotentialCustomerSignals?: number;
+    submittedForDeepQualification: number;
+    deepQualificationsReturned: number;
+    potentialCustomerConversations: number;
+    uniquePotentialCustomers: number;
+  };
+  candidates: ScanEvidenceCandidate[];
+}
+
 export interface RedditDemandDemoData {
   fixtureLabel: string;
   fixtureDisclosure: string;
@@ -267,7 +330,10 @@ export interface RedditDemandDemoData {
   qualificationCoverage?: {
     credibleCandidates: number;
     fullContextReviewed: number;
+    requiredFullContextReviews?: number;
+    limited?: boolean;
   };
+  scanEvidence?: ScanEvidence;
   lockedResults: LockedStoredResult[];
   lockedCounts: LockedResultCounts;
   metrics: DashboardMetrics;

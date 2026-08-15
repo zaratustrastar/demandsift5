@@ -791,28 +791,109 @@ export async function runScan(
       ...primaryEnrichmentCandidates,
       ...intelligenceReviewCandidates,
     ];
-    const intelligenceCoverageReviews = intelligenceReviewCandidates.length;
-    const enrichment = await redditProvider.enrich({
+    let intelligenceCoverageReviews = intelligenceReviewCandidates.length;
+    const requiredFullContextReviews = Math.min(
+      minimumFullContextReviews(lookbackDays),
+      cleaned.survivors.length,
+      enrichmentBudget(),
+    );
+
+    // Enrichment is useful context, not an all-or-nothing website-analysis gate.
+    // If one selected Reddit URL cannot be expanded, try the next-best candidate
+    // within the existing bounded budget. This protects zero-result confidence
+    // without throwing away the website profile, discovery, and triage already done.
+    const initialEnrichment = await redditProvider.enrich({
       candidates: selectedForEnrichment,
       maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
     });
-    const requiredFullContextReviews = Math.min(
-      minimumFullContextReviews(lookbackDays),
-      selectedForEnrichment.length,
-    );
-    if (enrichment.diagnostics.enriched < requiredFullContextReviews) {
-      const detail =
-        `Thread context could be verified for only ${enrichment.diagnostics.enriched} of ` +
-        `${selectedForEnrichment.length} selected conversations; ${requiredFullContextReviews} are required. ` +
-        "The scan will not publish a definitive zero or incomplete intelligence report.";
-      await setStage(scan, "enrichment", "failed", detail);
-      throw new ApiError(detail, 502, "reddit_enrichment_failed");
+    const enrichmentById = new Map<string, EnrichedRedditConversation>();
+    let enrichmentRequested = 0;
+    const enrichmentFailureReasons: string[] = [];
+    const absorbEnrichment = (batch: typeof initialEnrichment) => {
+      enrichmentRequested += batch.diagnostics.requested;
+      if (batch.diagnostics.failureReason) enrichmentFailureReasons.push(batch.diagnostics.failureReason);
+      for (const conversation of batch.conversations) {
+        const current = enrichmentById.get(conversation.externalId);
+        if (!current || (!hasVerifiedThreadContext(current) && hasVerifiedThreadContext(conversation))) {
+          enrichmentById.set(conversation.externalId, conversation);
+        }
+      }
+    };
+    absorbEnrichment(initialEnrichment);
+
+    const selectedIds = new Set(selectedForEnrichment.map((candidate) => candidate.externalId));
+    const verifiedContextCount = () =>
+      [...enrichmentById.values()].filter(hasVerifiedThreadContext).length;
+    let enrichmentReplacementAttempts = 0;
+    let enrichmentReplacementSuccesses = 0;
+
+    while (
+      verifiedContextCount() < requiredFullContextReviews &&
+      selectedForEnrichment.length < Math.min(enrichmentBudget(), cleaned.survivors.length)
+    ) {
+      const remaining = cleaned.survivors.filter((candidate) => !selectedIds.has(candidate.externalId));
+      if (remaining.length === 0) break;
+      const remainingWorthEnriching = remaining.filter(
+        (candidate) => triageById.get(candidate.externalId)?.worthEnriching === true,
+      );
+      const replacementCandidate = (
+        worthEnriching.length === 0
+          ? selectZeroResultAuditCandidates({ candidates: remaining, triageById, budget: 1 })[0]
+          : selectCandidatesForEnrichment({
+              candidates: remainingWorthEnriching,
+              triageById,
+              budget: 1,
+            })[0]
+      ) ?? selectCandidatesForIntelligenceReview({
+        candidates: remaining,
+        triageById,
+        budget: 1,
+      })[0];
+      if (!replacementCandidate) break;
+
+      selectedForEnrichment.push(replacementCandidate);
+      selectedIds.add(replacementCandidate.externalId);
+      if (triageById.get(replacementCandidate.externalId)?.worthEnriching !== true) {
+        intelligenceCoverageReviews += 1;
+      }
+      enrichmentReplacementAttempts += 1;
+      const before = verifiedContextCount();
+      const replacementEnrichment = await redditProvider.enrich({
+        candidates: [replacementCandidate],
+        maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
+      });
+      absorbEnrichment(replacementEnrichment);
+      if (verifiedContextCount() > before) enrichmentReplacementSuccesses += 1;
     }
+
+    const enrichmentConversations = selectedForEnrichment.flatMap((candidate) => {
+      const conversation = enrichmentById.get(candidate.externalId);
+      return conversation ? [conversation] : [];
+    });
+    const enrichedSuccessfully = enrichmentConversations.filter(hasVerifiedThreadContext).length;
+    const enrichmentFailures = Math.max(0, selectedForEnrichment.length - enrichedSuccessfully);
+    const coverageLimited = enrichedSuccessfully < requiredFullContextReviews;
+    const enrichment = {
+      conversations: enrichmentConversations,
+      sourceMode: discovery.sourceMode,
+      diagnostics: {
+        requested: enrichmentRequested,
+        enriched: enrichedSuccessfully,
+        failed: enrichmentFailures,
+        fallbackUsed: enrichmentFailures,
+        ...(enrichmentFailureReasons.length > 0
+          ? { failureReason: enrichmentFailureReasons.join(" | ").slice(0, 1_500) }
+          : {}),
+      },
+    };
+
     await setStage(
       scan,
       "enrichment",
       "complete",
-      `${enrichment.diagnostics.enriched} conversation${enrichment.diagnostics.enriched === 1 ? "" : "s"} received additional thread context; ${enrichment.diagnostics.fallbackUsed} discovery-only fallback${enrichment.diagnostics.fallbackUsed === 1 ? "" : "s"} used.`,
+      coverageLimited
+        ? `${enrichedSuccessfully} conversation${enrichedSuccessfully === 1 ? "" : "s"} received verified thread context; the ${requiredFullContextReviews}-conversation confidence target was not fully reached after ${enrichmentReplacementAttempts} replacement attempt${enrichmentReplacementAttempts === 1 ? "" : "s"}. The scan will continue and will not present a definitive zero.`
+        : `${enrichedSuccessfully} conversation${enrichedSuccessfully === 1 ? "" : "s"} received verified thread context; ${enrichmentFailures} selected conversation${enrichmentFailures === 1 ? "" : "s"} remained discovery-only after bounded recovery.`,
     );
 
     await setStage(scan, "qualification", "active");
@@ -886,16 +967,12 @@ export async function runScan(
     const deepRows = [...deepById.values()];
     const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
       conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
-    const incompleteQualifiedLead = deepRows.find((row) =>
+    // A discovery-only fallback may still look promising to deep AI. Keep that
+    // provisional judgment in the transparent scan trace, but never promote it
+    // to a public lead or market-intelligence claim without verified thread context.
+    const unverifiedQualifiedCandidates = deepRows.filter((row) =>
       isQualifiedPotentialCustomer(row.qualification) && !hasVerifiedThreadContext(row.conversation),
     );
-    if (incompleteQualifiedLead) {
-      throw new ApiError(
-        "A qualified Reddit candidate could not be verified with thread context. The scan will retry rather than publish an incomplete lead.",
-        502,
-        "reddit_enrichment_failed",
-      );
-    }
     const relevantCompetitorByExternalId = new Map<string, string | null>();
     const relevantDeepRows = deepRows.filter((row) => {
       if (!hasVerifiedThreadContext(row.conversation)) return false;
@@ -1043,7 +1120,9 @@ export async function runScan(
       scan,
       "qualification",
       "complete",
-      `${aggregated.summary.total} unique potential customer${aggregated.summary.total === 1 ? "" : "s"} identified from ${rawOpportunities.length} qualified conversation${rawOpportunities.length === 1 ? "" : "s"}; ranking was applied only after qualification.`,
+      coverageLimited && aggregated.summary.total === 0
+        ? `No verified potential customer was promoted from ${enrichedSuccessfully} full-context review${enrichedSuccessfully === 1 ? "" : "s"}. The confidence target was ${requiredFullContextReviews}, so this is a limited-coverage result rather than a definitive zero.${unverifiedQualifiedCandidates.length > 0 ? ` ${unverifiedQualifiedCandidates.length} provisional signal${unverifiedQualifiedCandidates.length === 1 ? "" : "s"} lacked full thread verification.` : ""}`
+        : `${aggregated.summary.total} unique potential customer${aggregated.summary.total === 1 ? "" : "s"} identified from ${rawOpportunities.length} qualified conversation${rawOpportunities.length === 1 ? "" : "s"}; ranking was applied only after qualification.${unverifiedQualifiedCandidates.length > 0 ? ` ${unverifiedQualifiedCandidates.length} provisional signal${unverifiedQualifiedCandidates.length === 1 ? "" : "s"} lacked full thread verification and was not promoted.` : ""}`,
     );
 
     const fallbackInsightSet = buildFallbackInsights(opportunities);
@@ -1211,6 +1290,7 @@ export async function runScan(
         discoveryLanes: candidate.discoveryLanes,
         contentHash: candidate.provenance.contentHash,
         contextHash,
+        threadContextVerified: deep ? hasVerifiedThreadContext(deep.conversation) : false,
         firstSeenAt: previous?.firstSeenAt ?? scan.createdAt,
         lastSeenAt: scan.createdAt,
         lastAnalyzedAt:
@@ -1274,6 +1354,11 @@ export async function runScan(
       ...(enrichment.diagnostics.failureReason
         ? { enrichmentFailureReason: enrichment.diagnostics.failureReason }
         : {}),
+      requiredFullContextReviews,
+      coverageLimited,
+      enrichmentReplacementAttempts,
+      enrichmentReplacementSuccesses,
+      unverifiedPotentialCustomerSignals: unverifiedQualifiedCandidates.length,
       submittedForDeepQualification: conversationsNeedingDeep.length,
       deepQualificationsReturned: deepReturned,
       deepQualificationMissing: 0,

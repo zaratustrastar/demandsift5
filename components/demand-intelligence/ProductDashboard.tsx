@@ -15,6 +15,7 @@ import type {
   RedditDemandDemoData,
   RedditOpportunity,
   RelevantConversation,
+  ScanEvidence,
 } from "./types";
 
 import styles from "./ProductDashboard.module.css";
@@ -489,6 +490,124 @@ export function RelevantConversationCard({
         )}
       </div>
     </article>
+  );
+}
+
+
+export function ScanEvidencePanel({ evidence }: { evidence: ScanEvidence }) {
+  const rejected = [
+    ...Object.entries(evidence.diagnostics.providerRejectedByReason ?? {}),
+    ...Object.entries(evidence.diagnostics.deterministicRejectedByReason ?? {}),
+  ].filter(([, count]) => count > 0);
+
+  return (
+    <section className={styles.dashboardSection}>
+      <div className={styles.sectionHeadingRow}>
+        <div>
+          <span className={styles.eyebrow}>MVP scan trace</span>
+          <h2>Everything this scan found and analyzed</h2>
+        </div>
+        <span className={styles.qualityNote}>{evidence.candidates.length} credible candidates shown</span>
+      </div>
+
+      <section className={`${styles.card} ${styles.profileCard}`}>
+        <div className={styles.opportunityMeta}>
+          <span><b>{evidence.diagnostics.retrieved}</b> provider records found</span>
+          <span><b>{evidence.diagnostics.deterministicSurvivors}</b> credible candidates analyzed</span>
+          <span><b>{evidence.diagnostics.worthEnriching}</b> selected by lightweight AI</span>
+          <span><b>{evidence.diagnostics.enrichedSuccessfully}</b> full threads verified</span>
+          <span><b>{evidence.diagnostics.deepQualificationsReturned}</b> deep AI decisions</span>
+        </div>
+        {evidence.diagnostics.coverageLimited && (
+          <p className={styles.provenanceFootnote}>
+            Full-context coverage was limited: {evidence.diagnostics.enrichedSuccessfully} verified versus a target of {evidence.diagnostics.requiredFullContextReviews ?? 0}. This report therefore does not treat zero potential customers as definitive.
+          </p>
+        )}
+        <details>
+          <summary><strong>Search plan ({evidence.searchPlan.length} queries)</strong></summary>
+          <ul className={styles.cleanList}>
+            {evidence.searchPlan.map((entry, index) => (
+              <li key={`${entry.lane}-${entry.query}-${index}`}>
+                <span className={styles.listDot} />
+                <span><b>{intelligenceLabel(entry.lane)}</b>: {entry.query}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+        {rejected.length > 0 && (
+          <details>
+            <summary><strong>Rejected before AI ({rejected.reduce((sum, [, count]) => sum + count, 0)})</strong></summary>
+            <div className={styles.opportunityMeta}>
+              {rejected.map(([reason, count]) => (
+                <span key={reason}><b>{count}</b> {intelligenceLabel(reason)}</span>
+              ))}
+            </div>
+          </details>
+        )}
+      </section>
+
+      <div className={styles.opportunityStack}>
+        {evidence.candidates.map((candidate, index) => {
+          const deep = candidate.deepQualification;
+          const status = deep
+            ? deep.leadStatus === "potential_customer" && !candidate.fullContextVerified
+              ? "Provisional customer signal — context not verified"
+              : intelligenceLabel(deep.leadStatus)
+            : candidate.triage.worthEnriching
+              ? "Selected for full-context review"
+              : candidate.triage.relevant
+                ? "Relevant at lightweight triage"
+                : "Not selected by lightweight triage";
+          return (
+            <details className={styles.opportunityCard} key={candidate.externalId}>
+              <summary>
+                <strong>{index + 1}. {candidate.title || "Reddit comment"}</strong>
+                <span> · r/{candidate.subreddit} · {status}</span>
+              </summary>
+              <div className={styles.mockExcerpt}>
+                <span>Public message excerpt</span>
+                <p>“{candidate.excerpt}”</p>
+              </div>
+              <div className={styles.opportunityMeta}>
+                <span><b>{candidate.fullContextVerified ? "Yes" : "No"}</b> full thread context</span>
+                <span><b>{intelligenceLabel(candidate.triage.intent)}</b> triage intent</span>
+                <span><b>{intelligenceLabel(candidate.triage.productFit)}</b> triage fit</span>
+                {deep && <span><b>{intelligenceLabel(deep.leadStatus)}</b> deep result</span>}
+              </div>
+              <div className={styles.fitReasonGrid}>
+                <div>
+                  <span className={styles.fieldLabel}>Why lightweight AI made this decision</span>
+                  <p>{candidate.triage.reason}</p>
+                </div>
+                <div>
+                  <span className={styles.fieldLabel}>Deep review</span>
+                  <p>{deep?.whyItMatters ?? "Not sent to deep qualification."}</p>
+                </div>
+              </div>
+              {candidate.matchedQueries.length > 0 && (
+                <div>
+                  <span className={styles.fieldLabel}>Matched search attribution</span>
+                  <p>{candidate.matchedQueries.join(" · ")}</p>
+                </div>
+              )}
+              {candidate.permalink && (
+                <div className={styles.opportunityAction}>
+                  <span>Exact discovery message retained from the provider.</span>
+                  <a
+                    className={styles.secondaryButton}
+                    href={candidate.permalink}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    Open exact Reddit message <Icon name="external" size={14} />
+                  </a>
+                </div>
+              )}
+            </details>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -1209,9 +1328,12 @@ export function ProductDashboard({
               </>
             ) : (
               <>
-                <h1>No candidates passed qualification in this scan.</h1>
+                <h1>{data.qualificationCoverage?.limited ? "No verified potential customers yet." : "No candidates passed qualification in this scan."}</h1>
                 <p>
                   {strongestFallback} Reviewed {data.qualificationCoverage?.fullContextReviewed ?? 0} of {data.qualificationCoverage?.credibleCandidates ?? 0} credible recent candidates with additional Reddit thread context.
+                  {data.qualificationCoverage?.limited
+                    ? ` The full-context confidence target was ${data.qualificationCoverage.requiredFullContextReviews ?? 0}, so this is not a definitive zero.`
+                    : ""}
                 </p>
               </>
             )}
@@ -1317,6 +1439,8 @@ export function ProductDashboard({
           </div>
           <BusinessProfilePanel profile={data.business} />
         </section>
+
+        {data.scanEvidence && <ScanEvidencePanel evidence={data.scanEvidence} />}
 
         <section className={styles.dashboardSection}>
           <div className={styles.sectionHeadingRow}>
@@ -1443,6 +1567,8 @@ export function ProductDashboard({
       </div>
 
       <BusinessProfilePanel profile={data.business} />
+
+      {data.scanEvidence && <ScanEvidencePanel evidence={data.scanEvidence} />}
 
       <section className={styles.dashboardSection}>
         <div className={styles.sectionHeadingRow}>

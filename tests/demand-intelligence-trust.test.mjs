@@ -90,16 +90,19 @@ test("relevant conversations are source-linked and kept separate from reply-read
 });
 
 
-test("context coverage counts only successful provider enrichment and incomplete floors fail closed", async () => {
+test("context coverage counts only verified enrichment and degrades to limited coverage after bounded recovery", async () => {
   const [workflow, presenter, dashboard] = await Promise.all([
     source("lib/server/scan-workflow.ts"),
     source("lib/server/presenter.ts"),
     source("components/demand-intelligence/ProductDashboard.tsx"),
   ]);
-  assert.match(workflow, /enrichment\.diagnostics\.enriched < requiredFullContextReviews/);
-  assert.match(workflow, /reddit_enrichment_failed/);
+  assert.match(workflow, /verifiedContextCount\(\) < requiredFullContextReviews/);
+  assert.match(workflow, /enrichmentReplacementAttempts/);
+  assert.match(workflow, /coverageLimited/);
   assert.match(workflow, /hasVerifiedThreadContext/);
+  assert.doesNotMatch(workflow, /throw new ApiError\(detail, 502, "reddit_enrichment_failed"\)/);
   assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
   assert.match(dashboard, /additional Reddit thread context/);
+  assert.match(dashboard, /not a definitive zero/);
   assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
 });

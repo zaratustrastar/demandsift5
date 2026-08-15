@@ -1,0 +1,111 @@
+name: Validate TVCP browser-style production scan
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-network-20260815
+    paths:
+      - .github/workflows/validate-tvcp-browser-scan-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Run TVCP scan with browser polling cadence
+        shell: bash
+        env:
+          APP_URL: https://demandsift.143-244-154-139.sslip.io
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          status_json="$(mktemp)"
+          report_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$status_json" "$report_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1]))
+          print((p.get('scan') or {}).get('id') or '')
+          PY
+          )"
+          test -n "$scan_id"
+          echo "tvcp_scan_id=$scan_id"
+
+          transport_failures=0
+          for attempt in $(seq 1 500); do
+            http_code="$(curl --silent --show-error \
+              --cookie "$cookie_jar" \
+              --output "$status_json" \
+              --write-out '%{http_code}' \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" || true)"
+
+            if [ "$http_code" = "000" ] || [ "$http_code" = "408" ] || [ "$http_code" = "425" ] || [ "$http_code" = "429" ] || [ "${http_code:-0}" -ge 500 ] 2>/dev/null; then
+              transport_failures=$((transport_failures+1))
+              echo "poll=$attempt transient_http=$http_code transport_failures=$transport_failures"
+              sleep 3
+              continue
+            fi
+            test "$http_code" = "200"
+
+            status="$(python3 - "$status_json" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1]))
+          print((p.get('scan') or {}).get('status') or '')
+          PY
+          )"
+            echo "poll=$attempt status=$status transport_failures=$transport_failures"
+
+            if [ "$status" = "failed" ]; then
+              python3 - "$status_json" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1]))
+          s=p.get('scan') or {}
+          print('tvcp_result=failed')
+          print('error=' + str(s.get('error') or ''))
+          print('progress=' + json.dumps(s.get('progress') or [], separators=(',',':')))
+          PY
+              exit 1
+            fi
+
+            if [ "$status" = "complete" ]; then
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/api/scans/$scan_id" > "$report_json"
+              python3 - "$report_json" "$transport_failures" <<'PY'
+          import json, sys
+          p=json.load(open(sys.argv[1]))
+          failures=int(sys.argv[2])
+          s=p.get('scan') or {}
+          r=p.get('report') or {}
+          counts=r.get('storedCounts') or {}
+          if s.get('status') != 'complete':
+              raise SystemExit('TVCP report fetch did not return complete scan')
+          if not r.get('profile'):
+              raise SystemExit('TVCP completed scan has no business profile')
+          print('tvcp_result=complete')
+          print('transport_failures=' + str(failures))
+          print('opportunities=' + str(counts.get('opportunities', 0)))
+          print('replies=' + str(counts.get('replies', 0)))
+          print('insights=' + str(counts.get('insights', 0)))
+          print('competitor_signals=' + str(counts.get('competitorSignals', 0)))
+          PY
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo 'tvcp_result=timeout' >&2
+          exit 1

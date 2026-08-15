@@ -1,0 +1,35 @@
+name: Deploy validated TVCP repair
+
+on:
+  push:
+    branches:
+      - feature-staging-tvcp-diagnostics-20260816
+    paths:
+      - .github/workflows/deploy-current-tvcp-repair.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    env:
+      EXPECTED_SHA: 278afd704f181547eaa1a495ab1e78e7b614de62
+    steps:
+      - name: Confirm tested feature tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+      - name: Build exact tested repair
+        run: sudo -n /usr/local/sbin/demandsift-release build "$EXPECTED_SHA"
+      - name: Reconfirm feature tip and deploy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$EXPECTED_SHA"
+          sudo -n /usr/local/sbin/demandsift-release deploy
+          sudo -n /usr/local/sbin/demandsift-release inspect

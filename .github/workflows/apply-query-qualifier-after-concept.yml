@@ -52,3 +52,5 @@ jobs:
           git add lib/providers/reddit.server.ts tests/concept-gate-market-evidence.test.mjs
           git commit -m "Preserve critical qualifiers in Reddit search planning"
           git push origin HEAD:feature/reddit-intelligence-pipeline
+
+# registered trigger

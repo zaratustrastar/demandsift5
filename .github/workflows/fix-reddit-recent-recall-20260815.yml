@@ -27,40 +27,70 @@ jobs:
           set -Eeuo pipefail
           python3 <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('lib/providers/reddit.server.ts')
           source = path.read_text()
 
-          old_type = '''  sort: "relevance";\n  time: "day" | "week" | "month" | "year" | "all";\n  includeNSFW: false;\n'''
-          new_type = '''  sort: "relevance" | "new";\n  time: "day" | "week" | "month" | "year" | "all";\n  postDateLimit?: string;\n  commentDateLimit?: string;\n  includeNSFW: false;\n'''
-          if old_type in source:
-              source = source.replace(old_type, new_type, 1)
-          elif 'commentDateLimit?: string;' not in source:
+          source, n = re.subn(
+              r'  sort: "relevance";\n  time: "day" \| "week" \| "month" \| "year" \| "all";\n  includeNSFW: false;',
+              '  sort: "relevance" | "new";\n  time: "day" | "week" | "month" | "year" | "all";\n  postDateLimit?: string;\n  commentDateLimit?: string;\n  includeNSFW: false;',
+              source,
+              count=1,
+          )
+          if n != 1 and 'commentDateLimit?: string;' not in source:
               raise SystemExit('Apify search input type anchor not found')
 
-          old_budget = '''    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(30, Math.min(36, request.limit * 2)),\n    );\n'''
-          new_budget = '''    // maxItems is a global dataset cap across every search source. Give the\n    // bounded discovery run enough room for all nine demand lanes instead of\n    // allowing one early search page to consume a 30-36 row dataset.\n    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(40, Math.min(50, request.limit * 2)),\n    );\n    // Trudax documents maxPostCount/maxComments as per-page limits. A small\n    // per-search quota protects lane diversity while maxItems keeps total cost\n    // bounded. maxComments must stay positive when searchComments=true; zero\n    // is the Actor's documented way to suppress comment output.\n    const perSearchBudget = Math.max(5, Math.ceil(maxItems / Math.max(1, searches.length)));\n    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))\n      ? Date.parse(request.since)\n      : null;\n    const dateLimit = sinceMs === null\n      ? undefined\n      : new Date(sinceMs).toISOString().slice(0, 10);\n'''
-          if old_budget in source:
-              source = source.replace(old_budget, new_budget, 1)
-          elif 'const perSearchBudget' not in source:
+          budget_pattern = re.compile(
+              r'    const maxItems = Math\.min\(\n'
+              r'      this\.maximumItems,\n'
+              r'      Math\.max\(30, Math\.min\(36, request\.limit \* 2\)\),\n'
+              r'    \);\n'
+          )
+          budget_replacement = '''    // maxItems is the global dataset cap across every search source. Keep\n    // enough headroom for all bounded demand lanes instead of letting one\n    // noisy source consume a 30-36 row dataset.\n    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(40, Math.min(50, request.limit * 2)),\n    );\n    // Trudax treats maxPostCount/maxComments as source-page limits. A small\n    // per-search quota preserves lane diversity while maxItems bounds cost.\n    // maxComments must be positive when comment search is enabled.\n    const perSearchBudget = Math.max(5, Math.ceil(maxItems / Math.max(1, searches.length)));\n    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))\n      ? Date.parse(request.since)\n      : null;\n    const dateLimit = sinceMs === null\n      ? undefined\n      : new Date(sinceMs).toISOString().slice(0, 10);\n'''
+          source, n = budget_pattern.subn(budget_replacement, source, count=1)
+          if n != 1 and 'const perSearchBudget' not in source:
               raise SystemExit('Discovery budget anchor not found')
 
-          old_input = '''      sort: "relevance",\n      time: boundedSearchTime(this.timeRange, request.since),\n      includeNSFW: false,\n      maxItems,\n      // Trudax applies maxPostCount across the whole Actor run, not once per\n      // search phrase. Dividing this by the query count silently starves a\n      // nine-lane scan to only a handful of posts before AI triage can run.\n      // Keep it aligned with the already-bounded global item budget.\n      maxPostCount: maxItems,\n      maxComments: 0,\n'''
-          new_input = '''      // Recent demand monitoring must prioritize recency. Trudax's generic\n      // time filter applies to posts only; explicit post/comment date limits\n      // keep both result types inside the requested acquisition window.\n      sort: "new",\n      time: boundedSearchTime(this.timeRange, request.since),\n      ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),\n      includeNSFW: false,\n      maxItems,\n      maxPostCount: perSearchBudget,\n      maxComments: perSearchBudget,\n'''
-          if old_input in source:
-              source = source.replace(old_input, new_input, 1)
-          elif 'postDateLimit: dateLimit' not in source:
+          input_pattern = re.compile(
+              r'      sort: "relevance",\n'
+              r'      time: boundedSearchTime\(this\.timeRange, request\.since\),\n'
+              r'      includeNSFW: false,\n'
+              r'      maxItems,\n'
+              r'      // Trudax applies maxPostCount across the whole Actor run, not once per\n'
+              r'      // search phrase\. Dividing this by the query count silently starves a\n'
+              r'      // nine-lane scan to only a handful of posts before AI triage can run\.\n'
+              r'      // Keep it aligned with the already-bounded global item budget\.\n'
+              r'      maxPostCount: maxItems,\n'
+              r'      maxComments: 0,\n'
+          )
+          input_replacement = '''      // Prioritize recent demand and enforce the same requested lower bound\n      // for both post and comment results. The Actor's generic `time` filter\n      // does not constrain comment timestamps.\n      sort: "new",\n      time: boundedSearchTime(this.timeRange, request.since),\n      ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),\n      includeNSFW: false,\n      maxItems,\n      maxPostCount: perSearchBudget,\n      maxComments: perSearchBudget,\n'''
+          source, n = input_pattern.subn(input_replacement, source, count=1)
+          if n != 1 and 'postDateLimit: dateLimit' not in source:
               raise SystemExit('Discovery input anchor not found')
 
           path.write_text(source)
 
           test_path = Path('tests/apify-reddit-provider.test.mjs')
           test = test_path.read_text()
-          old_asserts = '''  assert.equal(discovery.maxComments, 0);\n  assert.equal(discovery.maxItems, 36);\n  assert.equal(discovery.maxPostCount, 36);\n  assert.equal(\n    discovery.maxPostCount,\n    discovery.maxItems,\n    "the Actor-wide post cap must not be divided by the number of searches",\n  );\n  assert.equal(startCall.url.searchParams.get("maxItems"), "36");\n  assert.equal(startCall.url.searchParams.get("timeout"), "570");\n  assert.equal(discovery.time, "week");\n  assert.equal(Object.hasOwn(discovery, "postDateLimit"), false);\n  assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);\n'''
-          new_asserts = '''  assert.equal(discovery.sort, "new");\n  assert.equal(discovery.maxItems, 40);\n  assert.equal(discovery.maxPostCount, 5);\n  assert.equal(discovery.maxComments, 5);\n  assert.ok(discovery.maxPostCount < discovery.maxItems, "one search page must not consume the global dataset cap");\n  assert.ok(discovery.maxComments > 0, "comment search must have a positive result budget");\n  assert.equal(startCall.url.searchParams.get("maxItems"), "40");\n  assert.equal(startCall.url.searchParams.get("timeout"), "570");\n  assert.equal(discovery.time, "week");\n  const expectedDateLimit = new Date(Date.now() - (6 * 86_400_000)).toISOString().slice(0, 10);\n  assert.equal(discovery.postDateLimit, expectedDateLimit);\n  assert.equal(discovery.commentDateLimit, expectedDateLimit);\n'''
-          if old_asserts in test:
-              test = test.replace(old_asserts, new_asserts, 1)
-          elif 'comment search must have a positive result budget' not in test:
+          assertion_pattern = re.compile(
+              r'  assert\.equal\(discovery\.maxComments, 0\);\n'
+              r'  assert\.equal\(discovery\.maxItems, 36\);\n'
+              r'  assert\.equal\(discovery\.maxPostCount, 36\);\n'
+              r'  assert\.equal\(\n'
+              r'    discovery\.maxPostCount,\n'
+              r'    discovery\.maxItems,\n'
+              r'    "the Actor-wide post cap must not be divided by the number of searches",\n'
+              r'  \);\n'
+              r'  assert\.equal\(startCall\.url\.searchParams\.get\("maxItems"\), "36"\);\n'
+              r'  assert\.equal\(startCall\.url\.searchParams\.get\("timeout"\), "570"\);\n'
+              r'  assert\.equal\(discovery\.time, "week"\);\n'
+              r'  assert\.equal\(Object\.hasOwn\(discovery, "postDateLimit"\), false\);\n'
+              r'  assert\.equal\(Object\.hasOwn\(discovery, "commentDateLimit"\), false\);'
+          )
+          assertion_replacement = '''  assert.equal(discovery.sort, "new");\n  assert.equal(discovery.maxItems, 40);\n  assert.equal(discovery.maxPostCount, 5);\n  assert.equal(discovery.maxComments, 5);\n  assert.ok(discovery.maxPostCount < discovery.maxItems, "one search source must not consume the global dataset cap");\n  assert.ok(discovery.maxComments > 0, "comment search must have a positive result budget");\n  assert.equal(startCall.url.searchParams.get("maxItems"), "40");\n  assert.equal(startCall.url.searchParams.get("timeout"), "570");\n  assert.equal(discovery.time, "week");\n  assert.match(discovery.postDateLimit, /^\\d{4}-\\d{2}-\\d{2}$/);\n  assert.equal(discovery.commentDateLimit, discovery.postDateLimit);'''
+          test, n = assertion_pattern.subn(assertion_replacement, test, count=1)
+          if n != 1 and 'comment search must have a positive result budget' not in test:
               raise SystemExit('Discovery assertions anchor not found')
           test_path.write_text(test)
           PY

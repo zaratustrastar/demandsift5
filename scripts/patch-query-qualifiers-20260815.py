@@ -162,3 +162,5 @@ addition = '''test("preserves narrow short qualifiers in categories and customer
 '''
 tests = tests.replace(anchor, addition + anchor, 1)
 test_path.write_text(tests)
+
+# Trigger marker: this file is intentionally stable and idempotent for the feature tip above.

@@ -1,0 +1,152 @@
+name: Apply concept market gate and qualifier fix
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-concept-gate-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    if: github.actor == 'zaratustrastar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Apply concept gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo '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' | base64 -d | gzip -d > /tmp/concept-gate.patch
+          git apply --check /tmp/concept-gate.patch
+          git apply /tmp/concept-gate.patch
+
+      - name: Preserve short semantic qualifiers in query planning
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PYFIX'
+          from pathlib import Path
+          p = Path('lib/providers/reddit.server.ts')
+          text = p.read_text()
+
+          old_tail = '''  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
+]);'''
+          new_tail = '''  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
+  "am", "as", "at", "by", "do", "go", "he", "if", "in", "it", "me", "my", "no",
+  "on", "so", "up", "us", "we",
+]);'''
+          if old_tail not in text:
+              raise SystemExit('stop-word anchor not found')
+          text = text.replace(old_tail, new_tail, 1)
+
+          old_problem = '''function problemTokens(value: string): string[] {
+  return normalizeSearchText(value)
+    .split(" ")
+    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
+}'''
+          new_problem = '''function problemTokens(value: string): string[] {
+  return normalizeSearchText(value)
+    .split(" ")
+    .filter((token) => token.length >= 2 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
+}'''
+          if old_problem not in text:
+              raise SystemExit('problemTokens anchor not found')
+          text = text.replace(old_problem, new_problem, 1)
+
+          old_category = '''  const categoryExpression = (value: string): string => {
+    const tokens = problemTokens(value);
+    if (tokens.length === 0) return "";
+    const selected = tokens.slice(0, 2);
+    const descriptor = tokens.find((token) =>
+      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
+    );
+    if (descriptor && !selected.includes(descriptor)) selected.push(descriptor);
+    return selected.join(" ");
+  };'''
+          new_category = '''  const categoryExpression = (value: string): string => {
+    const tokens = problemTokens(value);
+    if (tokens.length === 0) return "";
+    const selected = tokens.slice(0, 5);
+    const descriptor = tokens.find((token) =>
+      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
+    );
+    if (descriptor && !selected.includes(descriptor)) {
+      if (selected.length >= 5) selected[selected.length - 1] = descriptor;
+      else selected.push(descriptor);
+    }
+    return selected.join(" ");
+  };'''
+          if old_category not in text:
+              raise SystemExit('categoryExpression anchor not found')
+          text = text.replace(old_category, new_category, 1)
+
+          old_seed = '''    const seedTokens = seed
+      .split(" ")
+      .filter(
+        (token) =>
+          token.length >= 3 &&
+          !PROBLEM_TOKEN_STOP_WORDS.has(token),
+      )
+      .slice(0, 6);'''
+          new_seed = '''    const seedTokens = problemTokens(seed).slice(0, 6);'''
+          if old_seed not in text:
+              raise SystemExit('seedTokens anchor not found')
+          text = text.replace(old_seed, new_seed, 1)
+          p.write_text(text)
+          PYFIX
+
+      - name: Add regression suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo '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' | base64 -d | gzip -d > tests/concept-gate-market-evidence.test.mjs
+          cat >> tests/concept-gate-market-evidence.test.mjs <<'EOF'
+
+test("query planning preserves critical market qualifiers", () => {
+  assert.ok(
+    tvcpPlan.some((entry) => entry.query === "looking for android tv parental control app"),
+    JSON.stringify(tvcpPlan),
+  );
+  assert.ok(
+    tvcpPlan.some((entry) => entry.query.includes("kids watching tv too long")),
+    JSON.stringify(tvcpPlan),
+  );
+  assert.ok(
+    tvcpPlan.every((entry) => entry.query !== "looking for android parental app"),
+    JSON.stringify(tvcpPlan),
+  );
+});
+EOF
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - run: npm ci
+      - run: node --test tests/concept-gate-market-evidence.test.mjs
+      - run: node --test tests/apify-reddit-provider.test.mjs
+      - run: node --test tests/reddit-intelligence-pipeline.test.mjs
+      - run: npm run build
+      - run: npm run lint
+      - run: node --test tests/*.test.mjs
+      - run: git diff --check
+
+      - name: Commit fully verified search relevance fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/contracts.ts lib/providers/reddit.server.ts tests/concept-gate-market-evidence.test.mjs
+          git commit -m "Preserve market qualifiers and gate Reddit discovery on concept evidence"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

@@ -1,0 +1,60 @@
+name: Inspect TVCP user scan history
+
+on:
+  push:
+    branches:
+      - diagnose-tvcp-user-scan-20260816
+    paths:
+      - .github/workflows/inspect-tvcp-user-scan-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Inspect recent TVCP runtime scans without exposing user content
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          db_container="demandsift2-database-1"
+          sudo -n docker exec "$db_container" sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" <<'"'"'SQL'"'"'
+          SELECT
+            id,
+            status,
+            to_char(created_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
+            to_char(updated_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
+            left(coalesce(record->>'"'"'error'"'"','"'"''"'"'), 320),
+            coalesce(record->>'"'"'currentStage'"'"', record->>'"'"'stage'"'"', '"'"''"'"'),
+            coalesce((SELECT string_agg((x->>'"'"'id'"'"') || '"'"':'"'"' || (x->>'"'"'status'"'"'), '"'"','"'"' ORDER BY ord) FROM jsonb_array_elements(coalesce(record->'"'"'progress'"'"','"'"'[]'"'"'::jsonb)) WITH ORDINALITY AS t(x,ord)), '"'"''"'"')
+          FROM runtime_scans
+          WHERE lower(website_url) LIKE '"'"'%tvcp.app%'"'"'
+            AND created_at >= now() - interval '"'"'8 hours'"'"'
+          ORDER BY created_at DESC
+          LIMIT 30;
+          SQL
+          '
+
+      - name: Inspect recent runtime worker jobs tied to scans
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          db_container="demandsift2-database-1"
+          sudo -n docker exec "$db_container" sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" <<'"'"'SQL'"'"'
+          SELECT
+            type,
+            status,
+            attempts,
+            left(coalesce(last_error,'"'"''"'"'),320),
+            to_char(created_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
+            to_char(updated_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
+            coalesce(payload->>'"'"'scanId'"'"', payload->>'"'"'scan_id'"'"','"'"''"'"')
+          FROM background_jobs
+          WHERE created_at >= now() - interval '"'"'8 hours'"'"'
+            AND (payload::text ILIKE '"'"'%scan_%'"'"' OR type ILIKE '"'"'%scan%'"'"')
+          ORDER BY created_at DESC
+          LIMIT 60;
+          SQL
+          '

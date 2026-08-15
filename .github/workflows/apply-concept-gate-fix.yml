@@ -1,4 +1,4 @@
-name: Apply concept market gate and qualifier fix
+name: Apply concept-based market evidence gate
 
 on:
   push:
@@ -29,103 +29,11 @@ jobs:
           git apply --check /tmp/concept-gate.patch
           git apply /tmp/concept-gate.patch
 
-      - name: Preserve short semantic qualifiers in query planning
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 <<'PYFIX'
-          from pathlib import Path
-          p = Path('lib/providers/reddit.server.ts')
-          text = p.read_text()
-
-          old_tail = '''  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
-]);'''
-          new_tail = '''  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
-  "am", "as", "at", "by", "do", "go", "he", "if", "in", "it", "me", "my", "no",
-  "on", "so", "up", "us", "we",
-]);'''
-          if old_tail not in text:
-              raise SystemExit('stop-word anchor not found')
-          text = text.replace(old_tail, new_tail, 1)
-
-          old_problem = '''function problemTokens(value: string): string[] {
-  return normalizeSearchText(value)
-    .split(" ")
-    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
-}'''
-          new_problem = '''function problemTokens(value: string): string[] {
-  return normalizeSearchText(value)
-    .split(" ")
-    .filter((token) => token.length >= 2 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
-}'''
-          if old_problem not in text:
-              raise SystemExit('problemTokens anchor not found')
-          text = text.replace(old_problem, new_problem, 1)
-
-          old_category = '''  const categoryExpression = (value: string): string => {
-    const tokens = problemTokens(value);
-    if (tokens.length === 0) return "";
-    const selected = tokens.slice(0, 2);
-    const descriptor = tokens.find((token) =>
-      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
-    );
-    if (descriptor && !selected.includes(descriptor)) selected.push(descriptor);
-    return selected.join(" ");
-  };'''
-          new_category = '''  const categoryExpression = (value: string): string => {
-    const tokens = problemTokens(value);
-    if (tokens.length === 0) return "";
-    const selected = tokens.slice(0, 5);
-    const descriptor = tokens.find((token) =>
-      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
-    );
-    if (descriptor && !selected.includes(descriptor)) {
-      if (selected.length >= 5) selected[selected.length - 1] = descriptor;
-      else selected.push(descriptor);
-    }
-    return selected.join(" ");
-  };'''
-          if old_category not in text:
-              raise SystemExit('categoryExpression anchor not found')
-          text = text.replace(old_category, new_category, 1)
-
-          old_seed = '''    const seedTokens = seed
-      .split(" ")
-      .filter(
-        (token) =>
-          token.length >= 3 &&
-          !PROBLEM_TOKEN_STOP_WORDS.has(token),
-      )
-      .slice(0, 6);'''
-          new_seed = '''    const seedTokens = problemTokens(seed).slice(0, 6);'''
-          if old_seed not in text:
-              raise SystemExit('seedTokens anchor not found')
-          text = text.replace(old_seed, new_seed, 1)
-          p.write_text(text)
-          PYFIX
-
-      - name: Add regression suite
+      - name: Add concept gate regression suite
         shell: bash
         run: |
           set -Eeuo pipefail
           echo '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' | base64 -d | gzip -d > tests/concept-gate-market-evidence.test.mjs
-          cat >> tests/concept-gate-market-evidence.test.mjs <<'EOF'
-
-test("query planning preserves critical market qualifiers", () => {
-  assert.ok(
-    tvcpPlan.some((entry) => entry.query === "looking for android tv parental control app"),
-    JSON.stringify(tvcpPlan),
-  );
-  assert.ok(
-    tvcpPlan.some((entry) => entry.query.includes("kids watching tv too long")),
-    JSON.stringify(tvcpPlan),
-  );
-  assert.ok(
-    tvcpPlan.every((entry) => entry.query !== "looking for android parental app"),
-    JSON.stringify(tvcpPlan),
-  );
-});
-EOF
 
       - uses: actions/setup-node@v4
         with:
@@ -141,12 +49,12 @@ EOF
       - run: node --test tests/*.test.mjs
       - run: git diff --check
 
-      - name: Commit fully verified search relevance fix
+      - name: Commit fully verified concept gate
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add lib/providers/contracts.ts lib/providers/reddit.server.ts tests/concept-gate-market-evidence.test.mjs
-          git commit -m "Preserve market qualifiers and gate Reddit discovery on concept evidence"
+          git commit -m "Gate Reddit discovery on market and problem concept evidence"
           git push origin HEAD:feature/reddit-intelligence-pipeline

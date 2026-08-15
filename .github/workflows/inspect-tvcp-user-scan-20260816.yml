@@ -20,7 +20,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           db_container="demandsift2-database-1"
-          sudo -n docker exec "$db_container" sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" <<'"'"'SQL'"'"'
+          docker exec "$db_container" sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" <<'"'"'SQL'"'"'
           SELECT
             id,
             status,
@@ -34,27 +34,5 @@ jobs:
             AND created_at >= now() - interval '"'"'8 hours'"'"'
           ORDER BY created_at DESC
           LIMIT 30;
-          SQL
-          '
-
-      - name: Inspect recent runtime worker jobs tied to scans
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          db_container="demandsift2-database-1"
-          sudo -n docker exec "$db_container" sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" <<'"'"'SQL'"'"'
-          SELECT
-            type,
-            status,
-            attempts,
-            left(coalesce(last_error,'"'"''"'"'),320),
-            to_char(created_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
-            to_char(updated_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
-            coalesce(payload->>'"'"'scanId'"'"', payload->>'"'"'scan_id'"'"','"'"''"'"')
-          FROM background_jobs
-          WHERE created_at >= now() - interval '"'"'8 hours'"'"'
-            AND (payload::text ILIKE '"'"'%scan_%'"'"' OR type ILIKE '"'"'%scan%'"'"')
-          ORDER BY created_at DESC
-          LIMIT 60;
           SQL
           '

@@ -15,24 +15,19 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Inspect recent TVCP runtime scans without exposing user content
+      - name: Inspect release wrapper and known TVCP scan
         shell: bash
         run: |
           set -Eeuo pipefail
-          db_container="demandsift2-database-1"
-          docker exec "$db_container" sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" <<'"'"'SQL'"'"'
-          SELECT
-            id,
-            status,
-            to_char(created_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
-            to_char(updated_at AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD HH24:MI:SS'"'"'),
-            left(coalesce(record->>'"'"'error'"'"','"'"''"'"'), 320),
-            coalesce(record->>'"'"'currentStage'"'"', record->>'"'"'stage'"'"', '"'"''"'"'),
-            coalesce((SELECT string_agg((x->>'"'"'id'"'"') || '"'"':'"'"' || (x->>'"'"'status'"'"'), '"'"','"'"' ORDER BY ord) FROM jsonb_array_elements(coalesce(record->'"'"'progress'"'"','"'"'[]'"'"'::jsonb)) WITH ORDINALITY AS t(x,ord)), '"'"''"'"')
-          FROM runtime_scans
-          WHERE lower(website_url) LIKE '"'"'%tvcp.app%'"'"'
-            AND created_at >= now() - interval '"'"'8 hours'"'"'
-          ORDER BY created_at DESC
-          LIMIT 30;
-          SQL
-          '
+          echo "wrapper_path=$(readlink -f /usr/local/sbin/demandsift-release || true)"
+          ls -l /usr/local/sbin/demandsift-release || true
+          if [ -r /usr/local/sbin/demandsift-release ]; then
+            grep -nE 'diagnose|scan-status|recent|case.*command_name|allowed commands' /usr/local/sbin/demandsift-release || true
+          fi
+          echo '--- known TVCP scan status ---'
+          sudo -n /usr/local/sbin/demandsift-release scan-status scan_2826862b83b8424c98f252577242bf38 || true
+          echo '--- known TVCP scan aggregate diagnostics ---'
+          sudo -n /usr/local/sbin/demandsift-release diagnose scan_2826862b83b8424c98f252577242bf38 || true
+          echo '--- production env metadata only ---'
+          stat -c '%A %U:%G %n' /opt/demandsift5/deploy/vps.env 2>/dev/null || true
+          stat -c '%A %U:%G %n' /opt/demandsift5/deploy/compose.vps.yaml 2>/dev/null || true

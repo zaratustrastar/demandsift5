@@ -75,7 +75,7 @@ if old not in text:
 text = text.replace(old, new, 1)
 provider.write_text(text)
 
-test_path = Path('tests/reddit-provider.test.mjs')
+test_path = Path('tests/apify-reddit-provider.test.mjs')
 tests = test_path.read_text()
 anchor = '''test("Basecamp demand plan searches indirect pain and redistributes only from evidence-backed pools", () => {
 '''

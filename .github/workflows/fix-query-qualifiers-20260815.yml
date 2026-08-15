@@ -1,0 +1,71 @@
+name: Fix Reddit query qualifier preservation
+
+on:
+  push:
+    branches:
+      - diagnostic/runtime-queue-20260814
+    paths:
+      - scripts/patch-query-qualifiers-20260815.py
+      - .github/workflows/fix-query-qualifiers-20260815.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out patch source
+        uses: actions/checkout@v4
+        with:
+          ref: diagnostic/runtime-queue-20260814
+          path: patch-src
+
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          path: target
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: target/package-lock.json
+
+      - name: Apply systemic query fix
+        working-directory: target
+        run: python3 ../patch-src/scripts/patch-query-qualifiers-20260815.py
+
+      - name: Install
+        working-directory: target
+        run: npm ci
+
+      - name: Focused Reddit provider regressions
+        working-directory: target
+        run: node --test tests/reddit-provider.test.mjs
+
+      - name: Build
+        working-directory: target
+        run: npm run build
+
+      - name: Lint
+        working-directory: target
+        run: npm run lint
+
+      - name: Full test suite
+        working-directory: target
+        run: npm test
+
+      - name: Publish tested feature tip
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts tests/reddit-provider.test.mjs
+          git diff --cached --check
+          git commit -m "Preserve narrow qualifiers in Reddit search planning"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

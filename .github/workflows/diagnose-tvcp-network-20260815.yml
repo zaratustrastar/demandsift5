@@ -1,0 +1,53 @@
+name: Diagnose TVCP production scan
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-network-20260815
+    paths:
+      - .github/workflows/diagnose-tvcp-network-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Inspect TVCP scan state and relevant service logs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DB=demandsift2-database-1
+          WEB=demandsift2-web-1
+          WORKER=demandsift2-worker-1
+
+          echo '=== service state ==='
+          sudo -n docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E 'demandsift2-(web|worker|database)-1' || true
+
+          echo '=== recent TVCP runtime scans ==='
+          tvcp_rows="$(sudo -n docker exec "$DB" sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" -c "SELECT id,status,website_url,to_char(created_at AT TIME ZONE '\''UTC'\'', '\''YYYY-MM-DD HH24:MI:SS'\''),to_char(updated_at AT TIME ZONE '\''UTC'\'', '\''YYYY-MM-DD HH24:MI:SS'\''),left(coalesce(record->>'\''error'\'','\'''''),500) FROM runtime_scans WHERE website_url ILIKE '\''%tvcp%'\'' OR website_url ILIKE '\''%tvcp.app%'\'' ORDER BY created_at DESC LIMIT 8;"')"
+          if [ -z "$tvcp_rows" ]; then
+            echo 'no_tvcp_rows=true'
+          else
+            printf '%s\n' "$tvcp_rows"
+          fi
+
+          echo '=== most recent runtime scans (domain/status only) ==='
+          sudo -n docker exec "$DB" sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F "|" -c "SELECT id,status,regexp_replace(website_url, '\''(https?://[^/]+).*'\'', '\''\\1'\''),to_char(created_at AT TIME ZONE '\''UTC'\'', '\''YYYY-MM-DD HH24:MI:SS'\''),to_char(updated_at AT TIME ZONE '\''UTC'\'', '\''YYYY-MM-DD HH24:MI:SS'\'') FROM runtime_scans ORDER BY created_at DESC LIMIT 12;"'
+
+          scan_ids="$(printf '%s\n' "$tvcp_rows" | cut -d'|' -f1 | paste -sd'|' -)"
+          echo '=== matching worker logs ==='
+          if [ -n "$scan_ids" ]; then
+            sudo -n docker logs --since 45m "$WORKER" 2>&1 | grep -Ei "tvcp|${scan_ids}|network|fetch|error|failed|scan" | tail -n 260 || true
+          else
+            sudo -n docker logs --since 45m "$WORKER" 2>&1 | grep -Ei 'tvcp|network|fetch|error|failed|scan' | tail -n 160 || true
+          fi
+
+          echo '=== matching web logs ==='
+          if [ -n "$scan_ids" ]; then
+            sudo -n docker logs --since 45m "$WEB" 2>&1 | grep -Ei "tvcp|${scan_ids}|network|fetch|error|failed|scan" | tail -n 260 || true
+          else
+            sudo -n docker logs --since 45m "$WEB" 2>&1 | grep -Ei 'tvcp|network|fetch|error|failed|scan' | tail -n 160 || true
+          fi

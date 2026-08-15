@@ -23,7 +23,11 @@ jobs:
           fetch-depth: 0
 
       - name: Apply implementation
-        run: python3 .github/scripts/apply_mvp_transparency_recovery.py
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 .github/scripts/apply_mvp_transparency_recovery.py
+          sed -i 's/    let selectedForEnrichment = \[/    const selectedForEnrichment = [/' lib/server/scan-workflow.ts
 
       - name: Set up Node
         uses: actions/setup-node@v4

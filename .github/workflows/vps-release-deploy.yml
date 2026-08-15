@@ -112,3 +112,5 @@ jobs:
           test "$worker_state" = running
           test "$caddy_state" = running
           echo "release_verified=true"
+
+# Trigger deployment of the fully tested concept-gate + qualifier-preservation source.

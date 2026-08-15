@@ -23,6 +23,7 @@ import {
   selectZeroResultAuditCandidates,
 } from "@/lib/intelligence/reddit-pipeline";
 import { contentFingerprint, isUsefulSearchPhrase } from "@/lib/intelligence/opportunity-ranking";
+import { applyDiscoveryOverrides } from "@/lib/intelligence/discovery-overrides";
 import { clusterThemes } from "@/lib/intelligence/theme-clustering";
 import {
   DEFAULT_PREFILTER_FLOOR,
@@ -701,7 +702,14 @@ export async function runScan(
       });
       analysisMode = "local-fallback";
     }
-    await setStage(scan, "understanding", "complete", `Built a source-backed context pack for ${profile.name}.`);
+    // User edits are applied after crawling and before query planning: the
+    // user decides what to look for, DemandSift still compiles the searches.
+    const overrideResult = applyDiscoveryOverrides(business, scan.discoveryOverrides);
+    business = overrideResult.business;
+    const understandingDetail = overrideResult.overriddenFields.length > 0
+      ? `Built a source-backed context pack for ${profile.name}; ${overrideResult.overriddenFields.length} discovery field${overrideResult.overriddenFields.length === 1 ? "" : "s"} edited by you.`
+      : `Built a source-backed context pack for ${profile.name}.`;
+    await setStage(scan, "understanding", "complete", understandingDetail);
 
     const previousScan = await repository.getLatestScan(scan.workspaceId);
     const previousResult = previousScan?.result && sameWebsite(previousScan.websiteUrl, scan.websiteUrl)

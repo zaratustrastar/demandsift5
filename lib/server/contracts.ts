@@ -375,6 +375,8 @@ export type FunnelEventRecord = {
   createdAt: string;
 };
 
+import type { DiscoveryTermOverrides } from "@/lib/intelligence/discovery-overrides";
+
 export type ScanRecord = {
   id: string;
   workspaceId: string;
@@ -385,6 +387,12 @@ export type ScanRecord = {
   updatedAt: string;
   error: string | null;
   result: ScanResult | null;
+  /**
+   * User edits to the discovery terms, applied before query planning. Stored
+   * on the scan record, which is persisted as jsonb, so no schema change is
+   * required.
+   */
+  discoveryOverrides?: DiscoveryTermOverrides | null;
 };
 
 export type EntitlementRecord = {

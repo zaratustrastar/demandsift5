@@ -1,0 +1,109 @@
+name: Verify TVCP production scan
+
+on:
+  push:
+    branches:
+      - diagnostic/tvcp-production-20260816
+  workflow_dispatch:
+
+jobs:
+  tvcp-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run fresh TVCP scan and inspect aggregate result
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          report_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$report_json"' EXIT
+
+          curl --fail-with-body --silent --show-error --retry 4 --retry-all-errors \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app/","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          print(scan.get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "tvcp_scan_id=$scan_id"
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error --retry 4 --retry-all-errors \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest_json"
+
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "tvcp_poll=$attempt status=$status"
+
+            if [ "$status" = "complete" ]; then
+              curl --fail-with-body --silent --show-error --retry 4 --retry-all-errors \
+                --cookie "$cookie_jar" \
+                "$APP_URL/api/scans/$scan_id" > "$report_json"
+
+              python3 - "$report_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          report = payload.get("report") or {}
+          stored = report.get("storedCounts") or {}
+          profile = report.get("profile") or {}
+          print("tvcp_result=complete")
+          print("website=" + str(scan.get("websiteUrl") or ""))
+          print("profile_present=" + str(bool(profile)).lower())
+          print("opportunities=" + str(len(report.get("opportunities") or [])))
+          print("potential_customers=" + str(len(report.get("potentialCustomers") or [])))
+          print("competitor_signals=" + str(len(report.get("competitorSignals") or [])))
+          print("insights=" + str(len(report.get("insights") or [])))
+          print("replies=" + str(len(report.get("replies") or [])))
+          print("stored_opportunities=" + str(stored.get("opportunities") or 0))
+          print("stored_potential_customers=" + str(stored.get("potentialCustomers") or 0))
+          print("stored_competitor_signals=" + str(stored.get("competitorSignals") or 0))
+          print("stored_insights=" + str(stored.get("insights") or 0))
+          print("stored_replies=" + str(stored.get("replies") or 0))
+          transparency = report.get("transparency") or {}
+          for key in ["retrieved", "deterministicSurvivors", "submittedForTriage", "worthEnriching", "enrichedSuccessfully", "submittedForDeepQualification", "uniquePotentialCustomers", "repliesGenerated"]:
+              if key in transparency:
+                  print("trace_" + key + "=" + str(transparency.get(key)))
+          PY
+              exit 0
+            fi
+
+            if [ "$status" = "failed" ]; then
+              python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          error = payload.get("error") or {}
+          print("tvcp_result=failed")
+          print("scan_error=" + str(scan.get("error") or ""))
+          print("api_error_code=" + str(error.get("code") or ""))
+          print("api_error_message=" + str(error.get("message") or ""))
+          print("progress=" + json.dumps([{"id": x.get("id"), "status": x.get("status")} for x in (scan.get("progress") or [])], separators=(",", ":")))
+          PY
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "tvcp_result=timeout" >&2
+          exit 1

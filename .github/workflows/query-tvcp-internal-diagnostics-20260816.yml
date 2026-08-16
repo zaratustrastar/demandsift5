@@ -19,6 +19,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          curl --fail-with-body --silent --show-error \
+          curl --noproxy '*' --fail-with-body --silent --show-error \
             --resolve demandsift.143-244-154-139.sslip.io:443:127.0.0.1 \
             https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp

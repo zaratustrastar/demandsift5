@@ -59,6 +59,9 @@ jobs:
 
           curl --fail-with-body -sS --cookie "$jar" "$APP_URL/api/scans/$scan_id" > "$report"
           cp "$report" /tmp/report.json
+          # The app already exposes a sanitized end-to-end funnel; prefer it
+          # over reconstructing counts from the presented report.
+          curl -sS --cookie "$jar" "$APP_URL/acceptance-diagnostics" > /tmp/diag.json || echo '{}' > /tmp/diag.json
           echo "final status: $status"
 
       - name: Build the funnel report
@@ -71,6 +74,10 @@ jobs:
           payload = json.load(open("/tmp/report.json"))
           scan = payload.get("scan") or {}
           report = payload.get("report") or {}
+          try:
+              agg = json.load(open("/tmp/diag.json"))
+          except Exception:
+              agg = {}
           evidence = report.get("scanEvidence") or {}
           diag = evidence.get("diagnostics") or report.get("diagnostics") or {}
           coverage = report.get("qualificationCoverage") or {}
@@ -107,6 +114,18 @@ jobs:
           ]
           for label, value in rows:
               print(f"| {label} | {value} |")
+
+          print("\n### End-to-end funnel (/acceptance-diagnostics)\n")
+          print("```json")
+          print(json.dumps({
+              "scan": agg.get("scan"),
+              "output": agg.get("output"),
+              "diagnostics": agg.get("diagnostics"),
+              "retrieval": agg.get("retrieval"),
+              "decisionBreakdown": agg.get("decisionBreakdown"),
+              "presentation_ok": (agg.get("presentation") or {}).get("ok"),
+          }, indent=1)[:6000])
+          print("```")
 
           print("\n### Search plan\n")
           for q in plan[:14]:

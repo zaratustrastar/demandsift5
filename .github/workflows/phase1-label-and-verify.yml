@@ -47,7 +47,10 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     permissions:
+      # A PR comment goes through the issues endpoint but still requires the
+      # pull-requests scope; issues:write alone returns 403 here.
       issues: write
+      pull-requests: write
     steps:
       - name: Post the survey
         shell: bash

@@ -15,7 +15,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 35
     env:
-      EXPECTED_SHA: 278afd704f181547eaa1a495ab1e78e7b614de62
+      EXPECTED_SHA: b06f281edcc9b6d7e778cdc7c9062d70c15d4afa
     steps:
       - name: Confirm tested feature tip
         shell: bash

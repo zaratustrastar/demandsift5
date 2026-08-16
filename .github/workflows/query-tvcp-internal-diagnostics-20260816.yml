@@ -20,5 +20,5 @@ jobs:
         run: |
           set -Eeuo pipefail
           curl --fail-with-body --silent --show-error \
-            -H 'Host: demandsift.143-244-154-139.sslip.io' \
-            http://127.0.0.1/internal-vps-diagnostics/tvcp
+            --resolve demandsift.143-244-154-139.sslip.io:443:127.0.0.1 \
+            https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp

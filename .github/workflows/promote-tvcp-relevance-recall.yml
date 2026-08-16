@@ -1,0 +1,32 @@
+name: Promote corrected TVCP relevance recall
+on:
+  push:
+    branches: [feature-staging-tvcp-diagnostics-20260816]
+    paths: [.github/workflows/promote-tvcp-relevance-recall.yml]
+permissions:
+  contents: write
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - run: git fetch origin fix-tvcp-recall-relevance-20260816
+      - run: git checkout origin/fix-tvcp-recall-relevance-20260816 -- lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+      - run: npm ci
+      - run: node --test tests/apify-reddit-provider.test.mjs tests/reddit-intelligence-pipeline.test.mjs
+      - run: npm run build:node
+      - run: npm run lint
+      - name: Push feature
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git diff --cached --check
+          git commit -m 'Correct recent Reddit relevance recall'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

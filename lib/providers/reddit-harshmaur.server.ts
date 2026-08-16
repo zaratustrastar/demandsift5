@@ -43,32 +43,14 @@ export interface HarshmaurActorInput {
   /** Discovery never crawls threads; enrichment is a separate, later pass. */
   crawlCommentsPerPost: false;
   includeNSFW: false;
-  /** Actor-level caps. These are applied per search term, not per run. */
+  /**
+   * Global caps across all search terms, not per term. The schema states
+   * "total across all inputs", so these bound the whole run.
+   */
   maxPostsCount: number;
   maxCommentsCount: number;
   maxCommentsPerPost: 0;
   maxCommunitiesCount: 0;
-}
-
-/**
- * Per-term budgets sized so total acquisition lands near the target.
- *
- * The actor applies maxPostsCount/maxCommentsCount to *each* search term, so
- * passing the whole target through would multiply it by the number of terms
- * and make the Trudax comparison meaningless (and expensive). Splitting the
- * target across terms, half to posts and half to comments, keeps the two
- * providers on comparable budgets.
- */
-export function harshmaurPerTermBudget(
-  targetTotal: number,
-  termCount: number,
-): { maxPostsCount: number; maxCommentsCount: number } {
-  const terms = Math.max(1, Math.trunc(termCount));
-  const total = Math.max(1, Math.trunc(targetTotal));
-  const perTerm = Math.max(2, Math.ceil(total / terms));
-  const posts = Math.max(1, Math.ceil(perTerm / 2));
-  const comments = Math.max(1, perTerm - posts);
-  return { maxPostsCount: posts, maxCommentsCount: comments };
 }
 
 export interface HarshmaurRunSummary {
@@ -100,6 +82,27 @@ export function sevenDayWindow(now: Date = new Date()): { since: string; until: 
   return { since: since.toISOString(), until: until.toISOString() };
 }
 
+/**
+ * Split a global acquisition target between posts and comments.
+ *
+ * `maxPostsCount` and `maxCommentsCount` are documented as totals across all
+ * search results, not per-term quotas, so the target is divided by kind rather
+ * than by the number of terms. An earlier version divided by term count, which
+ * would have under-requested by roughly an order of magnitude and made a
+ * Trudax comparison meaningless.
+ *
+ * Per-term yield is still measurable: every record carries its own
+ * `searchTerm`, so attribution comes from the returned data rather than from
+ * separate caps.
+ */
+export function harshmaurAcquisitionBudget(
+  targetTotal: number,
+): { maxPostsCount: number; maxCommentsCount: number } {
+  const total = Math.max(2, Math.trunc(targetTotal));
+  const posts = Math.max(1, Math.floor(total / 2));
+  return { maxPostsCount: posts, maxCommentsCount: Math.max(1, total - posts) };
+}
+
 export function buildHarshmaurInput(
   request: RedditSearchRequest,
   options: { targetTotal: number; now?: Date; maxTerms?: number },
@@ -110,10 +113,7 @@ export function buildHarshmaurInput(
     : since;
 
   const searchTerms = naturalSearchTerms(request, { maxTerms: options.maxTerms ?? 12 });
-  const { maxPostsCount, maxCommentsCount } = harshmaurPerTermBudget(
-    options.targetTotal,
-    searchTerms.length,
-  );
+  const { maxPostsCount, maxCommentsCount } = harshmaurAcquisitionBudget(options.targetTotal);
 
   return {
     searchTerms,
@@ -224,7 +224,14 @@ export function harshmaurCandidate(
     return { candidate: null, reason: "outside_window" };
   }
 
-  const permalink = permalinkFor(row.postUrl ?? row.url ?? row.permalink ?? row.link);
+  // Comments carry `url` for the comment itself and `postUrl` for its parent
+  // post. Preferring postUrl for a comment would point every piece of comment
+  // evidence at the thread instead of the exact statement we qualified on.
+  const permalink = permalinkFor(
+    kind === "comment"
+      ? row.url ?? row.permalink ?? row.postUrl ?? row.link
+      : row.postUrl ?? row.url ?? row.permalink ?? row.link,
+  );
   if (!permalink) return { candidate: null, reason: "invalid_url" };
 
   const author = text(row.authorName ?? row.author ?? row.username);
@@ -241,7 +248,10 @@ export function harshmaurCandidate(
       sourceMode: "live",
       externalId,
       kind,
-      parentExternalId: text(row.postId ?? row.parentId),
+      // `parentId` is the immediate parent, `postId` the thread root. Using
+      // postId first flattened nested replies onto the post.
+      parentExternalId:
+        kind === "comment" ? text(row.parentId ?? row.postId) : undefined,
       subreddit,
       title,
       body: body || title || "",

@@ -71,18 +71,26 @@ test("actor input matches the real Harshmaur schema", () => {
   }
 });
 
-test("per-term budgets keep total acquisition comparable to Trudax", () => {
-  // The actor applies these caps per search term, so passing the full target
-  // through would multiply spend by the number of terms.
-  for (const [target, terms] of [[250, 12], [250, 4], [100, 10], [40, 1]]) {
-    const { maxPostsCount, maxCommentsCount } = harshmaur.harshmaurPerTermBudget(target, terms);
-    const projected = (maxPostsCount + maxCommentsCount) * terms;
+test("acquisition caps are global totals, not per-term quotas", () => {
+  // The schema documents these as "total across all inputs". Dividing by term
+  // count under-requested by roughly an order of magnitude and would have made
+  // the Trudax comparison meaningless.
+  for (const target of [250, 100, 40, 2]) {
+    const { maxPostsCount, maxCommentsCount } = harshmaur.harshmaurAcquisitionBudget(target);
     assert.ok(maxPostsCount >= 1 && maxCommentsCount >= 1);
-    assert.ok(
-      projected >= target && projected <= target * 2.5,
-      `budget ${maxPostsCount}/${maxCommentsCount} x ${terms} = ${projected} for target ${target}`,
-    );
+    assert.equal(maxPostsCount + maxCommentsCount, target,
+      "posts plus comments must equal the global target");
   }
+  assert.deepEqual(harshmaur.harshmaurAcquisitionBudget(250),
+    { maxPostsCount: 125, maxCommentsCount: 125 });
+});
+
+test("the budget does not change with the number of search terms", () => {
+  const few = harshmaur.buildHarshmaurInput(tvcp, { targetTotal: 250, now: NOW, maxTerms: 3 });
+  const many = harshmaur.buildHarshmaurInput(tvcp, { targetTotal: 250, now: NOW, maxTerms: 12 });
+  assert.ok(many.searchTerms.length > few.searchTerms.length, "fixture must vary term count");
+  assert.equal(few.maxPostsCount, many.maxPostsCount);
+  assert.equal(few.maxCommentsCount, many.maxCommentsCount);
 });
 
 test("both posts and comments are budgeted so comment search is exercised", () => {
@@ -295,4 +303,55 @@ test("the actor id is normalized to Apify's tilde path form", () => {
   assert.equal(harshmaur.harshmaurActorId("harshmaur/reddit-scraper"), "harshmaur~reddit-scraper");
   assert.equal(harshmaur.harshmaurActorId("harshmaur~reddit-scraper"), "harshmaur~reddit-scraper");
   assert.throws(() => harshmaur.harshmaurActorId("not a valid id!"));
+});
+
+
+test("a comment permalink points at the comment, not its parent post", () => {
+  // Real comment records carry both; preferring postUrl would send every piece
+  // of comment evidence to the thread instead of the exact statement.
+  const withBoth = {
+    ...realComment,
+    id: "t1_deep",
+    postUrl: "https://www.reddit.com/r/AndroidTV/comments/realpost/any_parental_control/",
+    url: "https://www.reddit.com/r/AndroidTV/comments/realpost/any_parental_control/deep1/",
+  };
+  const { candidates } = harshmaur.parseHarshmaurDataset([withBoth], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].permalink, withBoth.url);
+  assert.notEqual(candidates[0].permalink, withBoth.postUrl);
+});
+
+test("a post permalink still prefers postUrl", () => {
+  const { candidates } = harshmaur.parseHarshmaurDataset([realPost], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(candidates[0].permalink, realPost.postUrl);
+});
+
+test("a nested reply keeps its immediate parent, not the thread root", () => {
+  const nested = {
+    ...realComment,
+    id: "t1_child",
+    postId: "t3_post",
+    parentId: "t1_parent",
+  };
+  const { candidates } = harshmaur.parseHarshmaurDataset([nested], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].parentExternalId, "t1_parent",
+    "postId is the thread root; parentId is the actual parent");
+});
+
+test("a post never inherits a parent id", () => {
+  const { candidates } = harshmaur.parseHarshmaurDataset([realPost], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(candidates[0].parentExternalId, undefined);
 });

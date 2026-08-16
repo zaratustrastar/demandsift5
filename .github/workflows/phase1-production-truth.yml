@@ -1,0 +1,139 @@
+name: Phase1 production truth check
+
+# Runs ON the VPS via the self-hosted runner to establish what production is
+# actually running, before any classifier or filter is touched.
+#
+# Secret hygiene: this posts to a public PR, so it never dumps vps.env. Only
+# the named non-secret acquisition keys are echoed, and anything token-shaped
+# is reduced to a presence/length report.
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/phase1-production-truth.yml
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  truth:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
+
+      - name: Collect production truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/phase1.md
+          : > "$OUT"
+
+          BRANCH_SHA="$(git rev-parse HEAD)"
+          {
+            echo "## Phase 1 — what production is actually running"
+            echo
+            echo "branch head (feature/reddit-intelligence-pipeline): \`$BRANCH_SHA\`"
+            echo
+          } >> "$OUT"
+
+          echo "### Containers" >> "$OUT"
+          echo '```' >> "$OUT"
+          (sudo -n docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+            || docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+            || echo "docker ps unavailable") >> "$OUT"
+          echo '```' >> "$OUT"
+
+          dockercmd() { sudo -n docker "$@" 2>/dev/null || docker "$@" 2>/dev/null; }
+
+          echo "### Deployed SHA per container" >> "$OUT"
+          echo '```' >> "$OUT"
+          for name in $(dockercmd ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true); do
+            echo "--- $name"
+            # Prefer an explicit build arg/label, then any baked-in env, then the image digest.
+            label="$(dockercmd inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name" || true)"
+            envsha="$(dockercmd exec "$name" sh -lc 'echo "${GIT_SHA:-${RELEASE_SHA:-${SOURCE_COMMIT:-}}}"' 2>/dev/null || true)"
+            image="$(dockercmd inspect -f '{{.Image}}' "$name" || true)"
+            created="$(dockercmd inspect -f '{{.Created}}' "$name" || true)"
+            echo "label_revision=${label:-<none>}"
+            echo "env_sha=${envsha:-<none>}"
+            echo "image=${image:-<none>}"
+            echo "container_created=${created:-<none>}"
+          done >> "$OUT"
+          echo '```' >> "$OUT"
+
+          # The strongest available proof: does the running bundle contain code
+          # that only exists on this branch?
+          echo "### Code-presence probe inside the running containers" >> "$OUT"
+          echo '```' >> "$OUT"
+          for name in $(dockercmd ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true); do
+            echo "--- $name"
+            for marker in CONCEPT_SYNONYMS prioritizeCandidates conversationThemes discoveryProfile leadScore; do
+              hits="$(dockercmd exec "$name" sh -lc "grep -rl '$marker' /app/dist /app/.next 2>/dev/null | head -3 | tr '\n' ' '" 2>/dev/null || true)"
+              echo "$marker -> ${hits:-<absent>}"
+            done
+          done >> "$OUT"
+          echo '```' >> "$OUT"
+
+          echo "### VPS deploy env (acquisition keys only)" >> "$OUT"
+          ENVFILE=/opt/demandsift5-pr1/deploy/vps.env
+          echo '```' >> "$OUT"
+          if sudo -n test -f "$ENVFILE" 2>/dev/null || test -f "$ENVFILE"; then
+            echo "env_file=$ENVFILE (present)"
+            for key in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS \
+                       APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS \
+                       APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES \
+                       REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET \
+                       BACKGROUND_WORKER_MODE APP_RUNTIME_ENV; do
+              line="$( (sudo -n grep -E "^${key}=" "$ENVFILE" 2>/dev/null || grep -E "^${key}=" "$ENVFILE" 2>/dev/null) | tail -1 || true)"
+              echo "${line:-${key}=<unset>}"
+            done
+            # Secrets: presence only, never values.
+            for key in APIFY_TOKEN OPENAI_API_KEY DATABASE_URL; do
+              val="$( (sudo -n grep -E "^${key}=" "$ENVFILE" 2>/dev/null || grep -E "^${key}=" "$ENVFILE" 2>/dev/null) | tail -1 | cut -d= -f2- || true)"
+              if [ -n "$val" ]; then echo "${key}=<set, ${#val} chars>"; else echo "${key}=<unset>"; fi
+            done
+          else
+            echo "env_file=$ENVFILE NOT READABLE by the runner"
+          fi
+          echo '```' >> "$OUT"
+
+          echo "### Effective env inside the running containers" >> "$OUT"
+          echo '```' >> "$OUT"
+          for name in $(dockercmd ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true); do
+            echo "--- $name"
+            dockercmd exec "$name" sh -lc 'for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET BACKGROUND_WORKER_MODE; do v=$(printenv "$k" || true); echo "$k=${v:-<unset>}"; done' 2>/dev/null || echo "exec failed"
+          done >> "$OUT"
+          echo '```' >> "$OUT"
+
+          head -c 60000 "$OUT" > /tmp/phase1.trimmed.md
+          cat /tmp/phase1.trimmed.md
+
+      - name: Post findings to the PR
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY' > /tmp/body.json
+          import json
+          try:
+              body = open("/tmp/phase1.trimmed.md").read()
+          except FileNotFoundError:
+              body = "Phase 1 truth check produced no output; the collection step failed."
+          print(json.dumps({"body": body}))
+          PY
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --data @/tmp/body.json > /dev/null
+          echo "posted"

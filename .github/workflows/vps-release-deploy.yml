@@ -28,8 +28,17 @@ jobs:
           SOURCE_CHECKOUT=/opt/demandsift5-pr1
           ENV_FILE="$SOURCE_CHECKOUT/deploy/vps.env"
           COMPOSE_FILE="$GITHUB_WORKSPACE/deploy/compose.vps.yaml"
-          PROJECT=demandsift
+          # The live site is served by the `demandsift2` compose project. This
+          # previously said `demandsift`, so releases built a parallel stack
+          # with its own images and volumes while production kept serving a
+          # 2026-08-09 build. Using the real project name also means the
+          # existing Postgres and Caddy volumes are reused, not recreated.
+          PROJECT="${DEMANDSIFT_COMPOSE_PROJECT:-demandsift2}"
           RELEASE_SHA="$(git rev-parse HEAD)"
+          RELEASE_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Consumed by deploy/compose.vps.yaml build labels so the running
+          # image can prove its own revision.
+          export RELEASE_SHA RELEASE_BUILT_AT
           ROLLBACK_TAG="rollback-$(date -u +%Y%m%dT%H%M%SZ)"
 
           test -f "$ENV_FILE" || { echo "missing_deploy_env=true"; exit 2; }
@@ -54,9 +63,11 @@ jobs:
             fi
           }
 
-          rollback_image demandsift-web
-          rollback_image demandsift-worker
-          rollback_image demandsift-migrate
+          # Compose names images "<project>-<service>", so rollback tags must
+          # follow the project or they would snapshot the wrong stack.
+          rollback_image "${PROJECT}-web"
+          rollback_image "${PROJECT}-worker"
+          rollback_image "${PROJECT}-migrate"
 
           echo "--- build release images while production stays up ---"
           compose build web worker migrate
@@ -91,7 +102,7 @@ jobs:
             echo "--- bounded web logs ---"
             compose logs --no-color --tail=80 web || true
             echo "--- rollback app images ---"
-            for image in demandsift-web demandsift-worker; do
+            for image in "${PROJECT}-web" "${PROJECT}-worker"; do
               if sudo -n docker image inspect "$image:$ROLLBACK_TAG" >/dev/null 2>&1; then
                 sudo -n docker tag "$image:$ROLLBACK_TAG" "$image:latest"
               fi
@@ -111,6 +122,31 @@ jobs:
           echo "caddy_state=$caddy_state"
           test "$worker_state" = running
           test "$caddy_state" = running
+          echo "--- prove the running images carry this release SHA ---"
+          revision_ok=true
+          for target in web worker; do
+            cid="$(compose ps -q "$target")"
+            rev="$(sudo -n docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$cid" 2>/dev/null || true)"
+            echo "${target}_image_revision=${rev:-<unlabeled>}"
+            if [ "$rev" != "$RELEASE_SHA" ]; then revision_ok=false; fi
+          done
+          echo "expected_release_sha=$RELEASE_SHA"
+          if [ "$revision_ok" != true ]; then
+            echo "release_revision_mismatch=true"
+            exit 4
+          fi
+
+          echo "--- confirm the deployed bundle contains current source ---"
+          web_id_check="$(compose ps -q web)"
+          for marker in prioritizeCandidates conversationThemes discoveryProfile; do
+            if sudo -n docker exec "$web_id_check" sh -lc "grep -rqs '$marker' /app" 2>/dev/null; then
+              echo "marker_present=$marker"
+            else
+              echo "marker_absent=$marker"
+            fi
+          done
+
           echo "release_verified=true"
 
-# Trigger deployment of the fully tested concept-gate + qualifier-preservation source.
+# Trigger: deploy the current feature branch into the live demandsift2 project
+# with SHA-stamped images, replacing the stale 2026-08-09 production build.

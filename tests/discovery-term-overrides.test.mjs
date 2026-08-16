@@ -59,7 +59,7 @@ test("user-supplied terms carry no website citations", () => {
     [],
     "a user's term must not inherit the crawl's provenance",
   );
-  assert.equal(updated.productTerms.confidence, "low");
+  assert.ok(updated.productTerms.confidence < 0.5, "user terms carry low confidence");
   assert.deepEqual(updated.productTerms.value, ["Google TV screen time app"]);
 });
 

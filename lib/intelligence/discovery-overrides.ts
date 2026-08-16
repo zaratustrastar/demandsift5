@@ -64,7 +64,8 @@ export function sanitizeDiscoveryOverrides(input: unknown): DiscoveryTermOverrid
  * judgement rather than the crawled site.
  */
 function userProvided<T>(value: T): CitedValue<T> {
-  return { value, confidence: "low", provenanceIds: [] };
+  // Low but non-zero: the user asserted it, yet no crawled page supports it.
+  return { value, confidence: 0.3, provenanceIds: [] };
 }
 
 export interface AppliedDiscoveryOverrides {

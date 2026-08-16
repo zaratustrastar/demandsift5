@@ -584,6 +584,9 @@ export const redditDemandDemoData: RedditDemandDemoData = {
       verifiedWithinDemoFixture: true,
     },
   ],
+  // Demo fixture: themes are aggregated from the fictional corpus above, so the
+  // evidence links resolve to the same fictional conversations.
+  conversationThemes: [],
   insights: [
     {
       id: "insight-ownership-before-automation",

@@ -9,9 +9,12 @@ import {
   scanResponseToDashboard,
   type ApiScanResponse,
 } from "./demand-intelligence/from-scan";
+import { DiscoveryProfile } from "./DiscoveryProfile";
 import styles from "./ThreadlineExperience.module.css";
 
-type View = "landing" | "scanning" | "restoring" | "report" | "error";
+// "profile" is the review step: the site has been analyzed, the user sees what
+// we plan to look for, and Reddit retrieval has not started yet.
+type View = "landing" | "analyzing" | "profile" | "scanning" | "restoring" | "report" | "error";
 type AccessLevel = "free" | "pass" | "core";
 
 const SCAN_POLL_INTERVAL_MS = 3_000;
@@ -342,6 +345,8 @@ export function ThreadlineExperience() {
   const [url, setUrl] = useState("");
   const [scanResponse, setScanResponse] = useState<ApiScanResponse | null>(null);
   const [scanProgress, setScanProgress] = useState<ApiScanResponse["scan"]["progress"]>([]);
+  /** Set once the website is analyzed and the profile is awaiting review. */
+  const [reviewScanId, setReviewScanId] = useState("");
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("free");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
@@ -512,7 +517,71 @@ export function ThreadlineExperience() {
     setScanResponse(null);
     setScanProgress([]);
     setErrorMessage("");
-    setView("scanning");
+    setReviewScanId("");
+    setView("analyzing");
+  }
+
+  // Phase one: create the scan without starting it, then analyze the website
+  // only. Reddit retrieval waits until the user has reviewed the profile.
+  useEffect(() => {
+    if (view !== "analyzing") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const createdResponse = await fetch("/api/scans", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ websiteUrl: url, reviewFirst: true }),
+        });
+        const created = (await createdResponse.json()) as ApiScanResponse;
+        if (!createdResponse.ok || !created.scan?.id) {
+          throw new Error(created.error?.message ?? "We could not safely read that website.");
+        }
+        if (cancelled) return;
+        setScanResponse(created);
+        setScanProgress(created.scan.progress);
+        setAccessLevel(effectiveAccessLevel(created.access));
+
+        const analyzedResponse = await fetch(
+          `/api/scans/${encodeURIComponent(created.scan.id)}/analyze`,
+          { method: "POST" },
+        );
+        const analyzed = (await analyzedResponse.json()) as ApiScanResponse;
+        if (!analyzedResponse.ok) {
+          throw new Error(analyzed.error?.message ?? "We could not analyze that website.");
+        }
+        if (cancelled) return;
+        setScanProgress(analyzed.scan.progress);
+        setReviewScanId(created.scan.id);
+        setView("profile");
+      } catch (analysisError) {
+        if (cancelled) return;
+        setErrorMessage(
+          analysisError instanceof Error ? analysisError.message : "Website analysis failed.",
+        );
+        setView("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [view, url]);
+
+  // Phase two: the user approved the profile, so start Reddit retrieval.
+  async function beginRedditScan() {
+    try {
+      const response = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}/run`, {
+        method: "POST",
+      });
+      if (!response.ok && response.status !== 202) {
+        const failure = (await response.json()) as ApiScanResponse;
+        throw new Error(failure.error?.message ?? "The scan could not be started.");
+      }
+      setView("scanning");
+    } catch (startError) {
+      setErrorMessage(startError instanceof Error ? startError.message : "The scan could not be started.");
+      setView("error");
+    }
   }
 
   useEffect(() => {
@@ -524,6 +593,14 @@ export function ThreadlineExperience() {
       try {
         let created = resumedScanRef.current;
         resumedScanRef.current = null;
+        if (!created && reviewScanId) {
+          // Already created and started by the review step; just poll it.
+          const existing = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}`, {
+            cache: "no-store",
+          });
+          const payload = (await existing.json()) as ApiScanResponse;
+          if (existing.ok && payload.scan?.id) created = payload;
+        }
         if (!created || created.scan.websiteUrl !== url || created.scan.status === "failed") {
           const createdResponse = await fetch("/api/scans", {
             method: "POST",
@@ -614,7 +691,7 @@ export function ThreadlineExperience() {
       cancelled = true;
       window.clearTimeout(pollTimer);
     };
-  }, [view, url]);
+  }, [view, url, reviewScanId]);
 
   async function refreshScan(scanId: string) {
     const response = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });
@@ -851,6 +928,19 @@ export function ThreadlineExperience() {
   }
 
   if (view === "landing") return <Landing onSubmit={startScan} />;
+  if (view === "analyzing") {
+    return <Scanning url={url} progress={scanProgress} />;
+  }
+  if (view === "profile") {
+    return (
+      <DiscoveryProfile
+        scanId={reviewScanId}
+        websiteUrl={url}
+        onStartScan={beginRedditScan}
+        onBack={() => setView("landing")}
+      />
+    );
+  }
   if (view === "scanning" || view === "restoring") {
     return <Scanning url={url} progress={scanProgress} />;
   }

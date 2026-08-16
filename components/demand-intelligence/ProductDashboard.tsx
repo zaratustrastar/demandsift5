@@ -10,6 +10,7 @@ import type {
   InsightEvidence,
   LockedResultCounts,
   LockedStoredResult,
+  ConversationTheme,
   NavigationSectionId,
   PricingPlan,
   RedditDemandDemoData,
@@ -604,6 +605,81 @@ export function ScanEvidencePanel({ evidence }: { evidence: ScanEvidence }) {
                 </div>
               )}
             </details>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * A recurring struggle or request, with its supporting conversations behind a
+ * "Show evidence" toggle.
+ *
+ * Every aggregated count in the report has to be inspectable: the number shown
+ * is the number of conversations listed, so a reader can always check the claim
+ * rather than trust it.
+ */
+function ThemeSection({
+  kind,
+  eyebrow,
+  heading,
+  themes,
+}: {
+  kind: "struggle" | "request";
+  eyebrow: string;
+  heading: string;
+  themes: ConversationTheme[];
+}) {
+  const [openThemeId, setOpenThemeId] = useState<string | null>(null);
+  const visible = (themes ?? []).filter((theme) => theme.kind === kind);
+  if (visible.length === 0) return null;
+
+  return (
+    <section className={styles.dashboardSection}>
+      <div className={styles.sectionHeadingRow}>
+        <div>
+          <span className={styles.eyebrow}>{eyebrow}</span>
+          <h2>{heading}</h2>
+        </div>
+      </div>
+      <div className={styles.insightColumn}>
+        {visible.map((theme) => {
+          const open = openThemeId === theme.id;
+          return (
+            <article className={styles.themeCard} key={theme.id}>
+              <div className={styles.themeHead}>
+                <h3>{theme.label}</h3>
+                <span className={styles.themeCount}>
+                  {theme.conversationCount} conversation
+                  {theme.conversationCount === 1 ? "" : "s"}
+                </span>
+              </div>
+              <button
+                className={styles.themeToggle}
+                type="button"
+                aria-expanded={open}
+                onClick={() => setOpenThemeId(open ? null : theme.id)}
+              >
+                {open ? "Hide evidence" : "Show evidence"}
+              </button>
+              {open && (
+                <ul className={styles.themeEvidence}>
+                  {theme.evidence.map((item) => (
+                    <li key={item.sourceId}>
+                      {item.permalink ? (
+                        <a href={item.permalink} target="_blank" rel="noreferrer noopener">
+                          {item.title}
+                        </a>
+                      ) : (
+                        <span>{item.title}</span>
+                      )}
+                      <em>r/{item.subreddit}</em>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </article>
           );
         })}
       </div>
@@ -1453,6 +1529,20 @@ export function ProductDashboard({
             <CompetitorWeaknessCard key={weakness.id} weakness={weakness} />
           ))}
         </section>
+
+        <ThemeSection
+          kind="struggle"
+          eyebrow="Recurring pain"
+          heading="What customers are struggling with"
+          themes={data.conversationThemes}
+        />
+
+        <ThemeSection
+          kind="request"
+          eyebrow="Recurring requests"
+          heading="What they are asking for"
+          themes={data.conversationThemes}
+        />
 
         {data.insights.length > 0 && (
           <section className={styles.dashboardSection}>

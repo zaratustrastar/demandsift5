@@ -2158,3 +2158,60 @@
     text-align: left;
   }
 }
+
+/* Recurring struggle/request themes with inspectable evidence. */
+.themeCard {
+  border: 1px solid var(--line, #dde3dc);
+  border-radius: 14px;
+  background: #fff;
+  padding: 16px 18px;
+}
+
+.themeHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.themeHead h3 { margin: 0; font-size: 16px; }
+
+.themeCount {
+  font-size: 12px;
+  color: var(--muted, #66716a);
+  white-space: nowrap;
+}
+
+.themeToggle {
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--green, #1f7550);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.themeEvidence {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line, #dde3dc);
+  display: grid;
+  gap: 8px;
+}
+
+.themeEvidence li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.themeEvidence a { color: var(--ink, #18231d); }
+.themeEvidence em { font-style: normal; color: var(--muted, #66716a); white-space: nowrap; }

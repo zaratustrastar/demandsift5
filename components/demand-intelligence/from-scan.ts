@@ -109,6 +109,13 @@ type ApiReport = {
   profile: ApiProfile;
   insights: ApiInsight[];
   relevantConversations?: ApiRelevantConversation[];
+  conversationThemes?: Array<{
+    id: string;
+    label: string;
+    kind: "struggle" | "request";
+    conversationCount: number;
+    sourceIds: string[];
+  }>;
   competitorWeakness: {
     id: string;
     verified: boolean;
@@ -410,6 +417,32 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       competitorName: conversation.competitor,
       provenanceIds: conversation.sourceIds,
     })),
+    // Themes resolve their sourceIds against the relevant corpus so each one can
+    // link the actual conversations behind it. A theme whose evidence cannot be
+    // resolved is dropped rather than shown as an unbacked claim.
+    conversationThemes: (report.conversationThemes ?? []).flatMap((theme) => {
+      const evidence = theme.sourceIds.flatMap((sourceId) => {
+        const conversation = (report.relevantConversations ?? []).find((row) =>
+          row.sourceIds.includes(sourceId),
+        );
+        if (!conversation) return [];
+        return [{
+          sourceId,
+          title: conversation.title,
+          subreddit: conversation.subreddit,
+          permalink: conversation.permalink ?? "",
+        }];
+      });
+      if (evidence.length === 0) return [];
+      return [{
+        id: theme.id,
+        label: theme.label,
+        kind: theme.kind,
+        // Report only what can be shown, so the count always matches evidence.
+        conversationCount: evidence.length,
+        evidence,
+      }];
+    }),
     insights: report.insights.map((insight) => {
       const sourceCount = insight.sourceCount ?? new Set(insight.sourceIds).size;
       const evidenceScope = insight.evidenceScope ??

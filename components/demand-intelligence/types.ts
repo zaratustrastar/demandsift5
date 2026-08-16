@@ -1,3 +1,17 @@
+export type ConversationTheme = {
+  id: string;
+  label: string;
+  kind: "struggle" | "request";
+  conversationCount: number;
+  /** Supporting conversations, so every theme can show its evidence. */
+  evidence: Array<{
+    sourceId: string;
+    title: string;
+    subreddit: string;
+    permalink: string;
+  }>;
+};
+
 export type NavigationSectionId =
   | "dashboard"
   | "opportunities"
@@ -323,6 +337,8 @@ export interface RedditDemandDemoData {
   business: BusinessProfile;
   provenance: ProvenanceSource[];
   insights: DemandInsight[];
+  /** Recurring struggles and requests aggregated from the relevant corpus. */
+  conversationThemes: ConversationTheme[];
   relevantConversations?: RelevantConversation[];
   competitorWeaknesses: CompetitorWeakness[];
   opportunities: RedditOpportunity[];

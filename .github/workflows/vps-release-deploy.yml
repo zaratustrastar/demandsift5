@@ -28,9 +28,14 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # Mirror everything to a log so the outcome is reportable even when
-          # runner logs are not reachable.
-          exec > >(tee /tmp/release.log) 2>&1
+          # Write straight to a file rather than through tee: process
+          # substitution is asynchronous and its buffer is lost when the step
+          # exits non-zero, which is exactly when the log matters most.
+          exec > /tmp/release.log 2>&1
+          echo "release_log_started=$(date -u +%FT%TZ)"
+          echo "runner_user=$(whoami)"
+          echo "sudo_generic=$(sudo -n true 2>&1 && echo yes || echo no)"
+          echo "sudo_docker=$(sudo -n docker version --format "{{.Server.Version}}" 2>&1 | head -1)"
           SOURCE_CHECKOUT=/opt/demandsift5-pr1
           ENV_FILE="$SOURCE_CHECKOUT/deploy/vps.env"
           COMPOSE_FILE="$GITHUB_WORKSPACE/deploy/compose.vps.yaml"

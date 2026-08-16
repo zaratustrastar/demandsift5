@@ -21,4 +21,5 @@ jobs:
           set -Eeuo pipefail
           curl --noproxy '*' --fail-with-body --silent --show-error \
             --resolve demandsift.143-244-154-139.sslip.io:443:127.0.0.1 \
+            -H 'X-Forwarded-For: 127.0.0.1' \
             https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp

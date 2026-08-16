@@ -24,6 +24,7 @@ jobs:
           node-version: '22.19.0'
       - name: Apply telos architecture and Harshmaur adapter
         run: |
+          # Apply the architecture and provider migration in one disposable checkout.
           python3 scripts/apply-telos-harshmaur.py
           python3 scripts/fix-harshmaur-test-realm.py
       - name: Install dependencies

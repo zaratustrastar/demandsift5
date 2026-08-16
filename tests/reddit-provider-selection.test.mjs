@@ -291,3 +291,34 @@ test("harshmaur cannot be selected in production until enrichment ships", () => 
   assert.equal(evaluation.name, "apify-harshmaur-reddit");
   assert.equal(evaluation.supportsThreadEnrichment, false);
 });
+
+
+test("the run URL uses Apify's tilde actor path, not a percent-encoded slash", async () => {
+  const fetchImpl = stubApify([harshmaurRecord(1, "screen time tv")]);
+  // Constructed with the slash form a reader would naturally write.
+  const provider = new HarshmaurRedditProvider({
+    actorId: "harshmaur/reddit-scraper",
+    token: "t",
+    fetchImpl,
+  });
+  await provider.discover(tvcp);
+
+  const start = fetchImpl.calls.find((c) => c.method === "POST");
+  assert.ok(start, "the run must be started with a POST");
+  assert.ok(
+    start.href.includes("harshmaur~reddit-scraper"),
+    `run URL must use the tilde form: ${start.href}`,
+  );
+  assert.ok(
+    !start.href.includes("harshmaur%2Freddit-scraper"),
+    "a percent-encoded slash resolves to no actor",
+  );
+});
+
+test("the default actor id is already in tilde form", async () => {
+  const fetchImpl = stubApify([]);
+  const provider = new HarshmaurRedditProvider({ token: "t", fetchImpl });
+  await provider.discover(tvcp);
+  const start = fetchImpl.calls.find((c) => c.method === "POST");
+  assert.ok(start.href.includes("harshmaur~reddit-scraper"));
+});

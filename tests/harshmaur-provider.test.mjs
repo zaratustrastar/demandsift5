@@ -198,3 +198,101 @@ test("per-term raw yield is reported for the A/B comparison", () => {
   assert.equal(summary.rawByTerm["android tv parental control"], 1);
   assert.equal(summary.rawByTerm["screen time tv"], 2);
 });
+
+
+/* ------------------------------------------------------------------ *
+ * Fixtures using the actor's real documented output shapes.
+ * These replaced hand-invented field names that silently disagreed with
+ * production data: comments carry `commentCreatedAt`, posts carry
+ * `commentsCount`, and both use `authorName`/`subredditName`.
+ * ------------------------------------------------------------------ */
+
+const recentIso = (daysAgo) =>
+  new Date(NOW.getTime() - daysAgo * 86_400_000).toISOString();
+
+const realComment = {
+  dataType: "comment",
+  id: "t1_real1",
+  body: "We had the same problem, nothing on Google TV lets you cap it.",
+  authorName: "parent_real",
+  subredditName: "AndroidTV",
+  postId: "t3_realpost",
+  parentId: "t3_realpost",
+  url: "https://www.reddit.com/r/AndroidTV/comments/realpost/x/real1/",
+  score: 7,
+  commentCreatedAt: recentIso(2),
+  searchTerm: "screen time tv",
+};
+
+const realPost = {
+  dataType: "post",
+  id: "t3_realpost",
+  title: "Any parental control that works on Android TV?",
+  body: "The kids watch youtube on the tv all evening and I cannot limit it.",
+  authorName: "parent_two",
+  communityName: "r/AndroidTV",
+  subredditName: "AndroidTV",
+  score: 23,
+  commentsCount: 14,
+  postUrl: "https://www.reddit.com/r/AndroidTV/comments/realpost/any_parental_control/",
+  createdAt: recentIso(3),
+  searchTerm: "android tv parental control",
+};
+
+test("a real comment record parses and stays inside the 7-day window", () => {
+  const { candidates, summary } = harshmaur.parseHarshmaurDataset([realComment], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(summary.droppedByReason.missing_timestamp, undefined,
+    "commentCreatedAt must be recognised as the comment timestamp");
+  assert.equal(candidates.length, 1, "the real comment shape must survive parsing");
+
+  const [candidate] = candidates;
+  assert.equal(candidate.kind, "comment");
+  assert.equal(candidate.externalId, "t1_real1");
+  assert.equal(candidate.author, "parent_real");
+  assert.equal(candidate.subreddit, "AndroidTV");
+  assert.equal(candidate.parentExternalId, "t3_realpost");
+  assert.equal(candidate.metrics.score, 7);
+  assert.deepEqual(candidate.matchedQueries, ["screen time tv"]);
+
+  const created = Date.parse(candidate.createdAt);
+  assert.ok(created >= Date.parse(WINDOW.since) && created <= Date.parse(WINDOW.until),
+    "parsed timestamp must fall inside the seven-day window");
+});
+
+test("a real post record preserves engagement from commentsCount", () => {
+  const { candidates } = harshmaur.parseHarshmaurDataset([realPost], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(candidates.length, 1);
+  const [candidate] = candidates;
+  assert.equal(candidate.kind, "post");
+  assert.equal(candidate.title, "Any parental control that works on Android TV?");
+  assert.equal(candidate.author, "parent_two");
+  assert.equal(candidate.subreddit, "AndroidTV", "communityName carries an r/ prefix");
+  assert.equal(candidate.metrics.score, 23);
+  assert.equal(candidate.metrics.comments, 14, "commentsCount must not be lost");
+  assert.match(candidate.permalink, /^https:\/\/www\.reddit\.com\//);
+  assert.deepEqual(candidate.matchedQueries, ["android tv parental control"]);
+});
+
+test("a real mixed post+comment dataset yields both kinds", () => {
+  const { candidates, summary } = harshmaur.parseHarshmaurDataset([realPost, realComment], {
+    since: WINDOW.since,
+    until: WINDOW.until,
+  });
+  assert.equal(candidates.length, 2);
+  assert.equal(summary.posts, 1);
+  assert.equal(summary.comments, 1);
+  assert.deepEqual(Object.keys(summary.droppedByReason), [],
+    "no real record may be dropped");
+});
+
+test("the actor id is normalized to Apify's tilde path form", () => {
+  assert.equal(harshmaur.harshmaurActorId("harshmaur/reddit-scraper"), "harshmaur~reddit-scraper");
+  assert.equal(harshmaur.harshmaurActorId("harshmaur~reddit-scraper"), "harshmaur~reddit-scraper");
+  assert.throws(() => harshmaur.harshmaurActorId("not a valid id!"));
+});

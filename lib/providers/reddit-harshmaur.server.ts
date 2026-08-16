@@ -80,6 +80,19 @@ export interface HarshmaurRunSummary {
   droppedByReason: Record<string, number>;
 }
 
+/**
+ * Normalize an actor reference to Apify's path form. Mirrors the Trudax
+ * normalizer: `username/actor` becomes `username~actor`, and anything else is
+ * rejected rather than silently requested.
+ */
+export function harshmaurActorId(value: string): string {
+  const normalized = value.trim().replace("/", "~");
+  if (!/^(?:[A-Za-z0-9_-]{5,80}|[A-Za-z0-9_-]{1,80}~[A-Za-z0-9_-]{1,100})$/.test(normalized)) {
+    throw new Error("HARSHMAUR_REDDIT_ACTOR_ID is invalid.");
+  }
+  return normalized;
+}
+
 /** Exact previous-7-day bounds, used for both actor input and local checks. */
 export function sevenDayWindow(now: Date = new Date()): { since: string; until: string } {
   const until = new Date(now.getTime());
@@ -189,10 +202,19 @@ export function harshmaurCandidate(
   const title = text(row.title);
   if (!body && !title) return { candidate: null, reason: "invalid_record" };
 
-  const subreddit = subredditName(row.subreddit ?? row.community ?? row.subredditName);
+  const subreddit = subredditName(
+    row.subredditName ?? row.subreddit ?? row.communityName ?? row.community,
+  );
   if (!subreddit) return { candidate: null, reason: "invalid_record" };
 
-  const createdAt = isoTimestamp(row.createdAt ?? row.created ?? row.createdUtc ?? row.timestamp);
+  // Harshmaur names the comment timestamp differently from the post one, so a
+  // parser that only looked for `createdAt` rejected every real comment-search
+  // result as missing_timestamp.
+  const createdAt = isoTimestamp(
+    kind === "comment"
+      ? row.commentCreatedAt ?? row.createdAt ?? row.created ?? row.createdUtc ?? row.timestamp
+      : row.createdAt ?? row.postCreatedAt ?? row.created ?? row.createdUtc ?? row.timestamp,
+  );
   if (!createdAt) return { candidate: null, reason: "missing_timestamp" };
 
   // Second guard: never trust the actor's own date filtering.
@@ -202,10 +224,10 @@ export function harshmaurCandidate(
     return { candidate: null, reason: "outside_window" };
   }
 
-  const permalink = permalinkFor(row.url ?? row.permalink ?? row.link);
+  const permalink = permalinkFor(row.postUrl ?? row.url ?? row.permalink ?? row.link);
   if (!permalink) return { candidate: null, reason: "invalid_url" };
 
-  const author = text(row.author ?? row.username ?? row.authorName);
+  const author = text(row.authorName ?? row.author ?? row.username);
   if (author && /^(automoderator|\[deleted\])$/i.test(author)) {
     return { candidate: null, reason: "bot_author" };
   }
@@ -228,7 +250,10 @@ export function harshmaurCandidate(
       createdAt,
       metrics: {
         score: count(row.score ?? row.upVotes ?? row.upvotes),
-        comments: count(row.numberOfComments ?? row.commentCount ?? row.numComments),
+        // `commentsCount` is the field the real post output uses.
+        comments: count(
+          row.commentsCount ?? row.numberOfComments ?? row.commentCount ?? row.numComments,
+        ),
       },
       matchedQuery,
       matchedQueries: matchedQuery ? [matchedQuery] : [],
@@ -342,7 +367,9 @@ export class HarshmaurRedditProvider implements RedditProvider {
     maxChargeUsd?: number;
     fetchImpl?: typeof fetch;
   }) {
-    this.actorId = input.actorId?.trim() || "harshmaur/reddit-scraper";
+    // Apify's API path takes an actor id or `username~actor-name`; a slash
+    // would be percent-encoded and resolve to nothing.
+    this.actorId = harshmaurActorId(input.actorId?.trim() || "harshmaur~reddit-scraper");
     this.token = input.token;
     this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
     this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 12)));

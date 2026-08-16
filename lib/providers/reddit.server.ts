@@ -1540,8 +1540,14 @@ export class ApifyRedditTestProvider implements RedditProvider {
       // Once we have runId, all waiting/reading happens through retry-safe GETs.
       startEndpoint.searchParams.set("waitForFinish", "0");
       startEndpoint.searchParams.set("timeout", String(apifyActorTimeoutSeconds(timeoutMs)));
-      startEndpoint.searchParams.set("maxItems", String(Math.min(100, actorInput.maxItems)));
-      startEndpoint.searchParams.set("maxTotalChargeUsd", "0.50");
+      // Platform-level dataset cap. This was pinned at 100, which silently
+      // truncated any run above that regardless of the requested acquisition
+      // budget and would defeat the 200-300 candidate target outright.
+      startEndpoint.searchParams.set("maxItems", String(Math.min(400, actorInput.maxItems)));
+      // Scale with the requested volume: a cap pinned at $0.50 would abort a
+      // 250-item run partway and waste the spend already incurred.
+      const chargeCapUsd = Math.min(3, Math.max(0.5, actorInput.maxItems * 0.006));
+      startEndpoint.searchParams.set("maxTotalChargeUsd", chargeCapUsd.toFixed(2));
 
       const startResponse = await this.fetchImpl(startEndpoint, {
         method: "POST",
@@ -2166,6 +2172,14 @@ export function createRedditProviderFromEnv(
   // because its input and output schemas differ from Trudax in kind. Keeping
   // both selectable is what makes the A/B comparison possible.
   if (selected === "harshmaur" || selected === "apify-harshmaur") {
+    // Harshmaur has no thread enrichment yet, so a production scan selecting it
+    // would silently downgrade every report to discovery-only context. It is
+    // usable for the retrieval A/B, which must be opted into explicitly.
+    if (isProductionRuntime(env) && env.HARSHMAUR_RETRIEVAL_EVAL?.trim().toLowerCase() !== "true") {
+      throw new Error(
+        "Harshmaur is discovery-only until selective enrichment ships. Set HARSHMAUR_RETRIEVAL_EVAL=true to run the retrieval comparison.",
+      );
+    }
     return new HarshmaurRedditProvider({
       actorId: env.HARSHMAUR_REDDIT_ACTOR_ID?.trim() || "harshmaur/reddit-scraper",
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),

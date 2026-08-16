@@ -47,23 +47,47 @@ const tvcp = {
   },
 };
 
-test("actor input matches the required discovery configuration", () => {
-  const input = harshmaur.buildHarshmaurInput(tvcp, { maxItems: 250, now: NOW });
+test("actor input matches the real Harshmaur schema", () => {
+  const input = harshmaur.buildHarshmaurInput(tvcp, { targetTotal: 250, now: NOW });
   assert.equal(input.searchPosts, true);
   assert.equal(input.searchComments, true);
   assert.equal(input.searchCommunities, false);
   // "relevance" re-ranks across all time and would smuggle in records from
   // outside the seven-day window we asked for.
   assert.equal(input.searchSort, "new");
-  assert.equal(input.maxItems, 250);
+  assert.equal(input.searchTime, "week");
   assert.equal(input.postedAfter, WINDOW.since);
   assert.equal(input.commentedAfter, WINDOW.since);
-  assert.ok(input.searchTerms.length > 0);
-  // No intent-shaped sentences and no unrelated startUrls.
+  assert.equal(input.crawlCommentsPerPost, false);
+  assert.equal(input.includeNSFW, false);
+  assert.equal(input.maxCommentsPerPost, 0);
+  assert.equal(input.maxCommunitiesCount, 0);
+  assert.ok(input.maxPostsCount > 0 && input.maxCommentsCount > 0);
+  // maxItems is a platform-level guard, never an actor input field.
+  assert.equal("maxItems" in input, false);
   assert.equal("startUrls" in input, false);
   for (const term of input.searchTerms) {
     assert.ok(term.split(" ").length <= 4, `not a short phrase: "${term}"`);
   }
+});
+
+test("per-term budgets keep total acquisition comparable to Trudax", () => {
+  // The actor applies these caps per search term, so passing the full target
+  // through would multiply spend by the number of terms.
+  for (const [target, terms] of [[250, 12], [250, 4], [100, 10], [40, 1]]) {
+    const { maxPostsCount, maxCommentsCount } = harshmaur.harshmaurPerTermBudget(target, terms);
+    const projected = (maxPostsCount + maxCommentsCount) * terms;
+    assert.ok(maxPostsCount >= 1 && maxCommentsCount >= 1);
+    assert.ok(
+      projected >= target && projected <= target * 2.5,
+      `budget ${maxPostsCount}/${maxCommentsCount} x ${terms} = ${projected} for target ${target}`,
+    );
+  }
+});
+
+test("both posts and comments are budgeted so comment search is exercised", () => {
+  const input = harshmaur.buildHarshmaurInput(tvcp, { targetTotal: 250, now: NOW });
+  assert.ok(input.maxCommentsCount >= 1, "comment search must not be starved to zero");
 });
 
 test("the seven-day window is exact", () => {

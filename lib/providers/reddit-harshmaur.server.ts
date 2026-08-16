@@ -35,12 +35,40 @@ export interface HarshmaurActorInput {
   searchPosts: boolean;
   searchComments: boolean;
   searchCommunities: boolean;
-  searchSort: "new" | "relevance" | "top";
-  /** Bounded acquisition; the actor stops once this many records exist. */
-  maxItems: number;
-  /** ISO date bounds; the actor filters server-side where supported. */
-  postedAfter?: string;
-  commentedAfter?: string;
+  searchSort: "new";
+  searchTime: "week";
+  /** Server-side cutoffs; our own timestamp check still runs afterwards. */
+  postedAfter: string;
+  commentedAfter: string;
+  /** Discovery never crawls threads; enrichment is a separate, later pass. */
+  crawlCommentsPerPost: false;
+  includeNSFW: false;
+  /** Actor-level caps. These are applied per search term, not per run. */
+  maxPostsCount: number;
+  maxCommentsCount: number;
+  maxCommentsPerPost: 0;
+  maxCommunitiesCount: 0;
+}
+
+/**
+ * Per-term budgets sized so total acquisition lands near the target.
+ *
+ * The actor applies maxPostsCount/maxCommentsCount to *each* search term, so
+ * passing the whole target through would multiply it by the number of terms
+ * and make the Trudax comparison meaningless (and expensive). Splitting the
+ * target across terms, half to posts and half to comments, keeps the two
+ * providers on comparable budgets.
+ */
+export function harshmaurPerTermBudget(
+  targetTotal: number,
+  termCount: number,
+): { maxPostsCount: number; maxCommentsCount: number } {
+  const terms = Math.max(1, Math.trunc(termCount));
+  const total = Math.max(1, Math.trunc(targetTotal));
+  const perTerm = Math.max(2, Math.ceil(total / terms));
+  const posts = Math.max(1, Math.ceil(perTerm / 2));
+  const comments = Math.max(1, perTerm - posts);
+  return { maxPostsCount: posts, maxCommentsCount: comments };
 }
 
 export interface HarshmaurRunSummary {
@@ -61,25 +89,37 @@ export function sevenDayWindow(now: Date = new Date()): { since: string; until: 
 
 export function buildHarshmaurInput(
   request: RedditSearchRequest,
-  options: { maxItems: number; now?: Date; maxTerms?: number },
+  options: { targetTotal: number; now?: Date; maxTerms?: number },
 ): HarshmaurActorInput {
   const { since } = sevenDayWindow(options.now);
   const windowStart = request.since && Number.isFinite(Date.parse(request.since))
     ? request.since
     : since;
 
+  const searchTerms = naturalSearchTerms(request, { maxTerms: options.maxTerms ?? 12 });
+  const { maxPostsCount, maxCommentsCount } = harshmaurPerTermBudget(
+    options.targetTotal,
+    searchTerms.length,
+  );
+
   return {
-    searchTerms: naturalSearchTerms(request, { maxTerms: options.maxTerms ?? 12 }),
+    searchTerms,
     searchPosts: true,
     searchComments: true,
     // Community records are directory entries, not conversations.
     searchCommunities: false,
-    // "new" keeps the window honest; relevance re-ranks across all time and
-    // would quietly return records outside the seven days we asked for.
+    // "new" keeps the window honest; "relevance" re-ranks across all time and
+    // would return records from outside the seven days we asked for.
     searchSort: "new",
-    maxItems: Math.max(1, Math.trunc(options.maxItems)),
+    searchTime: "week",
     postedAfter: windowStart,
     commentedAfter: windowStart,
+    crawlCommentsPerPost: false,
+    includeNSFW: false,
+    maxPostsCount,
+    maxCommentsCount,
+    maxCommentsPerPost: 0,
+    maxCommunitiesCount: 0,
   };
 }
 
@@ -276,12 +316,21 @@ export function parseHarshmaurDataset(
 export class HarshmaurRedditProvider implements RedditProvider {
   readonly name = "apify-harshmaur-reddit";
   readonly sourceMode = "live" as const;
+  /**
+   * Discovery only. Harshmaur runs with crawlCommentsPerPost=false, so it has
+   * no thread context to give. Until selective enrichment exists (startUrls +
+   * crawlCommentsPerPost=true + bounded maxCommentsPerPost), this provider is
+   * valid for a retrieval A/B but must not be compared on lead or reply
+   * quality against Trudax, which does perform real thread enrichment.
+   */
+  readonly supportsThreadEnrichment = false;
 
   private readonly actorId: string;
   private readonly token: string;
   private readonly maximumItems: number;
   private readonly maxTerms: number;
   private readonly timeoutMs: number;
+  private readonly maxChargeUsd: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(input: {
@@ -290,6 +339,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     maximumItems?: number;
     maxTerms?: number;
     timeoutMs?: number;
+    maxChargeUsd?: number;
     fetchImpl?: typeof fetch;
   }) {
     this.actorId = input.actorId?.trim() || "harshmaur/reddit-scraper";
@@ -297,11 +347,25 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
     this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 12)));
     this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
+    this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
-  /** Run the actor synchronously and page the whole dataset. */
-  private async runActor(actorInput: HarshmaurActorInput): Promise<unknown[]> {
+  /**
+   * Start the actor asynchronously, poll to a terminal state, then page the
+   * dataset.
+   *
+   * `/run-sync` is deliberately not used: it returns the actor's OUTPUT record
+   * rather than run metadata, so `defaultDatasetId` is absent, and holding a
+   * non-idempotent POST open makes a transient gateway 502 ambiguous — a retry
+   * could start and bill a second run. Once the run id exists, all waiting and
+   * reading happens through retry-safe GETs. This mirrors the pattern already
+   * proven in the Trudax provider.
+   */
+  private async runActor(
+    actorInput: HarshmaurActorInput,
+    platformMaxItems: number,
+  ): Promise<unknown[]> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const headers = {
@@ -310,40 +374,104 @@ export class HarshmaurRedditProvider implements RedditProvider {
       "content-type": "application/json",
     };
 
+    const readJson = async (response: Response): Promise<unknown> => {
+      const raw = await response.text();
+      if (!response.ok) {
+        throw new Error(`Harshmaur request failed with HTTP ${response.status}.`);
+      }
+      try {
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error("The Harshmaur actor returned invalid JSON.");
+      }
+    };
+
+    const safeGet = async (endpoint: URL): Promise<Response> => {
+      const retryable = new Set([408, 425, 429, 500, 502, 503, 504]);
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const response = await this.fetchImpl(endpoint, {
+            headers,
+            signal: controller.signal,
+          });
+          if (!retryable.has(response.status)) return response;
+          await response.text().catch(() => "");
+        } catch (error) {
+          lastError = error;
+          if (controller.signal.aborted || attempt === 2) throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
+      }
+      throw lastError ?? new Error("Harshmaur GET request failed.");
+    };
+
+    const runData = (payload: unknown): Record<string, unknown> => {
+      const data = (payload as { data?: unknown } | null)?.data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw new Error("The Harshmaur actor returned invalid run metadata.");
+      }
+      return data as Record<string, unknown>;
+    };
+
+    const str = (value: unknown): string =>
+      typeof value === "string" ? value.slice(0, 120) : "";
+
     try {
-      const runEndpoint = new URL(
-        `/v2/acts/${encodeURIComponent(this.actorId.replace("/", "~"))}/run-sync`,
+      const startEndpoint = new URL(
+        `/v2/actors/${encodeURIComponent(this.actorId)}/runs`,
         "https://api.apify.com",
       );
-      runEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1000)));
+      startEndpoint.searchParams.set("waitForFinish", "0");
+      startEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1000)));
+      // Platform-level guards. These bound cost and dataset size; they do not
+      // replace the actor's own maxPostsCount/maxCommentsCount fields.
+      startEndpoint.searchParams.set("maxItems", String(platformMaxItems));
+      startEndpoint.searchParams.set("maxTotalChargeUsd", this.maxChargeUsd.toFixed(2));
 
-      const runResponse = await this.fetchImpl(runEndpoint, {
+      const startResponse = await this.fetchImpl(startEndpoint, {
         method: "POST",
         headers,
         body: JSON.stringify(actorInput),
         signal: controller.signal,
       });
-      const runText = await runResponse.text();
-      if (!runResponse.ok) {
-        throw new Error(`Harshmaur actor run failed with HTTP ${runResponse.status}.`);
+      const started = runData(await readJson(startResponse));
+      const runId = str(started.id);
+      let status = str(started.status).toUpperCase();
+      let datasetId = str(started.defaultDatasetId);
+      let statusMessage = str(started.statusMessage);
+      if (!runId || !status) {
+        throw new Error("The Harshmaur actor returned incomplete run metadata.");
       }
 
-      let datasetId: string | undefined;
-      try {
-        const parsed = JSON.parse(runText || "{}") as Record<string, unknown>;
-        const data = (parsed.data ?? parsed) as Record<string, unknown>;
-        datasetId =
-          typeof data.defaultDatasetId === "string" ? data.defaultDatasetId : undefined;
-      } catch {
-        throw new Error("The Harshmaur actor returned invalid JSON.");
+      const terminal = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
+      while (!terminal.has(status)) {
+        const statusEndpoint = new URL(
+          `/v2/actor-runs/${encodeURIComponent(runId)}`,
+          "https://api.apify.com",
+        );
+        statusEndpoint.searchParams.set("waitForFinish", "60");
+        const current = runData(await readJson(await safeGet(statusEndpoint)));
+        status = str(current.status).toUpperCase();
+        statusMessage = str(current.statusMessage);
+        datasetId = str(current.defaultDatasetId) || datasetId;
+        if (!status) throw new Error("The Harshmaur actor returned incomplete run status.");
       }
-      if (!datasetId) throw new Error("The Harshmaur actor run produced no dataset.");
+
+      // A timed-out run that still produced records is usable; discarding it
+      // would waste a paid run.
+      const usablePartial = status === "TIMED-OUT" && Boolean(datasetId);
+      if (status !== "SUCCEEDED" && !usablePartial) {
+        throw new Error(
+          `The Harshmaur run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`,
+        );
+      }
+      if (!datasetId) throw new Error("The Harshmaur run completed without a dataset.");
 
       const pageSize = 100;
-      const wanted = actorInput.maxItems;
       const payload: unknown[] = [];
-      for (let offset = 0; offset < wanted; offset += pageSize) {
-        const limit = Math.min(pageSize, wanted - offset);
+      for (let offset = 0; offset < platformMaxItems; offset += pageSize) {
+        const limit = Math.min(pageSize, platformMaxItems - offset);
         const datasetEndpoint = new URL(
           `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
           "https://api.apify.com",
@@ -353,14 +481,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
         datasetEndpoint.searchParams.set("limit", String(limit));
         datasetEndpoint.searchParams.set("offset", String(offset));
 
-        const pageResponse = await this.fetchImpl(datasetEndpoint, {
-          headers,
-          signal: controller.signal,
-        });
-        if (!pageResponse.ok) {
-          throw new Error(`Harshmaur dataset read failed with HTTP ${pageResponse.status}.`);
-        }
-        const page = (await pageResponse.json()) as unknown;
+        const page = await readJson(await safeGet(datasetEndpoint));
         if (!Array.isArray(page)) {
           throw new Error("The Harshmaur actor returned an invalid dataset.");
         }
@@ -374,16 +495,19 @@ export class HarshmaurRedditProvider implements RedditProvider {
   }
 
   async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
-    const maxItems = Math.min(this.maximumItems, Math.max(40, request.limit));
+    const targetTotal = Math.min(this.maximumItems, Math.max(40, request.limit));
     const actorInput = buildHarshmaurInput(request, {
-      maxItems,
+      targetTotal,
       maxTerms: this.maxTerms,
     });
     if (actorInput.searchTerms.length === 0) {
       throw new Error("The company context did not produce any usable Reddit search terms.");
     }
 
-    const payload = await this.runActor(actorInput);
+    // Headroom over the target so per-term rounding cannot silently truncate,
+    // while still capping spend at the platform level.
+    const platformMaxItems = Math.min(1_000, Math.ceil(targetTotal * 1.3));
+    const payload = await this.runActor(actorInput, platformMaxItems);
     const window = sevenDayWindow();
     const since = request.since && Number.isFinite(Date.parse(request.since))
       ? request.since

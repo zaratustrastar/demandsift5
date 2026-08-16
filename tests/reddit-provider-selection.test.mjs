@@ -82,21 +82,34 @@ function harshmaurRecord(index, term) {
   };
 }
 
-/** Minimal Apify stub: one run-sync response, then dataset pages. */
-function stubApify(records) {
-  return async (url) => {
+/**
+ * Apify stub following the async contract: POST /runs returns run metadata,
+ * GET /actor-runs/<id> reports status, then the dataset pages.
+ */
+function stubApify(records, options = {}) {
+  const calls = [];
+  const impl = async (url, init) => {
     const href = String(url);
-    if (href.includes("/run-sync")) {
-      return new Response(JSON.stringify({ data: { defaultDatasetId: "ds_1" } }), {
-        status: 200, headers: { "content-type": "application/json" },
-      });
+    calls.push({ href, method: init?.method ?? "GET", body: init?.body });
+    if (href.includes("/v2/actors/") && href.includes("/runs")) {
+      return new Response(JSON.stringify({
+        data: { id: "run_1", status: options.startStatus ?? "RUNNING", defaultDatasetId: "ds_1" },
+      }), { status: 200, headers: { "content-type": "application/json" } });
     }
-    const offset = Number(new URL(href).searchParams.get("offset") ?? 0);
-    const limit = Number(new URL(href).searchParams.get("limit") ?? 100);
+    if (href.includes("/v2/actor-runs/")) {
+      return new Response(JSON.stringify({
+        data: { id: "run_1", status: options.finalStatus ?? "SUCCEEDED", defaultDatasetId: "ds_1" },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const params = new URL(href).searchParams;
+    const offset = Number(params.get("offset") ?? 0);
+    const limit = Number(params.get("limit") ?? 100);
     return new Response(JSON.stringify(records.slice(offset, offset + limit)), {
       status: 200, headers: { "content-type": "application/json" },
     });
   };
+  impl.calls = calls;
+  return impl;
 }
 
 test("the factory constructs Harshmaur only when explicitly selected", () => {
@@ -104,6 +117,7 @@ test("the factory constructs Harshmaur only when explicitly selected", () => {
     REDDIT_PROVIDER: "harshmaur",
     APIFY_TOKEN: "test-token",
     APP_RUNTIME_ENV: "production",
+    HARSHMAUR_RETRIEVAL_EVAL: "true",
   };
   const provider = reddit.createRedditProviderFromEnv(env);
   assert.equal(provider.name, "apify-harshmaur-reddit");
@@ -199,9 +213,17 @@ test("actor input never leaks intent sentences or startUrls", async () => {
   const provider = new HarshmaurRedditProvider({
     token: "t",
     fetchImpl: async (url, init) => {
-      if (String(url).includes("/run-sync")) {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs")) {
         captured = JSON.parse(init.body);
-        return new Response(JSON.stringify({ data: { defaultDatasetId: "d" } }), { status: 200 });
+        return new Response(JSON.stringify({
+          data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" },
+        }), { status: 200 });
+      }
+      if (href.includes("/v2/actor-runs/")) {
+        return new Response(JSON.stringify({
+          data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" },
+        }), { status: 200 });
       }
       return new Response("[]", { status: 200 });
     },
@@ -210,9 +232,62 @@ test("actor input never leaks intent sentences or startUrls", async () => {
   assert.ok(captured);
   assert.equal(captured.searchCommunities, false);
   assert.equal(captured.searchSort, "new");
+  assert.equal(captured.searchTime, "week");
+  assert.equal(captured.crawlCommentsPerPost, false);
+  assert.equal(captured.includeNSFW, false);
   assert.equal("startUrls" in captured, false);
-  assert.equal("crawlCommentsPerPost" in captured, false);
+  // maxItems belongs on the run URL, never in the actor input.
+  assert.equal("maxItems" in captured, false);
   for (const term of captured.searchTerms) {
     assert.ok(term.split(" ").length <= 4, `intent-shaped term: "${term}"`);
   }
+});
+
+test("execution starts asynchronously and never uses run-sync", async () => {
+  const fetchImpl = stubApify([harshmaurRecord(1, "screen time tv")]);
+  const provider = new HarshmaurRedditProvider({ token: "t", fetchImpl });
+  await provider.discover(tvcp);
+
+  const hrefs = fetchImpl.calls.map((c) => c.href);
+  // run-sync returns the actor OUTPUT record, not run metadata, so
+  // defaultDatasetId would be missing entirely.
+  assert.ok(hrefs.every((h) => !h.includes("run-sync")), "run-sync must not be used");
+
+  const start = fetchImpl.calls.find((c) => c.method === "POST");
+  assert.ok(start, "the run must be started with a POST");
+  const startUrl = new URL(start.href);
+  assert.equal(startUrl.searchParams.get("waitForFinish"), "0");
+  // Platform-level cost guards.
+  assert.ok(Number(startUrl.searchParams.get("maxItems")) > 0);
+  assert.ok(Number(startUrl.searchParams.get("maxTotalChargeUsd")) > 0);
+
+  assert.ok(hrefs.some((h) => h.includes("/v2/actor-runs/")), "status must be polled");
+  assert.ok(hrefs.some((h) => h.includes("/v2/datasets/")), "dataset must be paged");
+});
+
+test("a failed run raises rather than returning an empty corpus", async () => {
+  const provider = new HarshmaurRedditProvider({
+    token: "t",
+    fetchImpl: stubApify([], { finalStatus: "FAILED" }),
+  });
+  // Silently returning zero candidates would read as "the market is quiet".
+  await assert.rejects(() => provider.discover(tvcp), /ended with status FAILED/);
+});
+
+test("harshmaur cannot be selected in production until enrichment ships", () => {
+  const base = {
+    REDDIT_PROVIDER: "harshmaur",
+    APIFY_TOKEN: "t",
+    APP_RUNTIME_ENV: "production",
+  };
+  assert.throws(
+    () => reddit.createRedditProviderFromEnv(base),
+    /discovery-only until selective enrichment ships/,
+  );
+  const evaluation = reddit.createRedditProviderFromEnv({
+    ...base,
+    HARSHMAUR_RETRIEVAL_EVAL: "true",
+  });
+  assert.equal(evaluation.name, "apify-harshmaur-reddit");
+  assert.equal(evaluation.supportsThreadEnrichment, false);
 });

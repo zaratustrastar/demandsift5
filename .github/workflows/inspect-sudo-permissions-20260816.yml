@@ -1,0 +1,19 @@
+name: Inspect runner sudo permissions
+
+on:
+  push:
+    branches:
+      - diagnose-tvcp-user-scan-20260816
+    paths:
+      - .github/workflows/inspect-sudo-permissions-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: List noninteractive sudo permissions
+        run: sudo -n -l

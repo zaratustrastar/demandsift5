@@ -43,7 +43,15 @@ jobs:
           for cand in /usr/bin/docker /usr/local/bin/docker "$(command -v docker || true)"; do
             [ -n "$cand" ] && [ -x "$cand" ] && DOCKER="$cand" && break
           done
-          d() { if [ -n "$DOCKER" ]; then sudo -n "$DOCKER" "$@" 2>/dev/null || "$DOCKER" "$@" 2>/dev/null; fi; }
+          # Surface the real error instead of swallowing it: sudoers here may
+          # grant NOPASSWD for specific binaries only, so `sudo -n true` can
+          # fail while `sudo -n /usr/bin/docker` succeeds.
+          d() { sudo -n "$DOCKER" "$@" 2>>/tmp/derr.log || "$DOCKER" "$@" 2>>/tmp/derr.log; }
+          : > /tmp/derr.log
+          echo "probe_sudo_docker: $(sudo -n "$DOCKER" ps --format '{{.Names}}' 2>&1 | head -3)" > /tmp/probe.txt
+          echo "probe_plain_docker: $("$DOCKER" ps --format '{{.Names}}' 2>&1 | head -3)" >> /tmp/probe.txt
+          echo "probe_sudo_cat: $(sudo -n cat /opt/demandsift5-pr1/deploy/vps.env 2>&1 | head -1 | cut -c1-40)" >> /tmp/probe.txt
+          echo "whoami: $(whoami); groups: $(groups 2>/dev/null)" >> /tmp/probe.txt
 
           # Everything inside this block lands in the report; earlier versions
           # echoed some sections to stdout and silently lost them.
@@ -54,6 +62,13 @@ jobs:
             echo "docker_binary=${DOCKER:-<not found>}"
             echo "sudo_noninteractive=$(sudo -n true 2>/dev/null && echo yes || echo no)"
             echo
+
+            echo "### Access probes"
+            echo '```'
+            cat /tmp/probe.txt 2>/dev/null || echo "no probes"
+            echo "--- docker stderr ---"
+            head -c 800 /tmp/derr.log 2>/dev/null || true
+            echo '```'
 
             echo "### Containers"
             echo '```'

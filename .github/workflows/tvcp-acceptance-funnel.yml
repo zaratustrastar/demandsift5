@@ -4,17 +4,15 @@ name: TVCP acceptance funnel diagnostics
 # plus sampled conversations. Results are posted back as a PR comment because
 # Actions job logs are only retrievable through blob storage.
 
+# Triggered by pushing this file, matching the one-shot pattern used by the
+# other workflows here: workflow_dispatch requires the file on the default
+# branch, which this feature branch is not.
 on:
-  workflow_dispatch:
-    inputs:
-      website:
-        description: Website to scan
-        required: false
-        default: https://tvcp.app
-      pr_number:
-        description: PR to comment the report on
-        required: false
-        default: "1"
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/tvcp-acceptance-funnel.yml
 
 permissions:
   contents: read
@@ -27,8 +25,8 @@ jobs:
     timeout-minutes: 45
     env:
       APP_URL: https://demandsift.143-244-154-139.sslip.io
-      WEBSITE: ${{ inputs.website }}
-      PR_NUMBER: ${{ inputs.pr_number }}
+      WEBSITE: https://tvcp.app
+      PR_NUMBER: "1"
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Run one real 7-day scan and collect the funnel
@@ -81,7 +79,7 @@ jobs:
                       return diag[k]
               return "—"
 
-          print(f"## Real 7-day acceptance scan — `{os.environ.get('WEBSITE')}`\n")
+          print(f"## Real 7-day acceptance scan — `{os.environ.get('WEBSITE','')}`\n")
           print(f"scan `{scan.get('id')}` · status **{scan.get('status')}**")
           if scan.get("error"):
               print(f"\n> error: {scan['error']}")

@@ -1,0 +1,53 @@
+name: Apply telos and Harshmaur migration
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-telos-harshmaur-20260816.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - name: Apply telos architecture and Harshmaur adapter
+        run: python3 scripts/apply-telos-harshmaur.py
+      - name: Install dependencies
+        run: npm ci
+      - name: Harshmaur and TVCP retrieval regression
+        run: node --test tests/harshmaur-reddit-provider.test.mjs
+      - name: Telos architecture regressions
+        run: |
+          node --test tests/embedding-prefilter-recall.test.mjs
+          node --test tests/discovery-term-overrides.test.mjs
+          node --test tests/purpose-scores-independence.test.mjs
+          node --test tests/theme-clustering.test.mjs
+          node --test tests/scan-pipeline-architecture.test.mjs
+      - name: Complete validation
+        run: |
+          npm test
+          npm run build
+          npm run lint
+      - name: Commit tested runtime migration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app lib tests scripts/background-worker.mjs
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'No runtime changes to commit'; exit 1; }
+          git commit -m 'Adopt high-recall Reddit intelligence pipeline'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

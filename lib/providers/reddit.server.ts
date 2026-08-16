@@ -1643,6 +1643,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
     const discoveryInput: ApifySearchActorInput = {
       searches,
       ignoreStartUrls: true,
+      skipComments: true,
       skipUserPosts: true,
       skipCommunity: true,
       includeMediaLinks: false,
@@ -1651,17 +1652,18 @@ export class ApifyRedditTestProvider implements RedditProvider {
       searchCommunities: false,
       searchUsers: false,
       searchMedia: false,
-      // Recent demand matters more than historic relevance ranking. Trudax's
-      // `time` filter only bounds posts, so give comment search the same
-      // explicit cutoff and never combine searchComments with skipComments.
-      sort: "new",
+      // Rank by semantic relevance, but bound both posts and comments by the
+      // explicit recent cutoff. skipComments only prevents traversing every
+      // matched post; direct comment search remains enabled.
+      sort: "relevance",
       time: boundedSearchTime(this.timeRange, request.since),
       ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),
       includeNSFW: false,
       maxItems,
       maxPostCount: maxItems,
-      // Keep traversal bounded while allowing direct recent comment search.
-      maxComments: 3,
+      // This bounds direct comment result pages while skipComments prevents
+      // unrelated thread traversal from consuming the global discovery budget.
+      maxComments: 10,
       maxCommunitiesCount: 0,
       maxUserCount: 0,
       scrollTimeout: 20,

@@ -42,6 +42,7 @@ async function loadRedditProvider() {
     "utf8",
   );
   const replacements = {
+    "@/lib/providers/reddit-harshmaur.server": "data:text/javascript;base64,ZXhwb3J0IGNsYXNzIEhhcnNobWF1clJlZGRpdFByb3ZpZGVyIHt9",
     "@/lib/providers/mock-reddit": moduleUrl(
       "export class MockRedditProvider { name='mock-reddit'; sourceMode='mock'; async search(){return {conversations:[],sourceMode:'mock'};} }",
     ),

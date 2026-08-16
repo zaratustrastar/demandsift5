@@ -53,6 +53,7 @@ async function compileRedditProvider() {
     }
   `);
   const replacements = {
+    "@/lib/providers/reddit-harshmaur.server": "data:text/javascript;base64,ZXhwb3J0IGNsYXNzIEhhcnNobWF1clJlZGRpdFByb3ZpZGVyIHt9",
     "@/lib/providers/mock-reddit": mockModule,
     "@/lib/intelligence/opportunity-ranking": rankingModule,
     "@/lib/server/runtime-env": runtimeModule,

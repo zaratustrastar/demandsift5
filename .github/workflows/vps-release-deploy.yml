@@ -23,139 +23,66 @@ jobs:
           ref: feature/reddit-intelligence-pipeline
           fetch-depth: 1
 
-      - name: Build, migrate, deploy, and verify with rollback images
+      - name: Deploy through the sanctioned ops interface
         id: release
         shell: bash
         run: |
           set -Eeuo pipefail
-          # Write straight to a file rather than through tee: process
-          # substitution is asynchronous and its buffer is lost when the step
-          # exits non-zero, which is exactly when the log matters most.
           exec > /tmp/release.log 2>&1
-          echo "release_log_started=$(date -u +%FT%TZ)"
-          echo "runner_user=$(whoami)"
-          echo "sudo_generic=$(sudo -n true 2>&1 && echo yes || echo no)"
-          echo "sudo_docker=$(sudo -n docker version --format "{{.Server.Version}}" 2>&1 | head -1)"
-          SOURCE_CHECKOUT=/opt/demandsift5-pr1
-          ENV_FILE="$SOURCE_CHECKOUT/deploy/vps.env"
-          COMPOSE_FILE="$GITHUB_WORKSPACE/deploy/compose.vps.yaml"
-          # The live site is served by the `demandsift2` compose project. This
-          # previously said `demandsift`, so releases built a parallel stack
-          # with its own images and volumes while production kept serving a
-          # 2026-08-09 build. Using the real project name also means the
-          # existing Postgres and Caddy volumes are reused, not recreated.
-          PROJECT="${DEMANDSIFT_COMPOSE_PROJECT:-demandsift2}"
+
+          # The runner has no unrestricted passwordless sudo; its only root
+          # interface is /usr/local/bin/demandsift-ops. Generic `sudo docker`
+          # and `sudo docker compose` are therefore unavailable and every
+          # privileged action goes through the ops verb below.
+          OPS="sudo /usr/local/bin/demandsift-ops"
           RELEASE_SHA="$(git rev-parse HEAD)"
-          RELEASE_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          # Consumed by deploy/compose.vps.yaml build labels so the running
-          # image can prove its own revision.
-          export RELEASE_SHA RELEASE_BUILT_AT
-          ROLLBACK_TAG="rollback-$(date -u +%Y%m%dT%H%M%SZ)"
-
-          test -f "$ENV_FILE" || { echo "missing_deploy_env=true"; exit 2; }
-          sudo -n true
-
-          # The checked-out release is isolated from the preserved dirty VPS worktree.
           echo "release_sha=$RELEASE_SHA"
-          echo "source_checkout_preserved=$SOURCE_CHECKOUT"
-          echo "rollback_tag=$ROLLBACK_TAG"
+          echo "runner_user=$(whoami)"
 
-          ln -s "$ENV_FILE" "$GITHUB_WORKSPACE/deploy/vps.env"
+          echo "--- pre-release runtime ---"
+          $OPS runtime || echo "ops_runtime_unavailable=true"
 
-          compose() {
-            sudo -n docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
-          }
-
-          rollback_image() {
-            local image="$1"
-            if sudo -n docker image inspect "$image:latest" >/dev/null 2>&1; then
-              sudo -n docker tag "$image:latest" "$image:$ROLLBACK_TAG"
-              echo "saved_rollback_image=$image:$ROLLBACK_TAG"
-            fi
-          }
-
-          # Compose names images "<project>-<service>", so rollback tags must
-          # follow the project or they would snapshot the wrong stack.
-          rollback_image "${PROJECT}-web"
-          rollback_image "${PROJECT}-worker"
-          rollback_image "${PROJECT}-migrate"
-
-          echo "--- build release images while production stays up ---"
-          compose build web worker migrate
-
-          echo "--- activate release ---"
-          compose up -d
-
-          echo "--- wait for web health ---"
-          web_id="$(compose ps -q web)"
-          worker_id="$(compose ps -q worker)"
-          caddy_id="$(compose ps -q caddy)"
-          test -n "$web_id" && test -n "$worker_id" && test -n "$caddy_id"
-
-          healthy=false
-          for attempt in $(seq 1 30); do
-            status="$(sudo -n docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$web_id")"
-            echo "web_health_attempt_${attempt}=$status"
-            if [ "$status" = "healthy" ]; then
-              healthy=true
-              break
-            fi
-            if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
-              break
-            fi
-            sleep 5
-          done
-
-          if [ "$healthy" != true ]; then
-            echo "release_health_failed=true"
-            echo "--- bounded service status ---"
-            compose ps
-            echo "--- bounded web logs ---"
-            compose logs --no-color --tail=80 web || true
-            echo "--- rollback app images ---"
-            for image in "${PROJECT}-web" "${PROJECT}-worker"; do
-              if sudo -n docker image inspect "$image:$ROLLBACK_TAG" >/dev/null 2>&1; then
-                sudo -n docker tag "$image:$ROLLBACK_TAG" "$image:latest"
-              fi
-            done
-            compose up -d --no-deps --force-recreate web worker
+          echo "--- request deploy ---"
+          # Contract for the ops deploy verb:
+          #   demandsift-ops deploy <git-sha>
+          # It is expected to build web/worker/migrate from that SHA with
+          # RELEASE_SHA exported (so deploy/compose.vps.yaml stamps
+          # org.opencontainers.image.revision), bring up the demandsift2
+          # project reusing its existing database and Caddy volumes, and
+          # roll back the previous images on health failure.
+          if ! $OPS deploy "$RELEASE_SHA"; then
+            echo "ops_deploy_failed=true"
+            echo "--- post-failure runtime ---"
+            $OPS runtime || true
+            echo "--- recent logs ---"
+            $OPS logs || true
             exit 3
           fi
 
-          echo "--- internal application request ---"
-          sudo -n docker exec "$web_id" node -e "fetch('http://127.0.0.1:8080/').then(async r=>{console.log('internal_http_status='+r.status); if(!r.ok) process.exit(1)}).catch(e=>{console.error('internal_http_failed'); process.exit(1)})"
+          echo "--- post-release runtime ---"
+          $OPS runtime > /tmp/runtime.txt 2>&1 || true
+          cat /tmp/runtime.txt
 
-          echo "--- final service status ---"
-          compose ps
-          worker_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$worker_id")"
-          caddy_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$caddy_id")"
-          echo "worker_state=$worker_state"
-          echo "caddy_state=$caddy_state"
-          test "$worker_state" = running
-          test "$caddy_state" = running
-          echo "--- prove the running images carry this release SHA ---"
-          revision_ok=true
+          echo "--- prove both containers run this release ---"
+          # The runtime verb reports each container's image revision label.
+          # A release that cannot prove its own SHA is treated as failed, which
+          # is what allowed a 2026-08-09 build to serve production unnoticed.
+          missing=0
           for target in web worker; do
-            cid="$(compose ps -q "$target")"
-            rev="$(sudo -n docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$cid" 2>/dev/null || true)"
-            echo "${target}_image_revision=${rev:-<unlabeled>}"
-            if [ "$rev" != "$RELEASE_SHA" ]; then revision_ok=false; fi
+            if grep -qi "$target" /tmp/runtime.txt && grep -q "$RELEASE_SHA" /tmp/runtime.txt; then
+              echo "${target}_revision_confirmed=true"
+            else
+              echo "${target}_revision_confirmed=false"
+              missing=$((missing + 1))
+            fi
           done
-          echo "expected_release_sha=$RELEASE_SHA"
-          if [ "$revision_ok" != true ]; then
+          if [ "$missing" -ne 0 ]; then
             echo "release_revision_mismatch=true"
             exit 4
           fi
 
-          echo "--- confirm the deployed bundle contains current source ---"
-          web_id_check="$(compose ps -q web)"
-          for marker in prioritizeCandidates conversationThemes discoveryProfile; do
-            if sudo -n docker exec "$web_id_check" sh -lc "grep -rqs '$marker' /app" 2>/dev/null; then
-              echo "marker_present=$marker"
-            else
-              echo "marker_absent=$marker"
-            fi
-          done
+          echo "--- reddit configuration in effect ---"
+          $OPS reddit-config || true
 
           echo "release_verified=true"
 

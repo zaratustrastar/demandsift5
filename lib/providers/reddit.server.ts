@@ -1,3 +1,4 @@
+import { HarshmaurRedditProvider } from "@/lib/providers/reddit-harshmaur.server";
 import { MockRedditProvider } from "@/lib/providers/mock-reddit";
 import {
   contentFingerprint,
@@ -2136,7 +2137,7 @@ export function createRedditProviderFromEnv(
     (isProductionRuntime(env) ? "" : "mock");
   if (!selected) {
     throw new Error(
-      "REDDIT_PROVIDER must explicitly select `mock`, `apify-test`, or an approved live provider.",
+      "REDDIT_PROVIDER must explicitly select `mock`, `apify-test`, `harshmaur`, or an approved live provider.",
     );
   }
   if (selected === "mock") return new MockRedditProvider();
@@ -2159,6 +2160,18 @@ export function createRedditProviderFromEnv(
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
       timeRange: configuredTimeRange as "day" | "week" | "month" | "year" | "all",
+    });
+  }
+  // Harshmaur is selected explicitly, never by swapping APIFY_REDDIT_ACTOR_ID,
+  // because its input and output schemas differ from Trudax in kind. Keeping
+  // both selectable is what makes the A/B comparison possible.
+  if (selected === "harshmaur" || selected === "apify-harshmaur") {
+    return new HarshmaurRedditProvider({
+      actorId: env.HARSHMAUR_REDDIT_ACTOR_ID?.trim() || "harshmaur/reddit-scraper",
+      token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
+      maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 250, 1, 400),
+      maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 12, 1, 25),
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
     });
   }
   if (selected === "approved-http") {

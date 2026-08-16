@@ -30,6 +30,7 @@ let src = await readFile(new URL("../lib/providers/reddit-harshmaur.server.ts", 
 src = src
   .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
   .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
+  .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
   .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural));
 const harshmaur = await import(u(cc(src, "h.ts")));
 

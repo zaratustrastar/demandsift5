@@ -1,8 +1,19 @@
 import type {
+  EnrichedRedditConversation,
+  RedditContextMessage,
   RedditDiscoveryCandidate,
   RedditSearchLane,
 } from "@/lib/domain/types";
-import type { RedditSearchRequest } from "@/lib/providers/contracts";
+import type {
+  RedditDiscoveryDiagnostics,
+  RedditDiscoveryResponse,
+  RedditEnrichmentRequest,
+  RedditEnrichmentResponse,
+  RedditProvider,
+  RedditSearchPlanEntry,
+  RedditSearchRequest,
+} from "@/lib/providers/contracts";
+import { contentFingerprint } from "@/lib/intelligence/opportunity-ranking";
 import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
 
 /**
@@ -136,7 +147,7 @@ export function harshmaurCandidate(
 
   const body = text(row.body) ?? text(row.text) ?? text(row.selftext) ?? "";
   const title = text(row.title);
-  if (!body && !title) return { candidate: null, reason: "empty_content" };
+  if (!body && !title) return { candidate: null, reason: "invalid_record" };
 
   const subreddit = subredditName(row.subreddit ?? row.community ?? row.subredditName);
   if (!subreddit) return { candidate: null, reason: "invalid_record" };
@@ -183,10 +194,21 @@ export function harshmaurCandidate(
       matchedQueries: matchedQuery ? [matchedQuery] : [],
       discoveryLanes: options.lanes ?? [],
       provenance: {
-        id: `src_reddit_${externalId}`,
+        id: `reddit_harshmaur_${contentFingerprint(externalId)}`,
         kind: "reddit",
-        retrievedAt: new Date().toISOString(),
+        provider: "apify-harshmaur-reddit",
+        providerExternalId: externalId,
         url: permalink,
+        title,
+        excerpt: (body || title || "").slice(0, 280),
+        contentHash: contentFingerprint(`${title ?? ""}\n${body}`),
+        observedAt: new Date().toISOString(),
+        isMock: false,
+        metadata: {
+          acquisitionMethod: "web-scraping",
+          // The actor's own attribution, kept for per-term yield reporting.
+          searchTerm: matchedQuery ?? null,
+        },
       },
     },
     reason: undefined,
@@ -235,4 +257,216 @@ export function parseHarshmaurDataset(
   }
 
   return { candidates: [...seen.values()], summary };
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Provider
+ * ------------------------------------------------------------------ */
+
+/**
+ * Executes the Harshmaur actor and returns candidates through the shared
+ * contract, so the scan workflow cannot tell which actor produced them.
+ *
+ * Discovery only: `crawlCommentsPerPost` stays false and enrichment falls back
+ * to the discovery record. Thread enrichment remains Trudax's job until the A/B
+ * selects a winner, which keeps the comparison about retrieval quality rather
+ * than two half-built pipelines.
+ */
+export class HarshmaurRedditProvider implements RedditProvider {
+  readonly name = "apify-harshmaur-reddit";
+  readonly sourceMode = "live" as const;
+
+  private readonly actorId: string;
+  private readonly token: string;
+  private readonly maximumItems: number;
+  private readonly maxTerms: number;
+  private readonly timeoutMs: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(input: {
+    actorId?: string;
+    token: string;
+    maximumItems?: number;
+    maxTerms?: number;
+    timeoutMs?: number;
+    fetchImpl?: typeof fetch;
+  }) {
+    this.actorId = input.actorId?.trim() || "harshmaur/reddit-scraper";
+    this.token = input.token;
+    this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
+    this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 12)));
+    this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
+    this.fetchImpl = input.fetchImpl ?? fetch;
+  }
+
+  /** Run the actor synchronously and page the whole dataset. */
+  private async runActor(actorInput: HarshmaurActorInput): Promise<unknown[]> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const headers = {
+      accept: "application/json",
+      authorization: `Bearer ${this.token}`,
+      "content-type": "application/json",
+    };
+
+    try {
+      const runEndpoint = new URL(
+        `/v2/acts/${encodeURIComponent(this.actorId.replace("/", "~"))}/run-sync`,
+        "https://api.apify.com",
+      );
+      runEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1000)));
+
+      const runResponse = await this.fetchImpl(runEndpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(actorInput),
+        signal: controller.signal,
+      });
+      const runText = await runResponse.text();
+      if (!runResponse.ok) {
+        throw new Error(`Harshmaur actor run failed with HTTP ${runResponse.status}.`);
+      }
+
+      let datasetId: string | undefined;
+      try {
+        const parsed = JSON.parse(runText || "{}") as Record<string, unknown>;
+        const data = (parsed.data ?? parsed) as Record<string, unknown>;
+        datasetId =
+          typeof data.defaultDatasetId === "string" ? data.defaultDatasetId : undefined;
+      } catch {
+        throw new Error("The Harshmaur actor returned invalid JSON.");
+      }
+      if (!datasetId) throw new Error("The Harshmaur actor run produced no dataset.");
+
+      const pageSize = 100;
+      const wanted = actorInput.maxItems;
+      const payload: unknown[] = [];
+      for (let offset = 0; offset < wanted; offset += pageSize) {
+        const limit = Math.min(pageSize, wanted - offset);
+        const datasetEndpoint = new URL(
+          `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
+          "https://api.apify.com",
+        );
+        datasetEndpoint.searchParams.set("clean", "true");
+        datasetEndpoint.searchParams.set("format", "json");
+        datasetEndpoint.searchParams.set("limit", String(limit));
+        datasetEndpoint.searchParams.set("offset", String(offset));
+
+        const pageResponse = await this.fetchImpl(datasetEndpoint, {
+          headers,
+          signal: controller.signal,
+        });
+        if (!pageResponse.ok) {
+          throw new Error(`Harshmaur dataset read failed with HTTP ${pageResponse.status}.`);
+        }
+        const page = (await pageResponse.json()) as unknown;
+        if (!Array.isArray(page)) {
+          throw new Error("The Harshmaur actor returned an invalid dataset.");
+        }
+        payload.push(...page);
+        if (page.length < limit) break;
+      }
+      return payload;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    const maxItems = Math.min(this.maximumItems, Math.max(40, request.limit));
+    const actorInput = buildHarshmaurInput(request, {
+      maxItems,
+      maxTerms: this.maxTerms,
+    });
+    if (actorInput.searchTerms.length === 0) {
+      throw new Error("The company context did not produce any usable Reddit search terms.");
+    }
+
+    const payload = await this.runActor(actorInput);
+    const window = sevenDayWindow();
+    const since = request.since && Number.isFinite(Date.parse(request.since))
+      ? request.since
+      : window.since;
+    const { candidates, summary } = parseHarshmaurDataset(payload, { since });
+
+    // Each search term is its own plan entry, so per-term yield stays
+    // attributable all the way through the report.
+    const searchPlan: RedditSearchPlanEntry[] = actorInput.searchTerms.map((term) => ({
+      lane: "category_recommendation" as RedditSearchLane,
+      query: term,
+      seed: term,
+    }));
+
+    const rejected: Record<string, number> = {
+      invalid_record: 0,
+      invalid_url: 0,
+      query_mismatch: 0,
+      bot_author: 0,
+      deleted: 0,
+      nsfw: 0,
+      missing_timestamp: 0,
+      outside_window: 0,
+    };
+    for (const [reason, value] of Object.entries(summary.droppedByReason)) {
+      if (reason in rejected) rejected[reason] += value;
+      else rejected.invalid_record += value;
+    }
+
+    return {
+      candidates,
+      searchPlan,
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        queryCount: actorInput.searchTerms.length,
+        fetchedCandidates: summary.rawRecords,
+        normalizedCandidates: candidates.length,
+        verifiedRecentCandidates: candidates.length,
+        rejectedByReason: rejected as RedditDiscoveryDiagnostics["rejectedByReason"],
+        laneQueryCounts: { category_recommendation: actorInput.searchTerms.length },
+      },
+    };
+  }
+
+  /**
+   * Discovery-only enrichment. The record is passed through with its own text
+   * as context rather than fabricating thread structure the actor never
+   * fetched, so downstream coverage checks see the truth.
+   */
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const conversations: EnrichedRedditConversation[] = request.candidates.map((candidate) => {
+      const matched: RedditContextMessage = {
+        externalId: candidate.externalId,
+        kind: candidate.kind,
+        author: candidate.author,
+        body: candidate.body,
+        parentExternalId: candidate.parentExternalId,
+        createdAt: candidate.createdAt,
+      };
+      return {
+        ...candidate,
+        structuredContext: {
+          originalPost: candidate.kind === "post" ? matched : undefined,
+          matched,
+          parentChain: [],
+          replies: [],
+          surroundingComments: [],
+        },
+        threadContext: undefined,
+        enriched: false,
+        contextConfidence: "discovery_only",
+      } as EnrichedRedditConversation;
+    });
+
+    return {
+      conversations,
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        requested: request.candidates.length,
+        enriched: 0,
+        failed: 0,
+        fallbackUsed: conversations.length,
+      },
+    };
+  }
 }

@@ -81,6 +81,9 @@ jobs:
             exit 4
           fi
 
+          echo "--- container status ---"
+          $OPS status || true
+
           echo "--- reddit configuration in effect ---"
           $OPS reddit-config || true
 
@@ -98,8 +101,64 @@ jobs:
 # Trigger: deploy the current feature branch into the live demandsift2 project
 # with SHA-stamped images, replacing the stale 2026-08-09 production build.
 
-  report:
+  # External, black-box proof. Runs off the VPS so "production works" means
+  # reachable from the public internet, not just healthy from inside the host.
+  prove:
     needs: deploy
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      proof_b64: ${{ steps.proof.outputs.proof_b64 }}
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Prove public HTTP and one real queue job
+        id: proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/proof.md
+          {
+            echo "### Public production HTTP"
+            code="$(curl -sS -o /tmp/home.html -w '%{http_code}' --max-time 30 "$APP_URL/" || echo 000)"
+            echo "GET / -> $code"
+            echo "bytes=$(wc -c < /tmp/home.html 2>/dev/null || echo 0)"
+
+            echo
+            echo "### Real queue job end-to-end"
+            jar=/tmp/jar.txt
+            created="$(curl -sS --cookie-jar "$jar" -H 'content-type: application/json' \
+              -X POST --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+              --max-time 60 "$APP_URL/api/scans" || echo '{}')"
+            scan_id="$(printf '%s' "$created" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("scan") or {}).get("id") or "")' 2>/dev/null || echo '')"
+            echo "scan_id=${scan_id:-<none>}"
+            if [ -z "$scan_id" ]; then
+              echo "scan_create_failed=true"
+              echo "response=$(printf '%s' "$created" | head -c 400)"
+            else
+              status=""
+              for i in $(seq 1 90); do
+                body="$(curl -sS --cookie "$jar" --max-time 30 \
+                  "$APP_URL/api/scans/$scan_id?statusOnly=1" || echo '{}')"
+                status="$(printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("scan") or {}).get("status") or "")' 2>/dev/null || echo '')"
+                case "$status" in complete|failed) break ;; esac
+                sleep 10
+              done
+              echo "final_status=${status:-<unknown>}"
+              # A job that reaches a terminal state proves the worker consumed
+              # it from the queue, which is the claim being tested here.
+              if [ "$status" = complete ] || [ "$status" = failed ]; then
+                echo "queue_job_processed=true"
+              else
+                echo "queue_job_processed=false"
+              fi
+            fi
+          } > "$OUT" 2>&1
+          cat "$OUT"
+          echo "proof_b64=$(base64 -w0 "$OUT")" >> "$GITHUB_OUTPUT"
+
+  report:
+    needs: [deploy, prove]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -111,6 +170,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           LOG_B64: ${{ needs.deploy.outputs.log_b64 }}
+          PROOF_B64: ${{ needs.prove.outputs.proof_b64 }}
           RESULT: ${{ needs.deploy.result }}
         run: |
           set -Eeuo pipefail
@@ -120,6 +180,8 @@ jobs:
             echo '```'
             if [ -n "${LOG_B64:-}" ]; then echo "$LOG_B64" | base64 -d; else echo "no log captured"; fi
             echo '```'
+            echo
+            if [ -n "${PROOF_B64:-}" ]; then echo "$PROOF_B64" | base64 -d; else echo "no external proof captured"; fi
           } > /tmp/r.md
           python3 - <<'PY' > /tmp/body.json
           import json

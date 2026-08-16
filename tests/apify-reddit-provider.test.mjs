@@ -500,10 +500,10 @@ test("discovery is lightweight and does not perform enrichment", async () => {
 
   assert.equal(discovery.searchPosts, true);
   assert.equal(discovery.searchComments, true);
-  assert.equal(Object.hasOwn(discovery, "skipComments"), false);
+  assert.equal(discovery.skipComments, true);
   assert.equal(discovery.includeMediaLinks, false);
-  assert.equal(discovery.sort, "new");
-  assert.equal(discovery.maxComments, 3);
+  assert.equal(discovery.sort, "relevance");
+  assert.equal(discovery.maxComments, 10);
   assert.equal(discovery.maxItems, 40);
   assert.equal(discovery.maxPostCount, 40);
   assert.equal(startCall.url.searchParams.get("maxItems"), "40");

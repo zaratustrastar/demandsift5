@@ -22,9 +22,8 @@ jobs:
   truth:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: "1"
+    outputs:
+      report_b64: ${{ steps.collect.outputs.report_b64 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +31,7 @@ jobs:
           fetch-depth: 1
 
       - name: Collect production truth
+        id: collect
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -119,26 +119,37 @@ jobs:
           head -c 20000 "$OUT" > /tmp/phase1.trimmed.md
           wc -c /tmp/phase1.trimmed.md
           cat /tmp/phase1.trimmed.md
+          echo "report_b64=$(base64 -w0 /tmp/phase1.trimmed.md)" >> "$GITHUB_OUTPUT"
 
+  publish:
+    needs: truth
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
       - name: Post findings to the PR
-        if: always()
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_B64: ${{ needs.truth.outputs.report_b64 }}
         run: |
           set -Eeuo pipefail
+          if [ -z "${REPORT_B64:-}" ]; then
+            echo "collection produced no report" > /tmp/phase1.md
+          else
+            echo "$REPORT_B64" | base64 -d > /tmp/phase1.md
+          fi
           python3 - <<'PY' > /tmp/body.json
           import json
-          try:
-              body = open("/tmp/phase1.trimmed.md").read()
-          except FileNotFoundError:
-              body = "Phase 1 truth check produced no output; the collection step failed."
-          print(json.dumps({"body": body}))
+          print(json.dumps({"body": open("/tmp/phase1.md").read()[:60000]}))
           PY
           code="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/1/comments" \
             --data @/tmp/body.json)"
           echo "comment_http=$code"
-          head -c 500 /tmp/resp.json || true
-          # Reporting must not mask a successful collection.
+          head -c 300 /tmp/resp.json || true
           test "$code" = "201"

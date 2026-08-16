@@ -1,0 +1,46 @@
+name: Test corrected TVCP relevance recall
+on:
+  push:
+    branches: [fix-tvcp-recall-relevance-20260816]
+    paths: [.github/workflows/test-tvcp-relevance-recall.yml]
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-tvcp-recall-relevance-20260816
+          fetch-depth: 0
+      - name: Correct Apify search mode
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p=Path('lib/providers/reddit.server.ts'); s=p.read_text()
+          s=s.replace('''      ignoreStartUrls: true,\n      skipUserPosts: true,''','''      ignoreStartUrls: true,\n      skipComments: true,\n      skipUserPosts: true,''',1)
+          s=s.replace('''      // Recent demand matters more than historic relevance ranking. Trudax\'s\n      // `time` filter only bounds posts, so give comment search the same\n      // explicit cutoff and never combine searchComments with skipComments.\n      sort: "new",''','''      // Rank by semantic relevance, but bound both posts and comments by the\n      // explicit recent cutoff. skipComments only prevents traversing every\n      // matched post; direct comment search remains enabled.\n      sort: "relevance",''',1)
+          s=s.replace('''      // Keep traversal bounded while allowing direct recent comment search.\n      maxComments: 3,''','''      // This bounds direct comment result pages while skipComments prevents\n      // unrelated thread traversal from consuming the global discovery budget.\n      maxComments: 10,''',1)
+          p.write_text(s)
+          p=Path('tests/apify-reddit-provider.test.mjs'); s=p.read_text()
+          s=s.replace('assert.equal(Object.hasOwn(discovery, "skipComments"), false);','assert.equal(discovery.skipComments, true);',1)
+          s=s.replace('assert.equal(discovery.sort, "new");','assert.equal(discovery.sort, "relevance");',1)
+          s=s.replace('assert.equal(discovery.maxComments, 3);','assert.equal(discovery.maxComments, 10);',1)
+          p.write_text(s)
+          PY
+      - run: npm ci
+      - run: node --test tests/apify-reddit-provider.test.mjs tests/reddit-intelligence-pipeline.test.mjs
+      - run: npm run build:node
+      - run: npm run lint
+      - name: Commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git diff --cached --check
+          git commit -m 'Restore relevance-ranked recent Reddit recall'
+          git push origin HEAD:fix-tvcp-recall-relevance-20260816

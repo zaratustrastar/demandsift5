@@ -36,88 +36,79 @@ jobs:
         run: |
           set -Eeuo pipefail
           OUT=/tmp/phase1.md
-          : > "$OUT"
 
-          BRANCH_SHA="$(git rev-parse HEAD)"
+          # Resolve docker explicitly: the runner's non-login shell may not have
+          # it on PATH even though the deploy workflow uses it via sudo.
+          DOCKER=""
+          for cand in /usr/bin/docker /usr/local/bin/docker "$(command -v docker || true)"; do
+            [ -n "$cand" ] && [ -x "$cand" ] && DOCKER="$cand" && break
+          done
+          d() { if [ -n "$DOCKER" ]; then sudo -n "$DOCKER" "$@" 2>/dev/null || "$DOCKER" "$@" 2>/dev/null; fi; }
+
+          # Everything inside this block lands in the report; earlier versions
+          # echoed some sections to stdout and silently lost them.
           {
             echo "## Phase 1 — what production is actually running"
             echo
-            echo "branch head (feature/reddit-intelligence-pipeline): \`$BRANCH_SHA\`"
+            echo "branch head: \`$(git rev-parse HEAD)\`"
+            echo "docker_binary=${DOCKER:-<not found>}"
+            echo "sudo_noninteractive=$(sudo -n true 2>/dev/null && echo yes || echo no)"
             echo
-          } >> "$OUT"
 
-          echo "### Containers" >> "$OUT"
-          echo '```' >> "$OUT"
-          (sudo -n docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-            || docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-            || echo "docker ps unavailable") >> "$OUT"
-          echo '```' >> "$OUT"
+            echo "### Containers"
+            echo '```'
+            d ps --format '{{.Names}} | {{.Image}} | {{.Status}}' || echo "docker ps produced nothing"
+            echo '```'
 
-          dockercmd() { sudo -n docker "$@" 2>/dev/null || docker "$@" 2>/dev/null; }
+            names="$(d ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true)"
+            echo "matched_containers=${names:-<none>}"
 
-          echo "### Deployed SHA per container" >> "$OUT"
-          echo '```' >> "$OUT"
-          for name in $(dockercmd ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true); do
-            echo "--- $name"
-            # Prefer an explicit build arg/label, then any baked-in env, then the image digest.
-            label="$(dockercmd inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name" || true)"
-            envsha="$(dockercmd exec "$name" sh -lc 'echo "${GIT_SHA:-${RELEASE_SHA:-${SOURCE_COMMIT:-}}}"' 2>/dev/null || true)"
-            image="$(dockercmd inspect -f '{{.Image}}' "$name" || true)"
-            created="$(dockercmd inspect -f '{{.Created}}' "$name" || true)"
-            echo "label_revision=${label:-<none>}"
-            echo "env_sha=${envsha:-<none>}"
-            echo "image=${image:-<none>}"
-            echo "container_created=${created:-<none>}"
-          done >> "$OUT"
-          echo '```' >> "$OUT"
-
-          # The strongest available proof: does the running bundle contain code
-          # that only exists on this branch?
-          echo "### Code-presence probe inside the running containers" >> "$OUT"
-          echo '```' >> "$OUT"
-          for name in $(dockercmd ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true); do
-            echo "--- $name"
-            for marker in CONCEPT_SYNONYMS prioritizeCandidates conversationThemes discoveryProfile leadScore; do
-              hits="$(dockercmd exec "$name" sh -lc "grep -rl '$marker' /app/dist /app/.next 2>/dev/null | head -3 | tr '\n' ' '" 2>/dev/null || true)"
-              echo "$marker -> ${hits:-<absent>}"
+            echo "### Deployed SHA and code-presence per container"
+            echo '```'
+            for name in $names; do
+              echo "--- $name"
+              echo "label_revision=$(d inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name" || echo '<none>')"
+              echo "created=$(d inspect -f '{{.Created}}' "$name" || echo '<none>')"
+              for marker in CONCEPT_SYNONYMS prioritizeCandidates conversationThemes discoveryProfile leadScore; do
+                hit="$(d exec "$name" sh -lc "grep -rl '$marker' /app 2>/dev/null | head -2 | tr '\n' ' '" || true)"
+                echo "  $marker -> ${hit:-<absent>}"
+              done
             done
-          done >> "$OUT"
-          echo '```' >> "$OUT"
+            echo '```'
 
-          echo "### VPS deploy env (acquisition keys only)" >> "$OUT"
-          ENVFILE=/opt/demandsift5-pr1/deploy/vps.env
-          echo '```' >> "$OUT"
-          if sudo -n test -f "$ENVFILE" 2>/dev/null || test -f "$ENVFILE"; then
-            echo "env_file=$ENVFILE (present)"
-            for key in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS \
-                       APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS \
-                       APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES \
-                       REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET \
-                       BACKGROUND_WORKER_MODE APP_RUNTIME_ENV; do
-              line="$( (sudo -n grep -E "^${key}=" "$ENVFILE" 2>/dev/null || grep -E "^${key}=" "$ENVFILE" 2>/dev/null) | tail -1 || true)"
-              echo "${line:-${key}=<unset>}"
+            echo "### VPS deploy env (acquisition keys only)"
+            echo '```'
+            ENVFILE=/opt/demandsift5-pr1/deploy/vps.env
+            if sudo -n test -f "$ENVFILE" 2>/dev/null; then
+              echo "env_file=$ENVFILE present"
+              for key in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS \
+                         APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS \
+                         APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES \
+                         REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET \
+                         BACKGROUND_WORKER_MODE APP_RUNTIME_ENV; do
+                echo "$(sudo -n grep -E "^${key}=" "$ENVFILE" 2>/dev/null | tail -1 || echo "${key}=<unset>")"
+              done
+              # Secrets: presence only, never values.
+              for key in APIFY_TOKEN OPENAI_API_KEY DATABASE_URL; do
+                v="$(sudo -n grep -E "^${key}=" "$ENVFILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+                if [ -n "$v" ]; then echo "${key}=<set, ${#v} chars>"; else echo "${key}=<unset>"; fi
+              done
+            else
+              echo "env_file=$ENVFILE NOT READABLE by the runner"
+              echo "ls /opt:"; sudo -n ls -1 /opt 2>/dev/null || ls -1 /opt 2>/dev/null || echo "  <no access>"
+            fi
+            echo '```'
+
+            echo "### Effective env inside containers"
+            echo '```'
+            for name in $names; do
+              echo "--- $name"
+              d exec "$name" sh -lc 'for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET BACKGROUND_WORKER_MODE; do echo "$k=$(printenv "$k" || echo "<unset>")"; done' || echo "exec unavailable"
             done
-            # Secrets: presence only, never values.
-            for key in APIFY_TOKEN OPENAI_API_KEY DATABASE_URL; do
-              val="$( (sudo -n grep -E "^${key}=" "$ENVFILE" 2>/dev/null || grep -E "^${key}=" "$ENVFILE" 2>/dev/null) | tail -1 | cut -d= -f2- || true)"
-              if [ -n "$val" ]; then echo "${key}=<set, ${#val} chars>"; else echo "${key}=<unset>"; fi
-            done
-          else
-            echo "env_file=$ENVFILE NOT READABLE by the runner"
-          fi
-          echo '```' >> "$OUT"
+            echo '```'
+          } > "$OUT" 2>&1
 
-          echo "### Effective env inside the running containers" >> "$OUT"
-          echo '```' >> "$OUT"
-          for name in $(dockercmd ps --format '{{.Names}}' | grep -Ei 'demandsift|web|worker' || true); do
-            echo "--- $name"
-            dockercmd exec "$name" sh -lc 'for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET BACKGROUND_WORKER_MODE; do v=$(printenv "$k" || true); echo "$k=${v:-<unset>}"; done' 2>/dev/null || echo "exec failed"
-          done >> "$OUT"
-          echo '```' >> "$OUT"
-
-          # GitHub caps a comment at 65536 chars; stay well under it.
           head -c 20000 "$OUT" > /tmp/phase1.trimmed.md
-          wc -c /tmp/phase1.trimmed.md
           cat /tmp/phase1.trimmed.md
           echo "report_b64=$(base64 -w0 /tmp/phase1.trimmed.md)" >> "$GITHUB_OUTPUT"
 

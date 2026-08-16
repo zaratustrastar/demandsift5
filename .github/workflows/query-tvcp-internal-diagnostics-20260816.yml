@@ -12,14 +12,23 @@ permissions:
 
 jobs:
   query:
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Query loopback-only TVCP diagnostics
+      - name: Wait for temporary TVCP diagnostics and print sanitized history
         shell: bash
         run: |
           set -Eeuo pipefail
-          curl --noproxy '*' --fail-with-body --silent --show-error \
-            --resolve demandsift.143-244-154-139.sslip.io:443:127.0.0.1 \
-            -H 'X-Forwarded-For: 127.0.0.1' \
-            https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp
+          for attempt in $(seq 1 90); do
+            code="$(curl --silent --show-error --output /tmp/tvcp.json --write-out '%{http_code}' \
+              -H 'X-VPS-Diagnostic-Key: tvcp-20260816-6e6ad7887f1d4ba7a7f5d84b7c1dd95e' \
+              https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp || true)"
+            if [ "$code" = "200" ]; then
+              cat /tmp/tvcp.json
+              exit 0
+            fi
+            echo "diagnostic_wait=$attempt http=$code"
+            sleep 10
+          done
+          echo 'TVCP diagnostics did not become available in time.' >&2
+          exit 1

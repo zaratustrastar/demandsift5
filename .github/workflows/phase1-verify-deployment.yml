@@ -1,0 +1,151 @@
+name: Phase1 verify deployed code and env
+
+# Proves what production is actually running before anything is tuned.
+# Reports back as a PR comment because Actions logs are only retrievable
+# through blob storage.
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/phase1-verify-deployment.yml
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
+
+      - name: Collect deployment truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out=/tmp/phase1.md
+          : > "$out"
+
+          BRANCH_SHA="$(git rev-parse HEAD)"
+          {
+            echo "## Phase 1 — what production is actually running"
+            echo
+            echo "branch head: \`$BRANCH_SHA\`"
+            echo
+            echo "### Containers"
+            echo
+            echo '```'
+          } >> "$out"
+
+          docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}' \
+            | grep -i demandsift >> "$out" 2>/dev/null || echo "(no demandsift containers found)" >> "$out"
+          echo '```' >> "$out"
+
+          # Prove which code is inside each container by grepping the built
+          # bundle for markers unique to specific commits. This is more reliable
+          # than a label, which can be stale or absent.
+          probe_container() {
+            local svc="$1"
+            local cid
+            cid="$(docker ps --filter "name=demandsift-${svc}" --format '{{.ID}}' | head -1)"
+            if [ -z "$cid" ]; then
+              echo "- **$svc**: container not found" >> "$out"
+              return 0
+            fi
+            echo "" >> "$out"
+            echo "**$svc** (\`$cid\`)" >> "$out"
+            echo '```' >> "$out"
+            for marker in \
+              "prioritizeCandidates" \
+              "Embedding prefilter unavailable" \
+              "CONCEPT_SYNONYMS" \
+              "conversationThemes" \
+              "discoveryProfile" \
+              "stopAfterUnderstanding" \
+              "researchScore" \
+              "reviewFirst"
+            do
+              if docker exec "$cid" sh -c "grep -rlF -- '$marker' /app 2>/dev/null | head -1" | grep -q .; then
+                echo "PRESENT  $marker" >> "$out"
+              else
+                echo "MISSING  $marker" >> "$out"
+              fi
+            done
+            echo '```' >> "$out"
+
+            # Whitelisted, non-secret runtime config only.
+            echo "runtime Reddit config seen by $svc:" >> "$out"
+            echo '```' >> "$out"
+            docker exec "$cid" sh -c 'for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET BACKGROUND_WORKER_MODE APP_RUNTIME_ENV; do v=$(printenv "$k" || true); echo "$k=${v:-<unset>}"; done; for k in APIFY_TOKEN OPENAI_API_KEY; do v=$(printenv "$k" || true); if [ -n "$v" ]; then echo "$k=<set:${#v} chars>"; else echo "$k=<unset>"; fi; done' >> "$out" 2>/dev/null || echo "(exec failed)" >> "$out"
+            echo '```' >> "$out"
+          }
+
+          echo "" >> "$out"
+          echo "### Code markers inside running containers" >> "$out"
+          probe_container web
+          probe_container worker
+
+          # The authoritative env file, per vps-release-deploy.yml.
+          ENV_FILE=/opt/demandsift5-pr1/deploy/vps.env
+          {
+            echo ""
+            echo "### $ENV_FILE (whitelisted keys only)"
+            echo '```'
+          } >> "$out"
+          if sudo -n test -f "$ENV_FILE" 2>/dev/null || test -f "$ENV_FILE"; then
+            for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT \
+                     APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE \
+                     REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET \
+                     BACKGROUND_WORKER_MODE APP_RUNTIME_ENV REDDIT_PROVIDER; do
+              line="$( (sudo -n cat "$ENV_FILE" 2>/dev/null || cat "$ENV_FILE") | grep -E "^${k}=" | head -1 || true)"
+              echo "${line:-${k}=<not set in file>}" >> "$out"
+            done
+            # Secrets: presence only, never values.
+            for k in APIFY_TOKEN OPENAI_API_KEY POSTGRES_PASSWORD; do
+              if ( (sudo -n cat "$ENV_FILE" 2>/dev/null || cat "$ENV_FILE") | grep -qE "^${k}=" ); then
+                echo "${k}=<present, redacted>" >> "$out"
+              else
+                echo "${k}=<absent>" >> "$out"
+              fi
+            done
+          else
+            echo "(env file not readable by the runner)" >> "$out"
+          fi
+          echo '```' >> "$out"
+
+          {
+            echo ""
+            echo "### compose wiring"
+            echo '```'
+            echo "web env_file:    $(grep -A6 '^  web:' \"$GITHUB_WORKSPACE/deploy/compose.vps.yaml\" | grep -c 'vps.env' || true) reference(s)"
+            echo "worker env_file: $(sed -n '/^  worker:/,/^  caddy:/p' \"$GITHUB_WORKSPACE/deploy/compose.vps.yaml\" | grep -c 'vps.env' || true) reference(s)"
+            echo '```'
+          } >> "$out"
+
+          head -c 60000 "$out" > /tmp/phase1.trimmed.md
+
+      - name: Post results
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /tmp/phase1.trimmed.md || echo "Phase 1 collection failed before producing output." > /tmp/phase1.trimmed.md
+          python3 - <<'PY' > /tmp/body.json
+          import json
+          print(json.dumps({"body": open("/tmp/phase1.trimmed.md").read()}))
+          PY
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --data @/tmp/body.json > /dev/null
+          echo "posted"

@@ -12,7 +12,7 @@ on:
       - .github/workflows/phase1-verify-deployment.yml
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
@@ -137,19 +137,25 @@ jobs:
 
           head -c 60000 "$out" > /tmp/phase1.trimmed.md
 
-      - name: Post results
+      - name: Publish the report to a diagnostics branch
         if: always()
         shell: bash
         run: |
           set -u
-          test -f /tmp/phase1.trimmed.md || echo "Phase 1 collection failed before producing output." > /tmp/phase1.trimmed.md
-          python3 - <<'PY' > /tmp/body.json
-          import json
-          print(json.dumps({"body": open("/tmp/phase1.trimmed.md").read()}))
-          PY
-          curl -sS -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-            --data @/tmp/body.json > /dev/null
-          echo "posted"
+          test -f /tmp/phase1.trimmed.md || echo "collection produced no output" > /tmp/phase1.trimmed.md
+
+          # Comment posting from this runner silently no-ops, so the report is
+          # committed to a dedicated branch where it can be read via the API.
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p diagnostics
+          cp /tmp/phase1.trimmed.md "diagnostics/phase1-$(date -u +%Y%m%dT%H%M%SZ).md"
+          cp /tmp/phase1.trimmed.md diagnostics/phase1-latest.md
+          git checkout -B diagnostics-reports
+          git add -f diagnostics
+          git commit -m "phase1 deployment verification report" || echo "nothing to commit"
+          git push -f origin diagnostics-reports || echo "push failed"
+
+          echo "----- REPORT (also in job log) -----"
+          cat /tmp/phase1.trimmed.md

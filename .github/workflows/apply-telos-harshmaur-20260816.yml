@@ -23,7 +23,9 @@ jobs:
         with:
           node-version: '22.19.0'
       - name: Apply telos architecture and Harshmaur adapter
-        run: python3 scripts/apply-telos-harshmaur.py
+        run: |
+          python3 scripts/apply-telos-harshmaur.py
+          python3 scripts/fix-harshmaur-test-realm.py
       - name: Install dependencies
         run: npm ci
       - name: Harshmaur and TVCP retrieval regression

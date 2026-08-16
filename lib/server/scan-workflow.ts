@@ -15,7 +15,10 @@ import {
   isQualifiedPotentialCustomer,
   isRelevantMarketConversation,
   legacyClassificationFromDeep,
+  competitorScore,
+  leadScore,
   opportunityRankScore,
+  replyScore,
   researchScore,
   potentialCustomerIntentFromQualification,
   selectCandidatesForEnrichment,
@@ -619,7 +622,7 @@ export async function enqueueScanRun(scan: ScanRecord) {
 
 export async function runScan(
   scanId: string,
-  options: { resumeRunning?: boolean } = {},
+  options: { resumeRunning?: boolean; stopAfterUnderstanding?: boolean } = {},
 ): Promise<ScanRecord> {
   const repository = getStateRepository();
   const claim = await repository.beginScanRun(scanId);
@@ -671,7 +674,15 @@ export async function runScan(
     let business: BusinessUnderstanding;
     let profile: ScanBusinessProfile;
     let analysisMode: ScanResult["analysisMode"];
-    if (aiProvider) {
+    // A previously analyzed profile is reused verbatim. Re-analyzing would
+    // burn tokens and, worse, could produce different terms from the ones the
+    // user just reviewed and approved.
+    const persistedAnalysis = scan.discoveryProfile;
+    if (persistedAnalysis) {
+      business = persistedAnalysis.business;
+      profile = persistedAnalysis.profile;
+      analysisMode = persistedAnalysis.analysisMode;
+    } else if (aiProvider) {
       const analyzed = await aiProvider.analyzeBusiness({
         workspaceId: scan.workspaceId,
         businessId,
@@ -702,6 +713,34 @@ export async function runScan(
       });
       analysisMode = "local-fallback";
     }
+    if (!persistedAnalysis) {
+      // Persisted before Reddit retrieval so the user can review and edit the
+      // discovery terms while the scan waits.
+      scan.discoveryProfile = {
+        profile,
+        business,
+        analysisMode,
+        analyzedAt: new Date().toISOString(),
+      };
+      scan.updatedAt = new Date().toISOString();
+      await getStateRepository().saveScan(scan);
+    }
+
+    if (options.stopAfterUnderstanding) {
+      // Analysis-only pass. The scan returns to `queued` so the user can review
+      // and edit the discovery terms, then start Reddit retrieval when ready.
+      await setStage(
+        scan,
+        "understanding",
+        "complete",
+        `Built a source-backed context pack for ${profile.name}. Review what we should look for, then start the Reddit scan.`,
+      );
+      scan.status = "queued";
+      scan.updatedAt = new Date().toISOString();
+      await getStateRepository().saveScan(scan);
+      return scan;
+    }
+
     // User edits are applied after crawling and before query planning: the
     // user decides what to look for, DemandSift still compiles the searches.
     const overrideResult = applyDiscoveryOverrides(business, scan.discoveryOverrides);
@@ -1148,6 +1187,9 @@ export async function runScan(
         competitor: relevantCompetitorByExternalId.get(row.externalId) ?? null,
         sourceCreatedAt: row.conversation.createdAt,
         sourceIds: [row.conversation.provenance.id],
+        competitorScore: competitorScore(qualification),
+        researchScore: researchScore(qualification),
+        replyScore: replyScore(qualification),
       };
     }));
 
@@ -1223,6 +1265,10 @@ export async function runScan(
         permalink: conversation.permalink ?? "",
         postedAt: conversation.createdAt,
         score,
+        leadScore: leadScore(qualification),
+        replyScore: replyScore(qualification),
+        competitorScore: competitorScore(qualification),
+        researchScore: researchScore(qualification),
         commentCount: conversation.metrics.comments,
         whyItMatters: qualification.whyItMatters,
         intent: intentForQualification(qualification),
@@ -1387,9 +1433,12 @@ export async function runScan(
     await setStage(scan, "replies", "active");
     const now = new Date().toISOString();
     const replies: ReplyRecord[] = [];
+    // Reply generation is bounded, so ordering decides which conversations get
+    // a drafted reply. That has to be reply value, not lead value: the best
+    // thread to answer is often not the strongest buyer.
     const replyEligible = [...opportunities]
       .filter((opportunity) => opportunity.shouldReply === true)
-      .sort((left, right) => right.score - left.score);
+      .sort((left, right) => right.replyScore - left.replyScore);
     for (const opportunity of replyEligible) {
       const row = qualifiedOpportunities.find((qualified) => qualified.id === opportunity.id);
       let content = "";

@@ -133,7 +133,9 @@ export function aggregatePotentialCustomers(input: {
       supportingSignalCount: supportingSourceIds.length,
       appearedInPreviousDemandDrop: Boolean(priorFirstSeen),
     };
-  }).sort((left, right) => right.score - left.score);
+    // Potential customers rank by lead value. `score` is the lead score; the
+    // fallback keeps stored reports that predate the split working.
+  }).sort((left, right) => (right.leadScore ?? right.score) - (left.leadScore ?? left.score));
 
   const breakdown = {
     highIntent: opportunities.filter((row) => row.potentialCustomerIntent === "high_intent").length,

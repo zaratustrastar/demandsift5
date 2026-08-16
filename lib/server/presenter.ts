@@ -195,11 +195,19 @@ export async function presentScan(scan: ScanRecord) {
   );
   const visibleInsights = fullAccess ? result.insights : result.insights.slice(0, 2);
   const leadSourceIds = new Set(result.opportunities.map((opportunity) => opportunity.sourceId));
+  // Competitor intelligence ranks by competitor value; the rest of the relevant
+  // corpus ranks by research value. Neither uses lead value.
   const relevantConversations = dedupeMarketIntelligenceRecords(
     result.marketIntelligence.filter(
       (conversation) => !leadSourceIds.has(conversation.sourceId),
     ),
-  );
+  ).sort((left, right) => {
+    // A named competitor makes a conversation competitor intelligence first;
+    // everything else ranks by research value.
+    const leftKey = left.competitor ? (left.competitorScore ?? 0) + 1_000 : (left.researchScore ?? 0);
+    const rightKey = right.competitor ? (right.competitorScore ?? 0) + 1_000 : (right.researchScore ?? 0);
+    return rightKey - leftKey;
+  });
   const visibleRelevantConversations = fullAccess
     ? relevantConversations
     : relevantConversations.slice(0, 3);

@@ -88,6 +88,12 @@ export type MarketIntelligenceRecord = {
   competitor: string | null;
   sourceCreatedAt: string;
   sourceIds: string[];
+  /** Ranks the competitor-intelligence view; zero when no competitor is named. */
+  competitorScore: number;
+  /** Ranks research value and drives theme aggregation. */
+  researchScore: number;
+  /** Ranks discussions worth joining, independent of lead value. */
+  replyScore: number;
 };
 
 export type CompetitorWeaknessRecord = {
@@ -111,8 +117,20 @@ export type OpportunityRecord = {
   author: string;
   permalink: string;
   postedAt: string;
-  /** Post-qualification ranking score. It must never decide leadStatus. */
+  /**
+   * @deprecated Equal to `leadScore`; retained for stored reports and older
+   * consumers. New code should read the purpose-specific score it means.
+   */
   score: number;
+  /**
+   * Purpose-specific scores. A conversation is useful in several independent
+   * ways, so each output ranks by its own measure rather than competing for a
+   * single blended "opportunity" number.
+   */
+  leadScore: number;
+  replyScore: number;
+  competitorScore: number;
+  researchScore: number;
   commentCount: number;
   whyItMatters: string;
   intent: "actively-looking" | "evaluating" | "problem-aware";
@@ -375,6 +393,7 @@ export type FunnelEventRecord = {
   createdAt: string;
 };
 
+import type { BusinessUnderstanding } from "@/lib/domain/types";
 import type { DiscoveryTermOverrides } from "@/lib/intelligence/discovery-overrides";
 
 export type ScanRecord = {
@@ -393,6 +412,22 @@ export type ScanRecord = {
    * required.
    */
   discoveryOverrides?: DiscoveryTermOverrides | null;
+  /**
+   * Website analysis result, persisted as soon as the crawl completes and
+   * before any Reddit retrieval.
+   *
+   * The discovery profile has to outlive the analysis step: the user reviews
+   * and edits these terms *between* understanding the business and searching
+   * Reddit. Reading them from `result.profile` was a lifecycle contradiction,
+   * because a result only exists once the scan it was meant to configure has
+   * already run.
+   */
+  discoveryProfile?: {
+    profile: ScanBusinessProfile;
+    business: BusinessUnderstanding;
+    analysisMode: ScanResult["analysisMode"];
+    analyzedAt: string;
+  } | null;
 };
 
 export type EntitlementRecord = {

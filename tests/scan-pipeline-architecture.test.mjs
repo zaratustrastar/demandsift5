@@ -39,7 +39,10 @@ test("long-running scans start durably and recover an orphaned running execution
   assert.match(executorRoute, /status: "starting", complete: false/);
   assert.match(executorRoute, /export async function GET/);
   assert.match(executorRoute, /executionSnapshot\(job, scan\)/);
-  assert.match(source, /options: \{ resumeRunning\?: boolean \} = \{\}/);
+  assert.match(
+    source,
+    /options: \{ resumeRunning\?: boolean; stopAfterUnderstanding\?: boolean \} = \{\}/,
+  );
   assert.match(source, /claim\.state === "running" && !options\.resumeRunning/);
 });
 

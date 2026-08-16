@@ -21,11 +21,21 @@ export async function PUT(request: Request, context: RouteContext) {
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
 
-    if (scan.status !== "queued") {
+    // Editable between website analysis and Reddit retrieval. Requiring only
+    // "queued" was not enough on its own: before analysis there is nothing to
+    // review, and once retrieval has begun an edit would silently not apply.
+    if (scan.status === "running" || scan.status === "complete") {
       throw new ApiError(
-        "Discovery terms can only be edited before the scan starts.",
+        "Discovery terms can only be edited before the Reddit scan starts.",
         409,
         "scan_already_started",
+      );
+    }
+    if (!scan.discoveryProfile) {
+      throw new ApiError(
+        "Analyze the website before editing what we should look for.",
+        409,
+        "website_not_analyzed",
       );
     }
 
@@ -51,22 +61,30 @@ export async function GET(request: Request, context: RouteContext) {
     const actor = await requireWorkspace(request);
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
-    const profile = scan.result?.profile;
+    // Read from the persisted analysis, not from `result`. A completed result
+    // only exists after the scan these terms were meant to configure has
+    // already run, so it can never be the source for the review step.
+    const analysis = scan.discoveryProfile;
+    const business = analysis?.business;
 
     return Response.json(
       {
-        editable: scan.status === "queued",
+        analyzed: Boolean(analysis),
+        editable: Boolean(analysis) && scan.status !== "running" && scan.status !== "complete",
         discoveryOverrides: scan.discoveryOverrides ?? null,
+        profile: analysis?.profile ?? null,
         // Derived terms are shown so the user edits from what was found rather
         // than from a blank form.
-        derived: profile
+        derived: business
           ? {
-              // ScanBusinessProfile exposes brand terms rather than the raw
-              // productTerms seed list, so that is what the UI edits from.
-              productTerms: profile.brandTerms ?? [],
-              customerProblems: profile.customerProblemLanguage ?? [],
-              competitors: profile.competitors ?? [],
-              excludedTerms: profile.irrelevantTopics ?? [],
+              productTerms: business.productTerms.value,
+              customerProblems: business.customerProblemLanguage.value,
+              competitors: business.competitors.value.map((competitor) => competitor.name),
+              excludedTerms: business.irrelevantTopics.value,
+              personas: business.targetAudiences.value.map((audience) => audience.name),
+              useCases: business.jobsToBeDone?.value ?? [],
+              purchaseTriggers: business.triggerEvents?.value ?? [],
+              alternatives: business.likelyWorkarounds?.value ?? [],
             }
           : null,
       },

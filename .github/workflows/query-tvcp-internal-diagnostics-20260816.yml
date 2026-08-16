@@ -13,22 +13,24 @@ permissions:
 jobs:
   query:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - name: Wait for temporary TVCP diagnostics and print sanitized history
+      - name: Print compact sanitized TVCP scan diagnostics
         shell: bash
         run: |
           set -Eeuo pipefail
-          for attempt in $(seq 1 90); do
-            code="$(curl --silent --show-error --output /tmp/tvcp.json --write-out '%{http_code}' \
-              -H 'X-VPS-Diagnostic-Key: tvcp-20260816-6e6ad7887f1d4ba7a7f5d84b7c1dd95e' \
-              https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp || true)"
-            if [ "$code" = "200" ]; then
-              cat /tmp/tvcp.json
-              exit 0
-            fi
-            echo "diagnostic_wait=$attempt http=$code"
-            sleep 10
-          done
-          echo 'TVCP diagnostics did not become available in time.' >&2
-          exit 1
+          curl --fail-with-body --silent --show-error \
+            -H 'X-VPS-Diagnostic-Key: tvcp-20260816-6e6ad7887f1d4ba7a7f5d84b7c1dd95e' \
+            https://demandsift.143-244-154-139.sslip.io/internal-vps-diagnostics/tvcp > /tmp/tvcp.json
+          python3 - /tmp/tvcp.json <<'PY'
+          import json, sys
+          payload=json.load(open(sys.argv[1]))
+          for scan in payload.get('scans', [])[:4]:
+              print('SCAN', scan.get('id'), scan.get('status'), scan.get('createdAt'))
+              print('PROFILE', json.dumps(scan.get('profile'), separators=(',',':')))
+              print('SEARCH_PLAN', json.dumps(scan.get('searchPlan'), separators=(',',':')))
+              print('LANE_COUNTS', json.dumps(scan.get('matchedCandidatesByLane'), separators=(',',':')))
+              print('QUERY_COUNTS', json.dumps(scan.get('matchedCandidatesByQuery'), separators=(',',':')))
+              print('OUTPUT', json.dumps(scan.get('output'), separators=(',',':')))
+              print('DIAGNOSTICS', json.dumps(scan.get('diagnostics'), separators=(',',':')))
+          PY

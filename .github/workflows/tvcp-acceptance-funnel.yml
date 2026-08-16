@@ -71,7 +71,11 @@ jobs:
           payload = json.load(open("/tmp/report.json"))
           scan = payload.get("scan") or {}
           report = payload.get("report") or {}
-          diag = report.get("diagnostics") or {}
+          evidence = report.get("scanEvidence") or {}
+          diag = evidence.get("diagnostics") or report.get("diagnostics") or {}
+          coverage = report.get("qualificationCoverage") or {}
+          candidates = evidence.get("candidates") or []
+          plan = evidence.get("searchPlan") or []
 
           def n(*keys):
               for k in keys:
@@ -87,14 +91,14 @@ jobs:
           print("| stage | count |")
           print("|---|---|")
           rows = [
-            ("retrieved", n("providerRecords", "retrievedCandidates", "rawCandidates")),
+            ("retrieved", n("providerRecords", "rawCandidates", "retrievedCandidates", "apifyRecords")),
             ("deterministic survivors", n("deterministicSurvivors")),
             ("embedding scored", n("embeddingScored")),
             ("embedding dropped (below floor)", n("embeddingDroppedBelowFloor")),
             ("embedding dropped (over budget)", n("embeddingDroppedOverBudget")),
             ("LLM classified", n("classifiedCandidates")),
             ("genuinely relevant", len(report.get("relevantConversations") or []) or n("relevantConversations")),
-            ("enriched", n("enrichedConversations", "fullContextReviews")),
+            ("enriched", n("enrichedSuccessfully", "enrichedConversations")),
             ("potential customers", (report.get("potentialCustomers") or {}).get("total", "—")),
             ("reply opportunities", len(report.get("replies") or [])),
             ("competitor signals", n("competitorSignals")),
@@ -104,6 +108,16 @@ jobs:
           for label, value in rows:
               print(f"| {label} | {value} |")
 
+          print("\n### Search plan\n")
+          for q in plan[:14]:
+              print(f"- `{q.get('query') if isinstance(q, dict) else q}`")
+
+          print(f"\n### Candidates that reached triage ({len(candidates)})\n")
+          for c in candidates[:20]:
+              d = c.get("decision") or c.get("triageDecision") or ""
+              print(f"- [{d}] **{(c.get('title') or '')[:95]}** r/{c.get('subreddit')} — {c.get('permalink')}")
+
+          print(f"\ncoverage: {json.dumps(coverage)}\n")
           print("\n<details><summary>Raw diagnostics</summary>\n")
           print("```json")
           print(json.dumps(diag, indent=1)[:4000])

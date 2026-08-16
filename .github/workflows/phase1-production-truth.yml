@@ -115,7 +115,9 @@ jobs:
           done >> "$OUT"
           echo '```' >> "$OUT"
 
-          head -c 60000 "$OUT" > /tmp/phase1.trimmed.md
+          # GitHub caps a comment at 65536 chars; stay well under it.
+          head -c 20000 "$OUT" > /tmp/phase1.trimmed.md
+          wc -c /tmp/phase1.trimmed.md
           cat /tmp/phase1.trimmed.md
 
       - name: Post findings to the PR
@@ -131,9 +133,12 @@ jobs:
               body = "Phase 1 truth check produced no output; the collection step failed."
           print(json.dumps({"body": body}))
           PY
-          curl --fail-with-body -sS -X POST \
+          code="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-            --data @/tmp/body.json > /dev/null
-          echo "posted"
+            --data @/tmp/body.json)"
+          echo "comment_http=$code"
+          head -c 500 /tmp/resp.json || true
+          # Reporting must not mask a successful collection.
+          test "$code" = "201"

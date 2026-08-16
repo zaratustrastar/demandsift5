@@ -15,7 +15,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
     outputs:
-      log_b64: ${{ steps.release.outputs.log_b64 }}
+      log_b64: ${{ steps.exportlog.outputs.log_b64 }}
     steps:
       - name: Check out verified feature head in isolated runner workspace
         uses: actions/checkout@v4
@@ -160,6 +160,7 @@ jobs:
           echo "release_verified=true"
 
       - name: Export release log
+        id: exportlog
         if: always()
         shell: bash
         run: |

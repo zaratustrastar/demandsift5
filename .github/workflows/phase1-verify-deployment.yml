@@ -30,8 +30,9 @@ jobs:
 
       - name: Collect deployment truth
         shell: bash
+        continue-on-error: true
         run: |
-          set -Eeuo pipefail
+          set -u
           out=/tmp/phase1.md
           : > "$out"
 
@@ -122,12 +123,15 @@ jobs:
           fi
           echo '```' >> "$out"
 
+          COMPOSE="$GITHUB_WORKSPACE/deploy/compose.vps.yaml"
+          WEB_ENVFILE=$(sed -n '/^  web:/,/^  worker:/p' "$COMPOSE" | grep -c 'vps.env' || echo 0)
+          WORKER_ENVFILE=$(sed -n '/^  worker:/,/^  caddy:/p' "$COMPOSE" | grep -c 'vps.env' || echo 0)
           {
             echo ""
             echo "### compose wiring"
             echo '```'
-            echo "web env_file:    $(grep -A6 '^  web:' \"$GITHUB_WORKSPACE/deploy/compose.vps.yaml\" | grep -c 'vps.env' || true) reference(s)"
-            echo "worker env_file: $(sed -n '/^  worker:/,/^  caddy:/p' \"$GITHUB_WORKSPACE/deploy/compose.vps.yaml\" | grep -c 'vps.env' || true) reference(s)"
+            echo "web    vps.env references: $WEB_ENVFILE"
+            echo "worker vps.env references: $WORKER_ENVFILE"
             echo '```'
           } >> "$out"
 
@@ -137,13 +141,13 @@ jobs:
         if: always()
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -u
           test -f /tmp/phase1.trimmed.md || echo "Phase 1 collection failed before producing output." > /tmp/phase1.trimmed.md
           python3 - <<'PY' > /tmp/body.json
           import json
           print(json.dumps({"body": open("/tmp/phase1.trimmed.md").read()}))
           PY
-          curl --fail-with-body -sS -X POST \
+          curl -sS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \

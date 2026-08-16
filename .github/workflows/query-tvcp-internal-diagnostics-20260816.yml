@@ -1,0 +1,24 @@
+name: Query TVCP internal diagnostics
+
+on:
+  push:
+    branches:
+      - diagnose-tvcp-user-scan-20260816
+    paths:
+      - .github/workflows/query-tvcp-internal-diagnostics-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  query:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Query loopback-only TVCP diagnostics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --fail-with-body --silent --show-error \
+            -H 'Host: demandsift.143-244-154-139.sslip.io' \
+            http://127.0.0.1/internal-vps-diagnostics/tvcp

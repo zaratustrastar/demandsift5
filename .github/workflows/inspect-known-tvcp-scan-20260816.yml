@@ -15,7 +15,5 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Inspect TVCP scan status
-        run: sudo -n /usr/local/sbin/demandsift-release scan-status scan_2826862b83b8424c98f252577242bf38
       - name: Inspect TVCP scan aggregate diagnostics
         run: sudo -n /usr/local/sbin/demandsift-release diagnose scan_2826862b83b8424c98f252577242bf38

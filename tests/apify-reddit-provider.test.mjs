@@ -575,8 +575,15 @@ test("Actor timeout stays below the client budget so terminal status can be obse
 });
 
 test("optional enrichment has a short independent client budget", () => {
-  assert.equal(redditModule.apifyEnrichmentTimeoutMs(600_000), 120_000);
-  assert.equal(redditModule.apifyEnrichmentTimeoutMs(360_000), 120_000);
+  // Raised from 120s to 200s after production evidence (2026-08-17, tvcp.app
+  // scan scan_e551e8add6034308b94d27356dcbbdba): 6 of 7 real enrichment Actor
+  // runs ended TIMED-OUT with zero retained dataset items at the 120s cap,
+  // starving qualification of verified full-context conversations. 200s stays
+  // well under the documented per-call actor budget (APIFY_REDDIT_TIMEOUT_MS,
+  // recommended 260s) while giving the residential-proxy thread crawl real
+  // headroom to finish.
+  assert.equal(redditModule.apifyEnrichmentTimeoutMs(600_000), 200_000);
+  assert.equal(redditModule.apifyEnrichmentTimeoutMs(360_000), 200_000);
   assert.equal(redditModule.apifyEnrichmentTimeoutMs(20_000), 20_000);
 });
 

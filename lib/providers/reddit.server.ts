@@ -1362,12 +1362,20 @@ export function apifyActorTimeoutSeconds(clientTimeoutMs: number): number {
 }
 
 /**
- * Thread opening is optional context after discovery has already retained the
- * matched author's verified words. Keep this call short so a blocked Reddit
- * page cannot add another full discovery-length wait to the user journey.
+ * Thread opening gives verified full-context text for qualification; a
+ * discovery-only fallback record is not trusted enough to count toward the
+ * scan's required full-context review target (see requiredFullContextReviews
+ * in scan-workflow.ts). Production evidence (2026-08-17, tvcp.app scan
+ * scan_e551e8add6034308b94d27356dcbbdba) showed 6 of 7 real enrichment runs
+ * ending in Apify status TIMED-OUT with zero retained dataset items at a
+ * 120s cap, starving qualification of verified conversations even when
+ * discovery found credible candidates. 200s keeps a meaningful margin below
+ * the documented per-call actor budget (APIFY_REDDIT_TIMEOUT_MS, recommended
+ * 260s) while giving the residential-proxy thread crawl real headroom to
+ * finish instead of aborting on cold start + navigation.
  */
 export function apifyEnrichmentTimeoutMs(configuredTimeoutMs: number): number {
-  return Math.max(20_000, Math.min(Math.trunc(configuredTimeoutMs), 120_000));
+  return Math.max(20_000, Math.min(Math.trunc(configuredTimeoutMs), 200_000));
 }
 
 function positiveInteger(

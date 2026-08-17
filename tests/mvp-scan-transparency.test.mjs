@@ -13,7 +13,10 @@ test("MVP report exposes every triaged candidate with its exact provider permali
   assert.match(presenter, /permalink: state\.canonicalPermalink/);
   assert.match(presenter, /triage: state\.triage/);
   assert.match(presenter, /deepQualification: state\.deepQualification/);
-  assert.match(dashboard, /Everything this scan found and analyzed/);
+  assert.match(dashboard, /Show full scan trace/);
+  // Collapsed by default behind a <details> disclosure so it does not read as
+  // an unfiltered raw dump on the default report view (users asked for this).
+  assert.match(dashboard, /<details className={styles.dashboardSection}>/);
   assert.match(dashboard, /Open exact Reddit message/);
 });
 

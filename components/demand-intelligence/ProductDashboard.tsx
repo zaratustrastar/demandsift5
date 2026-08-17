@@ -525,14 +525,14 @@ export function ScanEvidencePanel({ evidence }: { evidence: ScanEvidence }) {
   ].filter(([, count]) => count > 0);
 
   return (
-    <section className={styles.dashboardSection}>
-      <div className={styles.sectionHeadingRow}>
+    <details className={styles.dashboardSection}>
+      <summary className={styles.sectionHeadingRow} style={{ cursor: "pointer", listStyle: "none" }}>
         <div>
-          <span className={styles.eyebrow}>MVP scan trace</span>
-          <h2>Everything this scan found and analyzed</h2>
+          <span className={styles.eyebrow}>Technical detail</span>
+          <h2>Show full scan trace</h2>
         </div>
-        <span className={styles.qualityNote}>{evidence.candidates.length} credible candidates shown</span>
-      </div>
+        <span className={styles.qualityNote}>{evidence.candidates.length} candidates reviewed</span>
+      </summary>
 
       <section className={`${styles.card} ${styles.profileCard}`}>
         <div className={styles.opportunityMeta}>
@@ -631,7 +631,7 @@ export function ScanEvidencePanel({ evidence }: { evidence: ScanEvidence }) {
           );
         })}
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -1396,6 +1396,11 @@ export function ProductDashboard({
     const previewReply = potentialCustomers.total > 0
       ? availableReplyOpportunities[0]
       : undefined;
+    const hasOtherUsefulContent =
+      relevantConversations.length > 0 ||
+      data.competitorWeaknesses.some((item) => item.verified) ||
+      data.insights.length > 0 ||
+      data.visibilityOpportunities.length > 0;
     const strongestFallback = relevantConversations.length > 0
       ? `${relevantConversations.length} source-backed relevant conversation${relevantConversations.length === 1 ? " is" : "s are"} available below.`
       : data.competitorWeaknesses.some((item) => item.verified)
@@ -1427,7 +1432,13 @@ export function ProductDashboard({
               </>
             ) : (
               <>
-                <h1>{data.qualificationCoverage?.limited ? "No verified potential customers yet." : "No candidates passed qualification in this scan."}</h1>
+                <h1>
+                  {hasOtherUsefulContent
+                    ? "Market Scan complete."
+                    : data.qualificationCoverage?.limited
+                      ? "No verified potential customers yet."
+                      : "No candidates passed qualification in this scan."}
+                </h1>
                 <p>
                   {strongestFallback} Reviewed {data.qualificationCoverage?.fullContextReviewed ?? 0} of {data.qualificationCoverage?.credibleCandidates ?? 0} credible recent candidates with additional Reddit thread context.
                   {data.qualificationCoverage?.limited
@@ -1461,29 +1472,31 @@ export function ProductDashboard({
           </section>
         )}
 
-        <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
-          <section className={styles.dashboardSection}>
-            <div className={styles.sectionHeadingRow}>
-              <div>
-                <span className={styles.eyebrow}>People and intent</span>
-                <h2>{visibleOpportunities.length > 0 ? "The strongest potential-customer opportunities" : "No qualified people to preview"}</h2>
+        {(visibleOpportunities.length > 0 || !hasOtherUsefulContent) && (
+          <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
+            <section className={styles.dashboardSection}>
+              <div className={styles.sectionHeadingRow}>
+                <div>
+                  <span className={styles.eyebrow}>People and intent</span>
+                  <h2>{visibleOpportunities.length > 0 ? "The strongest potential-customer opportunities" : "No qualified people to preview"}</h2>
+                </div>
+                <span className={styles.qualityNote}>One opportunity per unique author</span>
               </div>
-              <span className={styles.qualityNote}>One opportunity per unique author</span>
-            </div>
-            <div className={styles.opportunityStack}>
-              {visibleOpportunities.map((opportunity) => (
-                <OpportunityCard key={opportunity.id} opportunity={opportunity} onOpenReply={openReply} />
-              ))}
-              {visibleOpportunities.length === 0 && (
-                <section className={`${styles.card} ${styles.emptyResults}`}>
-                  <span className={styles.emptyResultsIcon}><Icon name="opportunities" size={23} /></span>
-                  <h2>No weak matches were substituted</h2>
-                  <p>The scan found no recent, source-backed author with enough problem, recommendation, comparison or competitor-switching evidence to qualify.</p>
-                </section>
-              )}
-            </div>
-          </section>
-        </TrackedSection>
+              <div className={styles.opportunityStack}>
+                {visibleOpportunities.map((opportunity) => (
+                  <OpportunityCard key={opportunity.id} opportunity={opportunity} onOpenReply={openReply} />
+                ))}
+                {visibleOpportunities.length === 0 && (
+                  <section className={`${styles.card} ${styles.emptyResults}`}>
+                    <span className={styles.emptyResultsIcon}><Icon name="opportunities" size={23} /></span>
+                    <h2>No weak matches were substituted</h2>
+                    <p>The scan found no recent, source-backed author with enough problem, recommendation, comparison or competitor-switching evidence to qualify.</p>
+                  </section>
+                )}
+              </div>
+            </section>
+          </TrackedSection>
+        )}
 
         {relevantConversations.length > 0 && (
           <section className={styles.dashboardSection}>
@@ -1683,41 +1696,46 @@ export function ProductDashboard({
 
       {data.scanEvidence && <ScanEvidencePanel evidence={data.scanEvidence} />}
 
-      <section className={styles.dashboardSection}>
-        <div className={styles.sectionHeadingRow}>
-          <div>
-            <span className={styles.eyebrow}>Best current opportunities</span>
-            <h2>
-              {data.opportunities.length > 0
-                ? "Useful conversations to prioritize"
-                : "No conversation passed the qualification threshold"}
-            </h2>
+      {(data.opportunities.length > 0 ||
+        (relevantConversations.length === 0 &&
+          !data.competitorWeaknesses.some((item) => item.verified) &&
+          data.insights.length === 0)) && (
+        <section className={styles.dashboardSection}>
+          <div className={styles.sectionHeadingRow}>
+            <div>
+              <span className={styles.eyebrow}>Best current opportunities</span>
+              <h2>
+                {data.opportunities.length > 0
+                  ? "Useful conversations to prioritize"
+                  : "No conversation passed the qualification threshold"}
+              </h2>
+            </div>
+            <span className={styles.qualityNote}>Noise and duplicates removed</span>
           </div>
-          <span className={styles.qualityNote}>Noise and duplicates removed</span>
-        </div>
-        <div className={styles.opportunityStack}>
-          {data.opportunities.slice(0, 3).map((opportunity) => (
-            <OpportunityCard
-              key={opportunity.id}
-              opportunity={opportunity}
-              onOpenReply={openReply}
-            />
-          ))}
-          {data.opportunities.length === 0 && (
-            <section className={`${styles.card} ${styles.emptyResults}`}>
-              <span className={styles.emptyResultsIcon}>
-                <Icon name="opportunities" size={23} />
-              </span>
-              <h2>No weak matches were substituted</h2>
-              <p>
-                The provider records did not contain enough verified business relevance and
-                customer-demand evidence. Future monitoring can add results when a stronger
-                conversation appears.
-              </p>
-            </section>
-          )}
-        </div>
-      </section>
+          <div className={styles.opportunityStack}>
+            {data.opportunities.slice(0, 3).map((opportunity) => (
+              <OpportunityCard
+                key={opportunity.id}
+                opportunity={opportunity}
+                onOpenReply={openReply}
+              />
+            ))}
+            {data.opportunities.length === 0 && (
+              <section className={`${styles.card} ${styles.emptyResults}`}>
+                <span className={styles.emptyResultsIcon}>
+                  <Icon name="opportunities" size={23} />
+                </span>
+                <h2>No weak matches were substituted</h2>
+                <p>
+                  The provider records did not contain enough verified business relevance and
+                  customer-demand evidence. Future monitoring can add results when a stronger
+                  conversation appears.
+                </p>
+              </section>
+            )}
+          </div>
+        </section>
+      )}
 
       {relevantConversations.length > 0 && (
         <section className={styles.dashboardSection}>

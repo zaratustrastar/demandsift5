@@ -795,11 +795,27 @@ export async function runScan(
         "reddit_discovery_failed",
       );
     });
+    /**
+     * `now` here is the sanity-check ceiling deterministicReason() uses to
+     * reject impossible future-dated records (bad actor output, clock skew).
+     * It must be the actual wall-clock time at discovery, not scan.createdAt.
+     * Discovery runs after website crawl + AI business-profile generation,
+     * which can take several minutes; Reddit's "new"-sorted results legally
+     * include posts published after the scan was queued but before this
+     * call executes. Pinning `now` to scan.createdAt made every such post
+     * look future-dated and silently discarded it as invalid_timestamp.
+     * Production evidence (2026-08-17, cursor.com scan) showed 19 of 40
+     * discovered candidates rejected this way -- the single largest
+     * rejection bucket, and one that disproportionately removes the
+     * freshest, most relevant candidates right before AI triage even runs.
+     * `since` intentionally stays anchored to scan.createdAt: it defines a
+     * stable "past 7 days" window that must not drift while a scan runs.
+     */
     const cleaned = cleanDiscoveryCandidates({
       candidates: discovery.candidates,
       business,
       since,
-      now: new Date(scan.createdAt),
+      now: new Date(),
     });
     await setStage(
       scan,

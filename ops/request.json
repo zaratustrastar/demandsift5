@@ -1,6 +1,6 @@
 {
-  "id": "verify-timestamp-fix-cursor-2026-08-17b",
-  "ops": ["runtime"],
+  "id": "verify-harshmaur-default-cursor-2026-08-17",
+  "ops": ["runtime", "reddit-config"],
   "inspectScans": [],
   "startScan": { "websiteUrl": "https://cursor.com", "pollSeconds": 1500 }
 }

@@ -1,6 +1,6 @@
 {
-  "id": "verify-harshmaur-default-cursor-2026-08-17",
+  "id": "verify-harshmaur-live-vps-2026-08-17",
   "ops": ["runtime", "reddit-config"],
   "inspectScans": [],
-  "startScan": { "websiteUrl": "https://cursor.com", "pollSeconds": 1500 }
+  "startScan": { "websiteUrl": "https://linear.app", "pollSeconds": 1500 }
 }

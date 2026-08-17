@@ -1,5 +1,5 @@
 {
-  "id": "mvp-e2e-verify-5-real-signal-site",
+  "id": "verify-timestamp-fix-cursor-2026-08-17b",
   "ops": ["runtime"],
   "inspectScans": [],
   "startScan": { "websiteUrl": "https://cursor.com", "pollSeconds": 1500 }

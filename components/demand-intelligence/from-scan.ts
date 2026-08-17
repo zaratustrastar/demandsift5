@@ -58,6 +58,7 @@ type ApiRelevantConversation = {
   sourceIds: string[];
   provider: string;
   dataMode: "mock" | "live" | "apify-test";
+  replyId?: string | null;
 };
 
 type ApiOpportunity = {
@@ -400,23 +401,46 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       verifiedWithinDemoFixture:
         source.kind === "website" || (source.sourceMode ?? report.dataMode) === "live",
     })),
-    relevantConversations: (report.relevantConversations ?? []).map((conversation) => ({
-      id: conversation.id,
-      provider: conversation.provider,
-      isMock: conversation.dataMode === "mock",
-      title: conversation.title,
-      summary: conversation.summary,
-      subreddit: conversation.subreddit.startsWith("r/")
-        ? conversation.subreddit
-        : `r/${conversation.subreddit}`,
-      authorLabel: conversation.author ?? "Reddit participant",
-      capturedAt: conversation.postedAt,
-      permalink: conversation.permalink,
-      tags: conversation.tags,
-      demandSignals: conversation.demandSignals,
-      competitorName: conversation.competitor,
-      provenanceIds: conversation.sourceIds,
-    })),
+    relevantConversations: (report.relevantConversations ?? []).map((conversation) => {
+      const reply = conversation.replyId ? replyByOpportunity.get(conversation.id) : undefined;
+      return {
+        id: conversation.id,
+        provider: conversation.provider,
+        isMock: conversation.dataMode === "mock",
+        title: conversation.title,
+        summary: conversation.summary,
+        subreddit: conversation.subreddit.startsWith("r/")
+          ? conversation.subreddit
+          : `r/${conversation.subreddit}`,
+        authorLabel: conversation.author ?? "Reddit participant",
+        capturedAt: conversation.postedAt,
+        permalink: conversation.permalink,
+        tags: conversation.tags,
+        demandSignals: conversation.demandSignals,
+        competitorName: conversation.competitor,
+        provenanceIds: conversation.sourceIds,
+        // Independent of lead status: present only when this relevant
+        // conversation was classified reply-suitable and a grounded reply was
+        // drafted for it. Never counted as a potential customer.
+        reply: conversation.replyId
+          ? {
+              id: reply?.id ?? conversation.replyId,
+              opportunityId: conversation.id,
+              status: reply?.status ?? "draft",
+              draft:
+                reply?.content ??
+                "This reply is stored but hidden in the free Market Scan. Unlocking does not publish it.",
+              alternateDrafts: [],
+              disclosure: "Review before posting; disclose the business connection if the reply mentions the product.",
+              verifiedClaims: [],
+              sourceFactIds: [],
+              provenanceIds: conversation.sourceIds,
+              publishedVia: reply?.publishedVia ?? null,
+              publishedUrl: reply?.publishedUrl ?? null,
+            }
+          : undefined,
+      };
+    }),
     // Themes resolve their sourceIds against the relevant corpus so each one can
     // link the actual conversations behind it. A theme whose evidence cannot be
     // resolved is dropped rather than shown as an unbacked claim.

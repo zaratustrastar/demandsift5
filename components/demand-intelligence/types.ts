@@ -119,6 +119,13 @@ export interface RelevantConversation {
   demandSignals: string[];
   competitorName: string | null;
   provenanceIds: string[];
+  /**
+   * Present only when this conversation was independently classified as
+   * reply-suitable and a grounded reply was drafted for it. Never implies
+   * potential-customer/lead status -- it is shown as a research signal with
+   * an available reply, not as an opportunity.
+   */
+  reply?: SuggestedReply;
 }
 
 export interface CompetitorWeakness {

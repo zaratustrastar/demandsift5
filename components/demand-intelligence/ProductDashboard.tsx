@@ -437,10 +437,12 @@ export function RelevantConversationCard({
 }: {
   conversation: RelevantConversation;
 }) {
+  const [showReply, setShowReply] = useState(false);
   const signalLabels = [...new Set([
     ...conversation.demandSignals,
     ...conversation.tags,
   ])].slice(0, 5);
+  const hasReply = Boolean(conversation.reply?.draft.trim());
 
   return (
     <article className={styles.opportunityCard}>
@@ -474,21 +476,42 @@ export function RelevantConversationCard({
           )}
         </div>
       )}
+      {hasReply && showReply && (
+        <div className={styles.mockExcerpt}>
+          <span>Suggested reply</span>
+          <p>{conversation.reply?.draft}</p>
+        </div>
+      )}
       <div className={styles.opportunityAction}>
         <div>
           <span className={styles.fieldLabel}>Recommended use</span>
-          <p>Use this source to understand demand, objections or alternatives. It is not counted as a potential customer and has no generated reply.</p>
+          <p>
+            {hasReply
+              ? "Use this source to understand demand, objections or alternatives. It is not counted as a potential customer, but a reply-suitable draft is available below."
+              : "Use this source to understand demand, objections or alternatives. It is not counted as a potential customer and has no generated reply."}
+          </p>
         </div>
-        {conversation.permalink && !conversation.isMock && (
-          <a
-            className={styles.secondaryButton}
-            href={conversation.permalink}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            View Reddit conversation <Icon name="external" size={14} />
-          </a>
-        )}
+        <div className={styles.opportunityButtons}>
+          {conversation.permalink && !conversation.isMock && (
+            <a
+              className={styles.secondaryButton}
+              href={conversation.permalink}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              View Reddit conversation <Icon name="external" size={14} />
+            </a>
+          )}
+          {hasReply && (
+            <button
+              className={styles.secondaryButton}
+              type="button"
+              onClick={() => setShowReply((value) => !value)}
+            >
+              {showReply ? "Hide suggested reply" : "Suggested reply ready"} <Icon name="arrow" size={15} />
+            </button>
+          )}
+        </div>
       </div>
     </article>
   );

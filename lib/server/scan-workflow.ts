@@ -1206,6 +1206,11 @@ export async function runScan(
         competitorScore: competitorScore(qualification),
         researchScore: researchScore(qualification),
         replyScore: replyScore(qualification),
+        // A relevant conversation is not a lead, but qualification.shouldReply
+        // is decided independently of leadStatus. Reserve a stable id now so a
+        // reply drafted for it later can be linked without becoming an
+        // opportunity/lead record.
+        replyId: qualification.shouldReply === true ? createId("reply") : undefined,
       };
     }));
 
@@ -1489,6 +1494,71 @@ export async function runScan(
       replies.push({
         id: opportunity.replyId,
         opportunityId: opportunity.id,
+        workspaceId: scan.workspaceId,
+        scanId: scan.id,
+        content,
+        status: "draft",
+        generation: 1,
+        createdAt: now,
+        updatedAt: now,
+        publishedAt: null,
+        publishedUrl: null,
+        publishedVia: null,
+        redditCommentId: null,
+      });
+    }
+    // Relevant (non-lead) conversations classify shouldReply independently of
+    // leadStatus: a conversation can be genuinely useful market signal -- and
+    // deserve a helpful, disclosed reply -- without being a potential
+    // customer. Generate replies for those too, but keep them out of the
+    // opportunities/lead set entirely; they are linked only through
+    // marketIntelligence[].replyId and surfaced as relevant conversations.
+    const leadSourceIds = new Set(opportunities.map((opportunity) => opportunity.sourceId));
+    const relevantReplyEligible = marketIntelligence.filter(
+      (intelligence) => intelligence.replyId && !leadSourceIds.has(intelligence.sourceId),
+    );
+    for (const intelligence of relevantReplyEligible) {
+      const row = relevantDeepRows.find(
+        (candidate) => candidate.conversation.provenance.id === intelligence.sourceId,
+      );
+      if (!row) continue;
+      let content = "";
+      if (aiProvider) {
+        const qualifiedRow = {
+          id: intelligence.id,
+          workspaceId: scan.workspaceId,
+          businessId,
+          conversation: row.conversation,
+          qualification: row.qualification,
+          classification: legacyClassificationFromDeep(row.qualification),
+          rankScore: Math.max(0, Math.min(1, (intelligence.replyScore ?? 0) / 100)),
+          status: "new" as const,
+          provenanceIds: [intelligence.sourceId],
+          discoveredAt: row.conversation.createdAt,
+        };
+        try {
+          const generated = await aiProvider.generateReply({
+            business,
+            opportunity: qualifiedRow,
+            models,
+            instructions: row.qualification.replyAngle,
+          });
+          usage.push(usageRecord(generated, "reply-generation"));
+          content = generated.value.body.trim();
+        } catch (error) {
+          // A relevant conversation's reply is best-effort, not the strict
+          // per-lead invariant: it is still fully useful as research evidence
+          // without a drafted reply, so a generation failure here must not
+          // fail the scan.
+          console.error("Relevant-conversation reply generation failed", error);
+        }
+      } else if (discovery.sourceMode === "mock") {
+        content = fallbackReply(profile);
+      }
+      if (!content) continue;
+      replies.push({
+        id: intelligence.replyId!,
+        opportunityId: intelligence.id,
         workspaceId: scan.workspaceId,
         scanId: scan.id,
         content,

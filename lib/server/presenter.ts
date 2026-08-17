@@ -71,6 +71,7 @@ function publicRelevantConversation(
     sourceIds: intelligence.sourceIds,
     provider: source?.provider ?? "reddit",
     dataMode,
+    replyId: intelligence.replyId ?? null,
   };
 }
 

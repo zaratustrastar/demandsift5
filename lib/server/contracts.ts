@@ -94,6 +94,13 @@ export type MarketIntelligenceRecord = {
   researchScore: number;
   /** Ranks discussions worth joining, independent of lead value. */
   replyScore: number;
+  /**
+   * Present only when this relevant (non-lead) conversation was reply-eligible
+   * and a grounded reply was drafted for it. Never implies leadStatus or
+   * potentialCustomer classification -- it only means a helpful, disclosed
+   * reply is available to review, matched via ReplyRecord.opportunityId.
+   */
+  replyId?: string;
 };
 
 export type CompetitorWeaknessRecord = {

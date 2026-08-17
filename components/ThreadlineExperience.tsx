@@ -29,8 +29,11 @@ const disconnectedReddit: RedditConnectionStatus = {
   requiresPaidAccess: true,
 };
 
-function effectiveAccessLevel(access: ApiScanResponse["access"]): AccessLevel {
-  return access.unlocked ? access.plan : "free";
+function effectiveAccessLevel(access: ApiScanResponse["access"] | undefined | null): AccessLevel {
+  // Defense in depth: every scan response is supposed to include "access",
+  // but a future endpoint that forgets it (as one already did) should
+  // degrade to the free tier instead of crashing the whole page.
+  return access?.unlocked ? access.plan : "free";
 }
 
 const progressSteps = [
@@ -454,7 +457,7 @@ export function ThreadlineExperience() {
             window.history.replaceState({}, "", window.location.pathname);
             return;
           }
-          if (latest.access.unlocked && latest.access.verifiedByWebhook) {
+          if (latest.access?.unlocked && latest.access.verifiedByWebhook) {
             setStatusMessage(
               latest.access.plan === "core"
                 ? "Core is active from a verified Stripe webhook."

@@ -76,6 +76,9 @@ jobs:
           echo "dot_git_is_file=$([ -f "$SRC/.git" ] && echo true || echo false)"
           echo "dot_git_is_dir=$([ -d "$SRC/.git" ] && echo true || echo false)"
 
+          # Source-repo guard on the VPS now uses `git rev-parse
+          # --is-inside-work-tree` instead of `test -d .git`, so the linked
+          # worktree at /opt/demandsift5-pr1 validates correctly.
           echo "--- request deploy ---"
           # Contract for the ops deploy verb:
           #   demandsift-ops deploy <git-sha>

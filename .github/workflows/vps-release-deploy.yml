@@ -61,6 +61,21 @@ jobs:
           echo "--- ops status (source checkout visibility) ---"
           $OPS status 2>&1 || true
 
+          # Prove the actual git state of the source checkout before drawing any
+          # conclusion from the helper's error name. These are read-only and
+          # unprivileged; if the runner cannot read the path at all, that is
+          # itself the answer.
+          echo "--- source repo git state ---"
+          SRC=/opt/demandsift5-pr1
+          ls -ld "$SRC/.git" 2>&1 || true
+          file "$SRC/.git" 2>&1 || true
+          echo "is_inside_work_tree=$(git -C "$SRC" rev-parse --is-inside-work-tree 2>&1 || true)"
+          echo "git_dir=$(git -C "$SRC" rev-parse --git-dir 2>&1 || true)"
+          echo "common_dir=$(git -C "$SRC" rev-parse --git-common-dir 2>&1 || true)"
+          echo "head=$(git -C "$SRC" rev-parse HEAD 2>&1 || true)"
+          echo "dot_git_is_file=$([ -f "$SRC/.git" ] && echo true || echo false)"
+          echo "dot_git_is_dir=$([ -d "$SRC/.git" ] && echo true || echo false)"
+
           echo "--- request deploy ---"
           # Contract for the ops deploy verb:
           #   demandsift-ops deploy <git-sha>

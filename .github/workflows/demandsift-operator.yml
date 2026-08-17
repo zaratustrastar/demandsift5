@@ -89,7 +89,12 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
       - name: Publish operator output
         shell: bash
         env:
@@ -119,3 +124,25 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues/1/comments" \
             --data @/tmp/body.json
+
+      - name: Commit output for direct git retrieval (API reads are unreliable for the requester)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p ops/reports
+          cp /tmp/r.md "ops/reports/$(date -u +%Y%m%dT%H%M%SZ)-${{ github.sha }}.md"
+          git config user.email "ops-report@demandsift.local"
+          git config user.name "DemandSift Ops Report"
+          git add ops/reports
+          if git diff --cached --quiet; then
+            echo "no report changes"
+            exit 0
+          fi
+          git commit -m "report: operator run for ${{ github.sha }}"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin feature/reddit-intelligence-pipeline
+            git rebase origin/feature/reddit-intelligence-pipeline && break
+            git rebase --abort || true
+            sleep $((attempt * 3))
+          done
+          git push origin HEAD:feature/reddit-intelligence-pipeline

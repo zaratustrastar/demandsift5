@@ -1,6 +1,6 @@
 {
-  "id": "phase1-queue-proof",
-  "ops": ["runtime", "logs"],
-  "inspectScans": ["scan_30a3e18dfd42435aa296109b02406eda"],
-  "startScan": { "websiteUrl": "https://tvcp.app", "pollSeconds": 1500 }
+  "id": "mvp-e2e-verify-1",
+  "ops": ["runtime"],
+  "inspectScans": [],
+  "startScan": { "websiteUrl": "https://notion.so", "pollSeconds": 1500 }
 }

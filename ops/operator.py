@@ -68,6 +68,24 @@ def funnel(report: dict) -> None:
     print("potentialCustomers   :", (report.get("potentialCustomers") or {}).get("total"))
     print("storedCounts         :", json.dumps(report.get("storedCounts") or {}))
 
+    profile = report.get("profile") or {}
+    show("profile.summary", {
+        "name": profile.get("name"),
+        "summary": profile.get("summary"),
+        "productCategory": profile.get("productCategory"),
+        "brandTerms": profile.get("brandTerms"),
+        "customerProblemLanguage": profile.get("customerProblemLanguage"),
+    }, 2500)
+
+    convs = report.get("relevantConversations") or []
+    show("relevantConversations[0:3]", convs[:3], 4000)
+
+    opps = report.get("opportunities") or []
+    show("opportunities[0:3]", opps[:3], 5000)
+
+    replies = report.get("replies") or []
+    show("replies[0:2]", replies[:2], 3000)
+
 
 def poll_scan(scan_id: str, budget_seconds: int) -> str:
     """Poll to a terminal state, printing stage transitions as they happen."""

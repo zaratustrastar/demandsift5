@@ -20,7 +20,10 @@ jobs:
       - name: Check out verified feature head in isolated runner workspace
         uses: actions/checkout@v4
         with:
-          ref: feature/reddit-intelligence-pipeline
+          # Pin to the exact commit that triggered this run. Checking out the
+          # branch name resolved to a stale tip on the reused runner workspace,
+          # so a release reported deploying one SHA while building another.
+          ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Deploy through the sanctioned ops interface
@@ -37,6 +40,13 @@ jobs:
           OPS="sudo /usr/local/bin/demandsift-ops"
           RELEASE_SHA="$(git rev-parse HEAD)"
           echo "release_sha=$RELEASE_SHA"
+          echo "trigger_sha=${{ github.sha }}"
+          # A release that builds a different commit than it reports is worse
+          # than one that fails, so refuse rather than deploy the wrong code.
+          if [ "$RELEASE_SHA" != "${{ github.sha }}" ]; then
+            echo "checkout_sha_mismatch=true"
+            exit 5
+          fi
           echo "runner_user=$(whoami)"
 
           echo "--- pre-release runtime ---"

@@ -1,6 +1,6 @@
 {
-  "id": "mvp-e2e-verify-4-403-retry",
+  "id": "mvp-e2e-verify-5-real-signal-site",
   "ops": ["runtime"],
   "inspectScans": [],
-  "startScan": { "websiteUrl": "https://tvcp.app", "pollSeconds": 1500 }
+  "startScan": { "websiteUrl": "https://cursor.com", "pollSeconds": 1500 }
 }

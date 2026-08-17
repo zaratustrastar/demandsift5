@@ -1939,6 +1939,59 @@ export class ApifyRedditTestProvider implements RedditProvider {
   }
 }
 
+/**
+ * Harshmaur is the default production discovery+enrichment provider. Trudax
+ * is kept wired up only as a fallback for when Harshmaur *actually fails* --
+ * an actor run error, not a partial per-candidate miss, which Harshmaur
+ * already recovers from internally by falling back to a discovery-only
+ * conversation for just that candidate while still enriching the rest.
+ *
+ * Both providers emit the same normalized RedditDiscoveryCandidate /
+ * EnrichedRedditConversation contract, so a candidate discovered by one and
+ * enriched by the other (or the reverse, on discovery failover) works
+ * correctly downstream without any provider-specific branching in the scan
+ * workflow.
+ */
+export class HarshmaurWithTrudaxFallbackProvider implements RedditProvider {
+  readonly name = "apify-harshmaur-reddit-with-trudax-fallback";
+  readonly sourceMode = "live" as const;
+  readonly supportsThreadEnrichment = true;
+
+  constructor(
+    private readonly primary: HarshmaurRedditProvider,
+    private readonly fallback: ApifyRedditTestProvider | null,
+  ) {}
+
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    try {
+      return await this.primary.discover(request);
+    } catch (error) {
+      if (!this.fallback) throw error;
+      console.error(
+        "Harshmaur Reddit discovery failed; falling back to the Trudax Reddit provider for this scan.",
+        error,
+      );
+      return await this.fallback.discover(request);
+    }
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const primaryResult = await this.primary.enrich(request);
+    // Harshmaur's own enrich() never throws -- an actor run failure surfaces
+    // as zero enriched with an `actor_error:` reason instead, so a genuine
+    // provider failure (not a per-candidate mapping miss) is detected here.
+    const actorFailed =
+      primaryResult.diagnostics.enriched === 0 &&
+      Boolean(primaryResult.diagnostics.failureReason?.startsWith("actor_error:"));
+    if (!actorFailed || !this.fallback) return primaryResult;
+    console.error(
+      "Harshmaur Reddit thread enrichment actor failed; falling back to the Trudax Reddit provider.",
+      primaryResult.diagnostics.failureReason,
+    );
+    return await this.fallback.enrich(request);
+  }
+}
+
 function normalizedConversation(
   value: ApprovedProviderConversation,
   providerName: string,
@@ -2177,24 +2230,42 @@ export function createRedditProviderFromEnv(
     });
   }
   // Harshmaur is selected explicitly, never by swapping APIFY_REDDIT_ACTOR_ID,
-  // because its input and output schemas differ from Trudax in kind. Keeping
-  // both selectable is what makes the A/B comparison possible.
+  // because its input and output schemas differ from Trudax in kind.
+  //
+  // Harshmaur is the production default: it now performs real thread
+  // enrichment (post + comments + nested replies via startUrls +
+  // crawlCommentsPerPost), so no opt-in flag is required to select it in
+  // production. Trudax is wired in only as an automatic fallback for when
+  // Harshmaur *actually fails* -- it is never the primary provider a
+  // production scan is expected to use.
   if (selected === "harshmaur" || selected === "apify-harshmaur") {
-    // Harshmaur has no thread enrichment yet, so a production scan selecting it
-    // would silently downgrade every report to discovery-only context. It is
-    // usable for the retrieval A/B, which must be opted into explicitly.
-    if (isProductionRuntime(env) && env.HARSHMAUR_RETRIEVAL_EVAL?.trim().toLowerCase() !== "true") {
-      throw new Error(
-        "Harshmaur is discovery-only until selective enrichment ships. Set HARSHMAUR_RETRIEVAL_EVAL=true to run the retrieval comparison.",
-      );
-    }
-    return new HarshmaurRedditProvider({
+    const primary = new HarshmaurRedditProvider({
       actorId: env.HARSHMAUR_REDDIT_ACTOR_ID?.trim() || "harshmaur/reddit-scraper",
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
       maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 250, 1, 400),
       maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 12, 1, 25),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
+      enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
+      enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),
     });
+    // The fallback needs its own actor id and token; if either is missing,
+    // Harshmaur runs without a safety net rather than failing the whole
+    // provider construction over a fallback it may never need.
+    const trudaxActorId = env.APIFY_REDDIT_ACTOR_ID?.trim();
+    const apifyToken = env.APIFY_TOKEN?.trim();
+    const fallback = trudaxActorId && apifyToken
+      ? new ApifyRedditTestProvider({
+          actorId: trudaxActorId,
+          token: apifyToken,
+          maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 250, 1, 400),
+          enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
+          enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
+          timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
+          timeRange: (env.APIFY_REDDIT_TIME_RANGE?.trim().toLowerCase() || "month") as
+            "day" | "week" | "month" | "year" | "all",
+        })
+      : null;
+    return new HarshmaurWithTrudaxFallbackProvider(primary, fallback);
   }
   if (selected === "approved-http") {
     return new ApprovedHttpRedditProvider({

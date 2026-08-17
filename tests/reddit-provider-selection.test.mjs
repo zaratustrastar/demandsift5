@@ -112,16 +112,19 @@ function stubApify(records, options = {}) {
   return impl;
 }
 
-test("the factory constructs Harshmaur only when explicitly selected", () => {
+test("the factory constructs Harshmaur (wrapped with a Trudax fallback) only when explicitly selected, no opt-in flag required", () => {
   const env = {
     REDDIT_PROVIDER: "harshmaur",
     APIFY_TOKEN: "test-token",
+    APIFY_REDDIT_ACTOR_ID: "trudax/reddit-scraper-lite",
     APP_RUNTIME_ENV: "production",
-    HARSHMAUR_RETRIEVAL_EVAL: "true",
   };
+  // No HARSHMAUR_RETRIEVAL_EVAL set: Harshmaur is the production default now,
+  // not an opt-in retrieval comparison, so this must succeed without it.
   const provider = reddit.createRedditProviderFromEnv(env);
-  assert.equal(provider.name, "apify-harshmaur-reddit");
+  assert.equal(provider.name, "apify-harshmaur-reddit-with-trudax-fallback");
   assert.equal(provider.sourceMode, "live");
+  assert.equal(provider.supportsThreadEnrichment, true);
 });
 
 test("selecting apify-test still yields Trudax, unchanged", () => {
@@ -189,7 +192,7 @@ test("searchTerm attribution survives the whole provider path", async () => {
   assert.equal(candidates[0].provenance.metadata.searchTerm, "block youtube tv");
 });
 
-test("enrichment is honest about being discovery-only", async () => {
+test("enrichment without a resolvable permalink is honest about staying discovery-only", async () => {
   const provider = new HarshmaurRedditProvider({ token: "t", fetchImpl: stubApify([]) });
   const result = await provider.enrich({
     candidates: [
@@ -201,11 +204,80 @@ test("enrichment is honest about being discovery-only", async () => {
       },
     ],
   });
-  // Claiming full-context review it never fetched would corrupt the coverage
-  // gate downstream, so this reports zero enriched and one fallback.
+  // No permalink means no thread to crawl. Claiming full-context review it
+  // never fetched would corrupt the coverage gate downstream, so this reports
+  // zero enriched and one fallback rather than silently skipping the actor
+  // call and pretending it succeeded.
   assert.equal(result.diagnostics.enriched, 0);
   assert.equal(result.diagnostics.fallbackUsed, 1);
-  assert.equal(result.conversations[0].enriched, false);
+  assert.equal(result.diagnostics.failureReason, "missing_reddit_thread_urls");
+  assert.notEqual(result.conversations[0].provenance.metadata?.enriched, true);
+});
+
+test("thread enrichment crawls the candidate's own thread and marks it verified", async () => {
+  const postId = "abc123";
+  const permalink = `https://www.reddit.com/r/AndroidTV/comments/${postId}/some_title/`;
+  const payload = [
+    {
+      dataType: "post", id: `t3_${postId}`, parsedId: postId, postUrl: permalink,
+      title: "Some title", body: "Post body text", authorName: "op",
+      communityName: "r/AndroidTV", createdAt: new Date().toISOString(),
+    },
+    {
+      dataType: "comment", id: "c1", postId: `t3_${postId}`, parsedPostId: postId,
+      parentId: `t3_${postId}`, parsedParentId: postId, parentKind: "post", depth: 0,
+      authorName: "replier1", body: "A real reply to the post",
+      commentCreatedAt: new Date().toISOString(), subredditName: "AndroidTV",
+    },
+    {
+      dataType: "comment", id: "c2", postId: `t3_${postId}`, parsedPostId: postId,
+      parentId: "t1_c1", parsedParentId: "c1", parentKind: "comment", depth: 1,
+      authorName: "replier2", body: "A nested reply to c1",
+      commentCreatedAt: new Date().toISOString(), subredditName: "AndroidTV",
+    },
+  ];
+  let captured = null;
+  const provider = new HarshmaurRedditProvider({
+    token: "t",
+    fetchImpl: async (url, init) => {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs")) {
+        captured = init?.body ? JSON.parse(init.body) : null;
+        return new Response(JSON.stringify({ data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" } }), { status: 200 });
+      }
+      if (href.includes("/v2/actor-runs/")) {
+        return new Response(JSON.stringify({ data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" } }), { status: 200 });
+      }
+      if (href.includes("/v2/datasets/")) {
+        return new Response(JSON.stringify(payload), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    },
+  });
+
+  const candidate = {
+    provider: "apify-harshmaur-reddit", sourceMode: "live", externalId: postId,
+    kind: "post", subreddit: "AndroidTV", title: "Some title", body: "Post body text",
+    author: "op", permalink, createdAt: new Date().toISOString(),
+    metrics: { score: 1, comments: 2 }, matchedQueries: [], discoveryLanes: [],
+    provenance: { id: "p", kind: "reddit", provider: "apify-harshmaur-reddit", contentHash: "h", observedAt: new Date().toISOString(), isMock: false },
+  };
+  const result = await provider.enrich({ candidates: [candidate] });
+
+  assert.ok(captured, "the actor must be called");
+  assert.equal(captured.crawlCommentsPerPost, true);
+  assert.deepEqual(captured.startUrls, [{ url: permalink }]);
+  assert.equal(captured.searchTerms.length, 0);
+
+  assert.equal(result.diagnostics.enriched, 1);
+  assert.equal(result.diagnostics.failed, 0);
+  const conversation = result.conversations[0];
+  assert.equal(conversation.provenance.metadata?.enriched, true);
+  assert.equal(conversation.structuredContext.replies.length, 1);
+  assert.equal(conversation.structuredContext.replies[0].externalId, "c1");
+  // The nested reply to c1 is thread context, not a direct reply to the post.
+  assert.equal(conversation.structuredContext.surroundingComments.some((row) => row.externalId === "c2"), true);
+  assert.ok(conversation.threadContext.includes("A real reply to the post"));
 });
 
 test("actor input never leaks intent sentences or startUrls", async () => {
@@ -274,22 +346,49 @@ test("a failed run raises rather than returning an empty corpus", async () => {
   await assert.rejects(() => provider.discover(tvcp), /ended with status FAILED/);
 });
 
-test("harshmaur cannot be selected in production until enrichment ships", () => {
-  const base = {
+test("harshmaur is production-ready without any opt-in flag, and falls back to Trudax only when Trudax credentials exist", () => {
+  const withFallback = reddit.createRedditProviderFromEnv({
+    REDDIT_PROVIDER: "harshmaur",
+    APIFY_TOKEN: "t",
+    APIFY_REDDIT_ACTOR_ID: "trudax/reddit-scraper-lite",
+    APP_RUNTIME_ENV: "production",
+  });
+  assert.equal(withFallback.name, "apify-harshmaur-reddit-with-trudax-fallback");
+  assert.equal(withFallback.supportsThreadEnrichment, true);
+
+  // Without a configured Trudax actor id, Harshmaur still runs -- it just has
+  // no fallback wired up, rather than failing provider construction over a
+  // safety net it may never need.
+  const withoutFallback = reddit.createRedditProviderFromEnv({
     REDDIT_PROVIDER: "harshmaur",
     APIFY_TOKEN: "t",
     APP_RUNTIME_ENV: "production",
-  };
-  assert.throws(
-    () => reddit.createRedditProviderFromEnv(base),
-    /discovery-only until selective enrichment ships/,
-  );
-  const evaluation = reddit.createRedditProviderFromEnv({
-    ...base,
-    HARSHMAUR_RETRIEVAL_EVAL: "true",
   });
-  assert.equal(evaluation.name, "apify-harshmaur-reddit");
-  assert.equal(evaluation.supportsThreadEnrichment, false);
+  assert.equal(withoutFallback.name, "apify-harshmaur-reddit-with-trudax-fallback");
+});
+
+test("the Harshmaur wrapper falls back to Trudax only on an actual actor failure, not a partial mapping miss", async () => {
+  const primary = new HarshmaurRedditProvider({ token: "t", fetchImpl: stubApify([], { finalStatus: "FAILED" }) });
+  const fallbackCalls = [];
+  const fallback = {
+    name: "apify-reddit-test",
+    sourceMode: "apify-test",
+    async discover() {
+      fallbackCalls.push("discover");
+      return { candidates: [], searchPlan: [], sourceMode: "apify-test", diagnostics: {
+        queryCount: 0, fetchedCandidates: 0, normalizedCandidates: 0, verifiedRecentCandidates: 0,
+        rejectedByReason: {}, laneQueryCounts: {},
+      } };
+    },
+    async enrich() {
+      fallbackCalls.push("enrich");
+      return { conversations: [], sourceMode: "apify-test", diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 } };
+    },
+  };
+  const wrapper = new reddit.HarshmaurWithTrudaxFallbackProvider(primary, fallback);
+  const result = await wrapper.discover(tvcp);
+  assert.deepEqual(fallbackCalls, ["discover"]);
+  assert.equal(result.sourceMode, "apify-test");
 });
 
 

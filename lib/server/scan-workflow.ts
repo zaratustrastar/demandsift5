@@ -987,8 +987,14 @@ export async function runScan(
       cleaned.survivors.length,
       enrichmentBudget(),
     );
+    // Verified thread context means the PROVIDER actually fetched full thread
+    // context for this specific conversation (provenance.metadata.enriched),
+    // not merely that the source is some live provider. Trusting sourceMode
+    // alone let a live discovery-only pass-through (no comments/replies ever
+    // fetched) masquerade as verified -- exempting only mock, whose fixtures
+    // are synthetic full context by construction.
     const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
-      conversation.sourceMode !== "apify-test" || conversation.provenance.metadata?.enriched === true;
+      conversation.sourceMode === "mock" || conversation.provenance.metadata?.enriched === true;
 
     // Enrichment is useful context, not an all-or-nothing website-analysis gate.
     // If one selected Reddit URL cannot be expanded, try the next-best candidate

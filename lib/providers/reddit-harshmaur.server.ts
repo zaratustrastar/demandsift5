@@ -3,6 +3,7 @@ import type {
   RedditContextMessage,
   RedditDiscoveryCandidate,
   RedditSearchLane,
+  RedditStructuredContext,
 } from "@/lib/domain/types";
 import type {
   RedditDiscoveryDiagnostics,
@@ -50,6 +51,27 @@ export interface HarshmaurActorInput {
   maxPostsCount: number;
   maxCommentsCount: number;
   maxCommentsPerPost: 0;
+  maxCommunitiesCount: 0;
+}
+
+/**
+ * Input for the actor's "Direct URLs" mode with per-post comment crawling.
+ * A completely separate shape from `HarshmaurActorInput`: enrichment scrapes
+ * specific known threads (`startUrls`) rather than searching, and turns on
+ * `crawlCommentsPerPost` so each post's comments -- including nested replies,
+ * distinguished by `parentKind`/`depth`/`parentId` in the returned comment
+ * records -- are fetched, which is exactly the thread context deep
+ * qualification needs and discovery intentionally never asked for.
+ */
+export interface HarshmaurEnrichmentInput {
+  searchTerms: [];
+  startUrls: { url: string }[];
+  crawlCommentsPerPost: true;
+  includeNSFW: false;
+  maxPostsCount: number;
+  /** Keyword-search-only field; irrelevant to startUrls, kept at 0. */
+  maxCommentsCount: 0;
+  maxCommentsPerPost: number;
   maxCommunitiesCount: 0;
 }
 
@@ -336,6 +358,218 @@ export function parseHarshmaurDataset(
 
 
 /* ------------------------------------------------------------------ *
+ * Thread enrichment parsing
+ *
+ * Harshmaur's "Direct URLs + crawlCommentsPerPost" mode returns the same
+ * `post`/`comment` shapes as search, but comments additionally carry
+ * `parentKind` ("post" | "comment") and `depth` (0 = top-level), so the
+ * thread tree is reconstructible directly from `parentId`/`postId` without
+ * guessing. This mirrors the Trudax provider's structured-context builder in
+ * shape, but reads Harshmaur's own field names -- the two providers'
+ * enrichment payloads differ in kind, the same reason discovery has two
+ * separate parsers.
+ * ------------------------------------------------------------------ */
+
+function stripThingPrefix(value: string | undefined): string | undefined {
+  return value ? value.replace(/^t[13]_/i, "") : undefined;
+}
+
+function normalizedId(value: string | undefined): string | undefined {
+  const stripped = stripThingPrefix(value);
+  return stripped ? stripped.toLowerCase() : undefined;
+}
+
+/** Extracts the bare post id (`comments/<id>/...`) from any Reddit permalink. */
+function harshmaurPostIdFromPermalink(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const commentsIndex = segments.findIndex((segment) => segment.toLowerCase() === "comments");
+    const id = commentsIndex >= 0 ? segments[commentsIndex + 1] : undefined;
+    return id && /^[a-z0-9]+$/i.test(id) ? id.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Canonicalizes any post/comment permalink to the post-level thread URL Harshmaur's `startUrls` expects. */
+function harshmaurThreadStartUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (host === "redd.it") {
+      url.hash = "";
+      url.search = "";
+      return url.toString();
+    }
+    if (host !== "reddit.com" && !host.endsWith(".reddit.com")) return undefined;
+    const segments = url.pathname.split("/").filter(Boolean);
+    const commentsIndex = segments.findIndex((segment) => segment.toLowerCase() === "comments");
+    if (commentsIndex < 0 || !segments[commentsIndex + 1]) return undefined;
+    const titleIndex = commentsIndex + 2;
+    const end = segments[titleIndex] ? titleIndex + 1 : commentsIndex + 2;
+    url.pathname = `/${segments.slice(0, end).join("/")}/`;
+    url.hash = "";
+    url.search = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+interface HarshmaurThreadItem {
+  message: RedditContextMessage;
+  /** Bare id of the post this item belongs to, for scoping items to one thread. */
+  postId: string | undefined;
+}
+
+function harshmaurThreadItem(value: unknown): HarshmaurThreadItem | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const dataType = (text(row.dataType ?? row.type) ?? "").toLowerCase();
+
+  if (dataType === "post") {
+    const externalId = text(row.parsedId) ?? stripThingPrefix(text(row.id));
+    const body = text(row.body) ?? text(row.title);
+    if (!externalId || !body || /^\[(?:deleted|removed)\]$/i.test(body)) return null;
+    return {
+      postId: externalId.toLowerCase(),
+      message: {
+        externalId,
+        kind: "post",
+        author: text(row.authorName),
+        body,
+        parentExternalId: undefined,
+        createdAt: isoTimestamp(row.createdAt) ?? undefined,
+      },
+    };
+  }
+
+  if (dataType === "comment") {
+    const externalId = text(row.id);
+    const body = text(row.body);
+    if (!externalId || !body || /^\[(?:deleted|removed)\]$/i.test(body)) return null;
+    const postId = normalizedId(text(row.parsedPostId) ?? text(row.postId));
+    const parentId = normalizedId(text(row.parsedParentId) ?? text(row.parentId));
+    return {
+      postId,
+      message: {
+        externalId,
+        kind: "comment",
+        author: text(row.authorName),
+        body,
+        parentExternalId: parentId,
+        createdAt: isoTimestamp(row.commentCreatedAt) ?? undefined,
+      },
+    };
+  }
+
+  return null;
+}
+
+/** True when the run actually reached this candidate's thread, regardless of whether the exact matched item was re-emitted. */
+function harshmaurHasThreadAnchor(candidate: RedditDiscoveryCandidate, payload: readonly unknown[]): boolean {
+  const candidatePostId = harshmaurPostIdFromPermalink(candidate.permalink);
+  if (!candidatePostId) return false;
+  return payload.some((value) => {
+    const item = harshmaurThreadItem(value);
+    return Boolean(item && item.postId === candidatePostId);
+  });
+}
+
+function harshmaurStructuredContext(
+  candidate: RedditDiscoveryCandidate,
+  payload: readonly unknown[],
+): RedditStructuredContext {
+  const candidatePostId = harshmaurPostIdFromPermalink(candidate.permalink);
+  const items = payload.flatMap((value) => {
+    const item = harshmaurThreadItem(value);
+    if (!item || (candidatePostId && item.postId && item.postId !== candidatePostId)) return [];
+    return [item.message];
+  });
+  const byId = new Map(items.map((message) => [normalizedId(message.externalId) as string, message]));
+  const matched = byId.get(normalizedId(candidate.externalId) as string) ?? {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  const originalPost = items.find((message) => message.kind === "post") ??
+    (candidate.kind === "post" ? matched : undefined);
+
+  const parentChain: RedditContextMessage[] = [];
+  let parentId = normalizedId(matched.parentExternalId);
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId) && parentChain.length < 6) {
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    parentChain.unshift(parent);
+    parentId = normalizedId(parent.parentExternalId);
+  }
+
+  const matchedId = normalizedId(candidate.externalId);
+  const replies = items
+    .filter((message) => message.kind === "comment" && normalizedId(message.parentExternalId) === matchedId)
+    .slice(0, 6);
+  const used = new Set([
+    normalizedId(matched.externalId),
+    ...parentChain.map((message) => normalizedId(message.externalId)),
+    ...replies.map((message) => normalizedId(message.externalId)),
+    ...(originalPost ? [normalizedId(originalPost.externalId)] : []),
+  ]);
+  const surroundingComments = items
+    .filter((message) => message.kind === "comment" && !used.has(normalizedId(message.externalId)))
+    .slice(0, 6);
+
+  return { originalPost, matched, parentChain, replies, surroundingComments };
+}
+
+function flattenHarshmaurContext(context: RedditStructuredContext): string {
+  const sections: string[] = [];
+  if (context.originalPost && context.originalPost.externalId !== context.matched.externalId) {
+    sections.push(`Original post${context.originalPost.author ? ` by ${context.originalPost.author}` : ""}: ${context.originalPost.body}`);
+  }
+  if (context.parentChain.length > 0) {
+    sections.push(`Parent chain:\n${context.parentChain.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  if (context.replies.length > 0) {
+    sections.push(`Replies:\n${context.replies.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  if (context.surroundingComments.length > 0) {
+    sections.push(`Other comments:\n${context.surroundingComments.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  return sections.join("\n\n").slice(0, 8_000);
+}
+
+/** Discovery-record-only conversation, used when a thread could not be reached. */
+function harshmaurDiscoveryOnlyConversation(candidate: RedditDiscoveryCandidate): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    ...candidate,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+    threadContext: undefined,
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Provider
  * ------------------------------------------------------------------ */
 
@@ -343,22 +577,15 @@ export function parseHarshmaurDataset(
  * Executes the Harshmaur actor and returns candidates through the shared
  * contract, so the scan workflow cannot tell which actor produced them.
  *
- * Discovery only: `crawlCommentsPerPost` stays false and enrichment falls back
- * to the discovery record. Thread enrichment remains Trudax's job until the A/B
- * selects a winner, which keeps the comparison about retrieval quality rather
- * than two half-built pipelines.
+ * Discovery and thread enrichment are two independent actor runs against the
+ * same actor: discovery searches (`searchTerms`, `crawlCommentsPerPost:
+ * false`), enrichment crawls specific shortlisted threads directly
+ * (`startUrls`, `crawlCommentsPerPost: true`, bounded `maxCommentsPerPost`).
  */
 export class HarshmaurRedditProvider implements RedditProvider {
   readonly name = "apify-harshmaur-reddit";
   readonly sourceMode = "live" as const;
-  /**
-   * Discovery only. Harshmaur runs with crawlCommentsPerPost=false, so it has
-   * no thread context to give. Until selective enrichment exists (startUrls +
-   * crawlCommentsPerPost=true + bounded maxCommentsPerPost), this provider is
-   * valid for a retrieval A/B but must not be compared on lead or reply
-   * quality against Trudax, which does perform real thread enrichment.
-   */
-  readonly supportsThreadEnrichment = false;
+  readonly supportsThreadEnrichment = true;
 
   private readonly actorId: string;
   private readonly token: string;
@@ -366,6 +593,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
   private readonly maxTerms: number;
   private readonly timeoutMs: number;
   private readonly maxChargeUsd: number;
+  private readonly enrichmentLimit: number;
+  private readonly enrichmentComments: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(input: {
@@ -375,6 +604,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
     maxTerms?: number;
     timeoutMs?: number;
     maxChargeUsd?: number;
+    enrichmentLimit?: number;
+    enrichmentComments?: number;
     fetchImpl?: typeof fetch;
   }) {
     // Apify's API path takes an actor id or `username~actor-name`; a slash
@@ -385,6 +616,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 12)));
     this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
+    this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
+    this.enrichmentComments = Math.max(1, Math.min(50, Math.trunc(input.enrichmentComments ?? 6)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
@@ -400,7 +633,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
    * proven in the Trudax provider.
    */
   private async runActor(
-    actorInput: HarshmaurActorInput,
+    actorInput: HarshmaurActorInput | HarshmaurEnrichmentInput,
     platformMaxItems: number,
   ): Promise<unknown[]> {
     const controller = new AbortController();
@@ -590,43 +823,124 @@ export class HarshmaurRedditProvider implements RedditProvider {
   }
 
   /**
-   * Discovery-only enrichment. The record is passed through with its own text
-   * as context rather than fabricating thread structure the actor never
-   * fetched, so downstream coverage checks see the truth.
+   * Crawls each shortlisted candidate's own thread directly via `startUrls` +
+   * `crawlCommentsPerPost`, so deep qualification receives the post body plus
+   * real comments and nested replies -- not just the single discovery record.
+   * A candidate whose thread could not be reached falls back to a
+   * discovery-only conversation rather than failing the whole batch, matching
+   * the bounded-recovery philosophy the rest of the pipeline already uses.
    */
   async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
-    const conversations: EnrichedRedditConversation[] = request.candidates.map((candidate) => {
-      const matched: RedditContextMessage = {
-        externalId: candidate.externalId,
-        kind: candidate.kind,
-        author: candidate.author,
-        body: candidate.body,
-        parentExternalId: candidate.parentExternalId,
-        createdAt: candidate.createdAt,
+    const candidates = request.candidates.slice(0, this.enrichmentLimit);
+    if (candidates.length === 0) {
+      return {
+        conversations: [],
+        sourceMode: this.sourceMode,
+        diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 },
       };
+    }
+
+    const maxCommentsPerPost = Math.max(
+      1,
+      Math.min(50, request.maxComments ?? this.enrichmentComments),
+    );
+    const threadUrls = [...new Set(candidates.flatMap((candidate) => {
+      const url = harshmaurThreadStartUrl(candidate.permalink);
+      return url ? [url] : [];
+    }))];
+
+    if (threadUrls.length === 0) {
+      return {
+        conversations: candidates.map(harshmaurDiscoveryOnlyConversation),
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: "missing_reddit_thread_urls",
+        },
+      };
+    }
+
+    const enrichmentInput: HarshmaurEnrichmentInput = {
+      searchTerms: [],
+      startUrls: threadUrls.map((url) => ({ url })),
+      crawlCommentsPerPost: true,
+      includeNSFW: false,
+      maxPostsCount: Math.max(1, threadUrls.length),
+      maxCommentsCount: 0,
+      maxCommentsPerPost,
+      maxCommunitiesCount: 0,
+    };
+    // Headroom for the post itself plus its comments across every thread,
+    // capped the same way discovery caps platform spend.
+    const platformMaxItems = Math.min(1_000, Math.max(20, threadUrls.length * (maxCommentsPerPost + 1)));
+
+    let payload: unknown[];
+    try {
+      payload = await this.runActor(enrichmentInput, platformMaxItems);
+    } catch (error) {
+      console.error("Harshmaur Reddit thread enrichment failed", error);
+      const message = error instanceof Error ? error.message : "Unknown Harshmaur enrichment failure.";
+      return {
+        conversations: candidates.map(harshmaurDiscoveryOnlyConversation),
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: `actor_error:${message.slice(0, 500)}`,
+        },
+      };
+    }
+
+    const conversations: EnrichedRedditConversation[] = candidates.map((candidate) => {
+      if (!harshmaurHasThreadAnchor(candidate, payload)) {
+        return harshmaurDiscoveryOnlyConversation(candidate);
+      }
+      const context = harshmaurStructuredContext(candidate, payload);
+      const threadContext = flattenHarshmaurContext(context);
+      const contentHash = contentFingerprint(
+        `${candidate.title ?? ""}
+${candidate.body}
+${JSON.stringify(context)}`,
+      );
       return {
         ...candidate,
-        structuredContext: {
-          originalPost: candidate.kind === "post" ? matched : undefined,
-          matched,
-          parentChain: [],
-          replies: [],
-          surroundingComments: [],
+        threadContext: threadContext || undefined,
+        structuredContext: context,
+        provenance: {
+          ...candidate.provenance,
+          contentHash,
+          observedAt: new Date().toISOString(),
+          metadata: {
+            ...(candidate.provenance.metadata ?? {}),
+            enriched: true,
+          },
         },
-        threadContext: undefined,
-        enriched: false,
-        contextConfidence: "discovery_only",
-      } as EnrichedRedditConversation;
+      };
     });
 
+    const enrichedCount = conversations.filter(
+      (conversation) => conversation.provenance.metadata?.enriched === true,
+    ).length;
+    const failed = candidates.length - enrichedCount;
     return {
       conversations,
       sourceMode: this.sourceMode,
       diagnostics: {
-        requested: request.candidates.length,
-        enriched: 0,
-        failed: 0,
-        fallbackUsed: conversations.length,
+        requested: candidates.length,
+        enriched: enrichedCount,
+        failed,
+        fallbackUsed: failed,
+        ...(failed > 0
+          ? {
+              failureReason:
+                `actor_succeeded_mapping_failure:unmatched=${failed};payload_items=${payload.length}`,
+            }
+          : {}),
       },
     };
   }

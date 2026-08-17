@@ -52,6 +52,15 @@ jobs:
           echo "--- pre-release runtime ---"
           $OPS runtime || echo "ops_runtime_unavailable=true"
 
+          # Preflight: prove what this runner actually sees at execution time,
+          # rather than trusting a previous run's log. An earlier report was
+          # drawn from a stale comment and wrongly concluded the verb was absent.
+          echo "--- ops preflight ---"
+          $OPS 2>&1 || true
+          $OPS deploy badsha 2>&1 || true
+          echo "--- ops status (source checkout visibility) ---"
+          $OPS status 2>&1 || true
+
           echo "--- request deploy ---"
           # Contract for the ops deploy verb:
           #   demandsift-ops deploy <git-sha>

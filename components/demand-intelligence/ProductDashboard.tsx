@@ -83,7 +83,6 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     replies: "◌",
     results: "⌁",
     billing: "▭",
-    settings: "⚙",
     arrow: "→",
     check: "✓",
     copy: "⧉",
@@ -1967,6 +1966,47 @@ export function ProductDashboard({
         title="Suggested replies"
         description="Every draft answers the conversation first, makes only source-backed product claims and discloses the business connection when relevant."
       />
+      <section className={`${styles.card} ${styles.settingsCard}`}>
+        <h3>Reddit publishing</h3>
+        <p>
+          <strong>
+            {redditConnection.connected
+              ? `Connected as u/${redditConnection.username}`
+              : redditConnection.configured
+                ? "Reddit is ready to connect."
+                : "Direct Reddit connection is not configured."}
+          </strong>
+        </p>
+        <small>
+          {redditConnection.connected
+            ? "Threadline requests identity and reply permission only. Every reply still requires an explicit click."
+            : redditConnection.requiresPaidAccess
+              ? "Unlock the Full Access Pass or Core first. Until then, Copy & open Reddit works for real source-linked opportunities."
+              : redditConnection.configured
+                ? "Connect once, then post a reviewed reply to its exact source conversation."
+                : "Copy & open Reddit remains available for source-linked opportunities without OAuth."}
+        </small>
+        <div className={styles.settingsActions}>
+          {redditConnection.connected ? (
+            <button
+              className={styles.secondaryButton}
+              type="button"
+              onClick={() => void onDisconnectReddit?.()}
+            >
+              Disconnect Reddit
+            </button>
+          ) : (
+            <button
+              className={styles.primaryButton}
+              type="button"
+              disabled={!redditConnection.canConnect}
+              onClick={onConnectReddit}
+            >
+              Connect Reddit <Icon name="external" size={14} />
+            </button>
+          )}
+        </div>
+      </section>
       <div className={styles.replyWorkspace}>
         <aside className={styles.replyQueue} aria-label="Suggested reply queue">
           {availableReplyOpportunities.map((opportunity) => (
@@ -2121,92 +2161,6 @@ export function ProductDashboard({
     </>
   );
 
-  const renderSettings = () => (
-    <>
-      <SectionIntro
-        eyebrow="One business, clear controls"
-        title="Settings"
-        description="Ordinary users see only the controls needed to keep monitoring relevant. Models, raw classifications and technical search details remain hidden."
-      />
-      <div className={styles.settingsGrid}>
-        <section className={`${styles.card} ${styles.settingsCard}`}>
-          <h3>Business</h3>
-          <label>
-            Website
-            <input value={data.business.url} readOnly />
-          </label>
-          <label>
-            Report name
-            <input value={data.business.name} readOnly />
-          </label>
-          <small>
-            {usesFictionalBusiness
-              ? "Demo fields are read-only because the fixture is fictional."
-              : "Profile fields are read-only after the source-backed analysis."}
-          </small>
-        </section>
-        <section className={`${styles.card} ${styles.settingsCard}`}>
-          <h3>Monitoring</h3>
-          <label className={styles.switchRow}>
-            <span>
-              <strong>High-quality opportunities only</strong>
-              <small>Hide weak matches and duplicate conversations.</small>
-            </span>
-            <input type="checkbox" checked readOnly aria-label="High quality only" />
-          </label>
-          <label className={styles.switchRow}>
-            <span>
-              <strong>Weekly summary</strong>
-              <small>Only meaningful changes, not a raw mention digest.</small>
-            </span>
-            <input type="checkbox" checked readOnly aria-label="Weekly summary" />
-          </label>
-        </section>
-        <section className={`${styles.card} ${styles.settingsCard}`}>
-          <h3>Reddit publishing</h3>
-          <p>
-            <strong>
-              {redditConnection.connected
-                ? `Connected as u/${redditConnection.username}`
-                : redditConnection.configured
-                  ? "Reddit is ready to connect."
-                  : "Direct Reddit connection is not configured."}
-            </strong>
-          </p>
-          <small>
-            {redditConnection.connected
-              ? "Threadline requests identity and reply permission only. Every reply still requires an explicit click."
-              : redditConnection.requiresPaidAccess
-                ? "Unlock the Full Access Pass or Core first. Until then, Copy & open Reddit works for real source-linked opportunities."
-                : redditConnection.configured
-                  ? "Connect once, then post a reviewed reply to its exact source conversation."
-                  : "Copy & open Reddit remains available for source-linked opportunities without OAuth."}
-          </small>
-          <div className={styles.settingsActions}>
-            {redditConnection.connected ? (
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                onClick={() => void onDisconnectReddit?.()}
-              >
-                Disconnect Reddit
-              </button>
-            ) : (
-              <button
-                className={styles.primaryButton}
-                type="button"
-                disabled={!redditConnection.canConnect}
-                onClick={onConnectReddit}
-              >
-                Connect Reddit <Icon name="external" size={14} />
-              </button>
-            )}
-          </div>
-        </section>
-      </div>
-    </>
-  );
-
   let content: React.ReactNode;
   if (activeSection === "dashboard") content = hasFullAccess ? renderDashboard() : renderMarketScan();
   else if (activeSection === "opportunities") content = renderOpportunities();
@@ -2215,8 +2169,7 @@ export function ProductDashboard({
   else if (activeSection === "visibility") content = renderVisibility();
   else if (activeSection === "replies") content = renderReplies();
   else if (activeSection === "results") content = renderResults();
-  else if (activeSection === "billing") content = renderBilling();
-  else content = renderSettings();
+  else content = renderBilling();
 
   return (
     <div className={styles.productShell}>

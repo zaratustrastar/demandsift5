@@ -20,8 +20,7 @@ export type NavigationSectionId =
   | "visibility"
   | "replies"
   | "results"
-  | "billing"
-  | "settings";
+  | "billing";
 
 export type ProvenanceKind =
   | "website-page"

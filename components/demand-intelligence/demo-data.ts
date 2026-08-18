@@ -400,7 +400,6 @@ const baseNavigation: NavigationSection[] = [
   },
   { id: "results", label: "Results" },
   { id: "billing", label: "Billing" },
-  { id: "settings", label: "Settings" },
 ];
 
 export const redditDemandDemoData: RedditDemandDemoData = {

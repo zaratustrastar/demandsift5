@@ -2242,8 +2242,15 @@ export function createRedditProviderFromEnv(
     const primary = new HarshmaurRedditProvider({
       actorId: env.HARSHMAUR_REDDIT_ACTOR_ID?.trim() || "harshmaur/reddit-scraper",
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
-      maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 250, 1, 400),
-      maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 12, 1, 25),
+      // Lowered from 250/12 after production testing showed the actor
+      // applying these limits with far less headroom than the "total
+      // across all inputs" schema description implied -- 250 was
+      // producing hundreds of noisy raw records per scan. 40 total
+      // (20 posts / 20 comments via harshmaurAcquisitionBudget) with
+      // 8 natural search terms is deliberately conservative; raise
+      // once real yield-per-term data justifies it.
+      maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 40, 1, 400),
+      maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 8, 1, 25),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),

@@ -134,7 +134,7 @@ export function buildHarshmaurInput(
     ? request.since
     : since;
 
-  const searchTerms = naturalSearchTerms(request, { maxTerms: options.maxTerms ?? 12 });
+  const searchTerms = naturalSearchTerms(request, { maxTerms: options.maxTerms ?? 8 });
   const { maxPostsCount, maxCommentsCount } = harshmaurAcquisitionBudget(options.targetTotal);
 
   return {
@@ -612,8 +612,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
     // would be percent-encoded and resolve to nothing.
     this.actorId = harshmaurActorId(input.actorId?.trim() || "harshmaur~reddit-scraper");
     this.token = input.token;
-    this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
-    this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 12)));
+    this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 40)));
+    this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 8)));
     this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));

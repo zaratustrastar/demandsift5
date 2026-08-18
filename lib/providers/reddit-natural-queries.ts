@@ -14,6 +14,18 @@ import { normalizeSearchText } from "@/lib/intelligence/opportunity-ranking";
  * Target shape for TVCP:
  *   parental control tv, android tv parental control, kids tv control,
  *   screen time tv, limit kids tv, block youtube kids
+ *
+ * A first version condensed each raw `customerProblems`/`jobsToBeDone`
+ * sentence on its own by just keeping its first few non-filler words in
+ * source order. Those sentences are LLM-authored prose ("control how much tv
+ * my child watches without me having to constantly open the app"), and the
+ * first few surviving words of a long sentence are rarely its most natural
+ * short phrase -- real production runs produced queries like
+ * "control tv child open" and "limit long child watches", which nobody
+ * would type into Reddit and which mostly return noise. Every problem/job/
+ * workaround phrase is now condensed down to a tight two-word "core" concept
+ * and paired explicitly with the market qualifier, in both orders, which is
+ * the same short-phrase-plus-market pattern real Reddit titles use.
  */
 
 /** Words that add no retrieval value inside a short search phrase. */
@@ -33,6 +45,11 @@ const FILLER = new Set([
 
 const MAX_WORDS = 4;
 const MIN_WORDS = 2;
+/** How many content words survive when reducing a problem/job/workaround
+ * sentence to its "core" concept before pairing it with the market
+ * qualifier. Two keeps the phrase itself unambiguous; the qualifier adds a
+ * third or fourth word once paired. */
+const MAX_CORE_WORDS = 2;
 
 function condense(phrase: string, maxWords = MAX_WORDS): string {
   const words = normalizeSearchText(phrase)
@@ -40,6 +57,18 @@ function condense(phrase: string, maxWords = MAX_WORDS): string {
     .filter((word) => word.length > 0 && !FILLER.has(word));
   // Two-letter qualifiers such as "tv" are the market and must survive.
   return [...new Set(words)].slice(0, maxWords).join(" ");
+}
+
+/**
+ * A small number of concept + generic-qualifier pairings read as an
+ * unrelated named service rather than the customer's actual market. The
+ * only one seen in production so far is "youtube" plus the bare qualifier
+ * "tv", which collides with the YouTube TV streaming service -- the same
+ * concept paired with a more specific qualifier (e.g. "android tv") is
+ * fine and is left alone.
+ */
+function collidesWithKnownService(core: string, qualifier: string): boolean {
+  return qualifier === "tv" && core.split(" ").includes("youtube");
 }
 
 function add(into: Map<string, string>, phrase: string): void {
@@ -52,31 +81,22 @@ function add(into: Map<string, string>, phrase: string): void {
 /**
  * Build bounded, deduplicated search terms from the Discovery Profile.
  *
- * Category and problem language lead, because those are the phrases that
- * actually appear in titles. Competitor names are included as their own terms
- * so switching conversations are reachable without contaminating the market
- * phrases.
+ * Category phrases are used close to verbatim, since they already tend to
+ * read as short noun phrases. Every problem, job, and workaround is reduced
+ * to a tight two-word core concept and paired with the market qualifier --
+ * never emitted as a standalone condensed sentence -- so every query stays
+ * both natural and market-anchored.
  */
 export function naturalSearchTerms(
   request: RedditSearchRequest,
   options: { maxTerms?: number } = {},
 ): string[] {
-  const maxTerms = Math.max(1, Math.min(options.maxTerms ?? 12, 25));
+  const maxTerms = Math.max(1, Math.min(options.maxTerms ?? 8, 25));
   const queries = request.queries;
   const terms = new Map<string, string>();
 
   const categories = (queries.productCategories ?? []).filter(Boolean);
   for (const category of categories.slice(0, 3)) add(terms, category);
-
-  // The category's distinctive core, e.g. "android tv parental control app"
-  // also yields "parental control tv" style pairings via its problem phrases.
-  for (const problem of (queries.customerProblems ?? []).slice(0, 8)) {
-    add(terms, problem);
-  }
-  for (const job of (queries.jobsToBeDone ?? []).slice(0, 4)) add(terms, job);
-  for (const workaround of (queries.workarounds ?? []).slice(0, 3)) {
-    add(terms, workaround);
-  }
 
   // Pair the market qualifier with each problem concept so short, high-recall
   // combinations exist even when the profile never phrases them together.
@@ -84,16 +104,21 @@ export function naturalSearchTerms(
   const qualifier = categoryWords.find((word) => word.length <= 3) ?? categoryWords[0];
   if (qualifier) {
     // Jobs-to-be-done describe the same use cases as problems and are just as
-    // likely to appear in a title, so both feed the pairing.
+    // likely to appear in a title, so both feed the pairing, along with
+    // workarounds people already describe using.
     const pairable = [
-      ...(queries.customerProblems ?? []).slice(0, 5),
-      ...(queries.jobsToBeDone ?? []).slice(0, 3),
+      ...(queries.customerProblems ?? []).slice(0, 6),
+      ...(queries.jobsToBeDone ?? []).slice(0, 4),
+      ...(queries.workarounds ?? []).slice(0, 3),
     ];
-    for (const problem of pairable) {
-      const core = condense(problem, 2);
-      if (core && !core.split(" ").includes(qualifier)) {
-        add(terms, `${core} ${qualifier}`);
-      }
+    for (const source of pairable) {
+      const core = condense(source, MAX_CORE_WORDS);
+      if (!core || core.split(" ").includes(qualifier)) continue;
+      if (collidesWithKnownService(core, qualifier)) continue;
+      // Both orders show up in real Reddit titles: "parental controls tv"
+      // reads like a complaint, "tv parental controls" reads like a search.
+      add(terms, `${core} ${qualifier}`);
+      add(terms, `${qualifier} ${core}`);
     }
   }
 

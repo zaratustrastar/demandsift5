@@ -14,8 +14,8 @@
   --amber: #a66814;
   --amber-soft: #fff4dc;
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 246px minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   color: var(--ink);
   background: var(--canvas);
   font-family:
@@ -42,6 +42,39 @@
 .productShell textarea:focus-visible {
   outline: 3px solid rgba(109, 90, 230, 0.23);
   outline-offset: 2px;
+}
+
+.minimalHeader {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 34px;
+  background: #10251d;
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.minimalHeader strong {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  letter-spacing: -0.03em;
+}
+
+.minimalHeaderSpacer {
+  flex: 1 1 auto;
+}
+
+.minimalHeader button {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.singleReport {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
 }
 
 .glyph {

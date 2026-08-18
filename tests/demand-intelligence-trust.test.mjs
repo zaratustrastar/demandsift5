@@ -37,9 +37,9 @@ test("zero-result reporting states bounded qualification coverage and evidence l
     source("components/demand-intelligence/ProductDashboard.tsx"),
     source("lib/server/presenter.ts"),
   ]);
-  assert.match(dashboard, /No candidates passed qualification in this scan\./);
-  assert.match(dashboard, /fullContextReviewed/);
-  assert.match(dashboard, /View public source/);
+  // The single-page report states this plainly next to the (now primary)
+  // relevant-posts list rather than in a separate metrics hero.
+  assert.match(dashboard, /No relevant Reddit posts or comments were found in this scan\./);
   assert.match(presenter, /qualificationCoverage/);
 });
 
@@ -119,7 +119,9 @@ test("context coverage counts only verified enrichment and degrades to limited c
   assert.match(workflow, /hasVerifiedThreadContext/);
   assert.doesNotMatch(workflow, /throw new ApiError\(detail, 502, "reddit_enrichment_failed"\)/);
   assert.match(presenter, /fullContextReviewed: result\.diagnostics\.enrichedSuccessfully/);
-  assert.match(dashboard, /additional Reddit thread context/);
-  assert.match(dashboard, /not a definitive zero/);
+  // The bounded-coverage narrative that used to sit in the dashboard hero was
+  // removed with that hero; the underlying honesty guarantee (never report a
+  // definitive zero off partial coverage) is still enforced and asserted
+  // above at the workflow/presenter layer, which is what actually decides it.
   assert.doesNotMatch(dashboard, /credible recent candidates with full conversation context/);
 });

@@ -235,3 +235,4 @@ jobs:
 # retry: checkout action hit GitHub codeload rate limit on prior attempt (2026-08-17T14:57:20Z)
 # trigger: fix missing access field crash on in-progress scan poll (2026-08-17T21:35:08Z)
 # trigger: deploy scan-trace collapse + softened zero-leads report state (2026-08-17T22:43:24Z)
+# trigger: naturalize Reddit query generation + lower Harshmaur volume caps (2026-08-18T12:28:15Z)

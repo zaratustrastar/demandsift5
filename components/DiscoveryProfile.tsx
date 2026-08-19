@@ -32,24 +32,39 @@ export type DiscoveryProfileResponse = {
   discoveryOverrides: Partial<DiscoveryDerived> | null;
 };
 
-/** Only these reach the backend as overrides; the rest are read-only context. */
+/**
+ * Only these reach the backend as overrides; the rest are read-only context.
+ *
+ * `max` mirrors the hard per-bucket caps redditQueryFamilies() enforces
+ * server-side (3 product/category, 3 pain/problem, 2 competitor) -- capping
+ * the add UI to the same numbers means every term a user adds here is one
+ * that will actually be searched, rather than letting them stockpile terms
+ * past the point where the backend silently stops using them.
+ */
 const EDITABLE_FIELDS = [
   {
     key: "productTerms" as const,
     label: "Product / category",
     hint: "What you sell, in the words people use.",
+    max: 3,
   },
   {
     key: "customerProblems" as const,
     label: "Customer problems / pain language",
     hint: "How people describe the problem you solve.",
+    max: 3,
   },
   {
     key: "competitors" as const,
     label: "Competitors / alternatives",
     hint: "Tools people compare you with or switch from.",
+    max: 2,
   },
 ];
+
+const MAX_TERMS: Record<EditableKey, number> = Object.fromEntries(
+  EDITABLE_FIELDS.map(({ key, max }) => [key, max]),
+) as Record<EditableKey, number>;
 
 const CONTEXT_FIELDS = [
   { key: "personas" as const, label: "Who this is for" },
@@ -124,6 +139,7 @@ export function DiscoveryProfile({
     if (!value) return;
     setTerms((current) => {
       if (!current) return current;
+      if (current[key].length >= MAX_TERMS[key]) return current;
       const exists = current[key].some(
         (term) => term.toLowerCase() === value.toLowerCase(),
       );
@@ -177,50 +193,59 @@ export function DiscoveryProfile({
       {derived && terms && (
         <>
           <section className={styles.grid}>
-            {EDITABLE_FIELDS.map(({ key, label, hint }) => (
-              <div className={styles.card} key={key}>
-                <h2 className={styles.cardTitle}>{label}</h2>
-                <p className={styles.hint}>{hint}</p>
-                <ul className={styles.chips}>
-                  {terms[key].length === 0 && (
-                    <li className={styles.empty}>Nothing here yet.</li>
+            {EDITABLE_FIELDS.map(({ key, label, hint, max }) => {
+              const atMax = terms[key].length >= max;
+              return (
+                <div className={styles.card} key={key}>
+                  <h2 className={styles.cardTitle}>{label}</h2>
+                  <p className={styles.hint}>
+                    {hint} ({terms[key].length}/{max})
+                  </p>
+                  <ul className={styles.chips}>
+                    {terms[key].length === 0 && (
+                      <li className={styles.empty}>Nothing here yet.</li>
+                    )}
+                    {terms[key].map((term) => (
+                      <li className={styles.chip} key={term}>
+                        <span>{term}</span>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${term}`}
+                          onClick={() => removeTerm(key, term)}
+                          disabled={!data.editable}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {data.editable && (
+                    atMax ? (
+                      <p className={styles.hint}>Max {max} reached &mdash; remove one to add another.</p>
+                    ) : (
+                      <div className={styles.addRow}>
+                        <input
+                          value={additions[key] ?? ""}
+                          placeholder="Add a term"
+                          onChange={(event) =>
+                            setAdditions((current) => ({ ...current, [key]: event.target.value }))
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              addTerm(key);
+                            }
+                          }}
+                        />
+                        <button type="button" onClick={() => addTerm(key)}>
+                          Add
+                        </button>
+                      </div>
+                    )
                   )}
-                  {terms[key].map((term) => (
-                    <li className={styles.chip} key={term}>
-                      <span>{term}</span>
-                      <button
-                        type="button"
-                        aria-label={`Remove ${term}`}
-                        onClick={() => removeTerm(key, term)}
-                        disabled={!data.editable}
-                      >
-                        ×
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                {data.editable && (
-                  <div className={styles.addRow}>
-                    <input
-                      value={additions[key] ?? ""}
-                      placeholder="Add a term"
-                      onChange={(event) =>
-                        setAdditions((current) => ({ ...current, [key]: event.target.value }))
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          addTerm(key);
-                        }
-                      }}
-                    />
-                    <button type="button" onClick={() => addTerm(key)}>
-                      Add
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </section>
 
           <section className={styles.context}>

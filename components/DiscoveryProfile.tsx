@@ -49,11 +49,6 @@ const EDITABLE_FIELDS = [
     label: "Competitors / alternatives",
     hint: "Tools people compare you with or switch from.",
   },
-  {
-    key: "excludedTerms" as const,
-    label: "Exclusions",
-    hint: "Topics that look similar but are not your market.",
-  },
 ];
 
 const CONTEXT_FIELDS = [
@@ -99,7 +94,6 @@ export function DiscoveryProfile({
           productTerms: overrides?.productTerms ?? base?.productTerms ?? [],
           customerProblems: overrides?.customerProblems ?? base?.customerProblems ?? [],
           competitors: overrides?.competitors ?? base?.competitors ?? [],
-          excludedTerms: overrides?.excludedTerms ?? base?.excludedTerms ?? [],
         });
       } catch (loadError) {
         if (!cancelled) {

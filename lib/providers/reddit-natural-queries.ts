@@ -45,11 +45,12 @@ const FILLER = new Set([
 
 const MAX_WORDS = 4;
 const MIN_WORDS = 2;
-/** How many content words survive when reducing a problem/job/workaround
- * sentence to its "core" concept before pairing it with the market
- * qualifier. Two keeps the phrase itself unambiguous; the qualifier adds a
- * third or fourth word once paired. */
-const MAX_CORE_WORDS = 2;
+/** How many words survive when reducing a problem/job/workaround sentence
+ * to its "core" phrase before pairing it with the market qualifier. Wide
+ * enough that the excerpt still reads as a genuine slice of what was
+ * written (see naturalCore() below), narrow enough that pairing it with the
+ * qualifier doesn't produce an unwieldy string. */
+const MAX_CORE_WORDS = 5;
 
 function condense(phrase: string, maxWords = MAX_WORDS): string {
   const words = normalizeSearchText(phrase)
@@ -57,6 +58,25 @@ function condense(phrase: string, maxWords = MAX_WORDS): string {
     .filter((word) => word.length > 0 && !FILLER.has(word));
   // Two-letter qualifiers such as "tv" are the market and must survive.
   return [...new Set(words)].slice(0, maxWords).join(" ");
+}
+
+/** A gentler extraction for problem/job/workaround "core" phrases: drop only
+ * leading/trailing filler and keep the rest as a contiguous, source-order
+ * slice, rather than condense()'s filler-filtered word *set* (which can
+ * start anywhere in the sentence). Real production runs paired with the
+ * market qualifier produced fragments like "cant lock tv" (from "can't lock
+ * the TV remotely...") and "limit long tv" (from "limit how long my kid
+ * watches...") -- neither reads as something a person would type. Keeping a
+ * contiguous run from the sentence's own start instead yields "cant lock the
+ * tv remotely" and "limit how long my kid": genuine excerpts, not scattered
+ * word picks. */
+function naturalCore(phrase: string, maxWords: number): string {
+  const all = normalizeSearchText(phrase).split(" ").filter(Boolean);
+  let start = 0;
+  let end = all.length;
+  while (start < end && FILLER.has(all[start])) start += 1;
+  while (end > start && FILLER.has(all[end - 1])) end -= 1;
+  return all.slice(start, Math.min(end, start + maxWords)).join(" ");
 }
 
 /**
@@ -83,9 +103,9 @@ function add(into: Map<string, string>, phrase: string): void {
  *
  * Category phrases are used close to verbatim, since they already tend to
  * read as short noun phrases. Every problem, job, and workaround is reduced
- * to a tight two-word core concept and paired with the market qualifier --
- * never emitted as a standalone condensed sentence -- so every query stays
- * both natural and market-anchored.
+ * to a short, contiguous "core" excerpt (see naturalCore() below) and paired
+ * with the market qualifier -- never emitted as a standalone condensed
+ * sentence -- so every query stays both natural and market-anchored.
  */
 export function naturalSearchTerms(
   request: RedditSearchRequest,
@@ -112,9 +132,19 @@ export function naturalSearchTerms(
       ...(queries.workarounds ?? []).slice(0, 3),
     ];
     for (const source of pairable) {
-      const core = condense(source, MAX_CORE_WORDS);
-      if (!core || core.split(" ").includes(qualifier)) continue;
+      const core = naturalCore(source, MAX_CORE_WORDS);
+      if (!core) continue;
       if (collidesWithKnownService(core, qualifier)) continue;
+      // A wider, contiguous core (see naturalCore() above) often already
+      // mentions the qualifier itself -- e.g. "no parental controls on
+      // Android TV" naturally contains "tv" near the end. Discarding that
+      // signal entirely would silently drop otherwise-good phrasing just
+      // because the sentence already said the quiet part out loud; keep the
+      // core as its own term instead of pairing it with a redundant repeat.
+      if (core.split(" ").includes(qualifier)) {
+        add(terms, core);
+        continue;
+      }
       // Both orders show up in real Reddit titles: "parental controls tv"
       // reads like a complaint, "tv parental controls" reads like a search.
       add(terms, `${core} ${qualifier}`);

@@ -34,9 +34,11 @@ import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
  * regardless of relevance, for little practical benefit -- the excluded
  * platform names are unlikely to false-positive-match unrelated queries
  * anyway, and AI triage downstream already hard-rejects obvious noise. That
- * blanket exclusion was removed; `withKnownServiceExclusion` below is kept
- * because it targets one specific, narrow, confirmed collision rather than
- * applying to every query regardless of content.
+ * blanket exclusion was removed. A second, narrower `NOT` (for the
+ * youtube/"youtube tv" collision below) was removed too: the Discovery
+ * Profile no longer surfaces an exclusions concept at all, so this file
+ * generates no `NOT` clauses of any kind -- a colliding pairing is simply
+ * dropped rather than negated.
  */
 
 export interface RedditQueryFamily {
@@ -46,6 +48,10 @@ export interface RedditQueryFamily {
 
 const DEFAULT_MAX_QUERIES = 12;
 const MAX_QUERIES_CAP = 20;
+/** Cap for a problem/job "core" phrase used inside a boolean OR-group.
+ * Long enough to stay a coherent excerpt of the source sentence, short
+ * enough that AND-ing it with a market group doesn't over-narrow recall. */
+const CORE_PHRASE_MAX_WORDS = 5;
 
 /** Generic complaint/weakness vocabulary, not company-specific -- these are
  * the words people use when a competitor is failing them, regardless of
@@ -109,14 +115,14 @@ function andGroup(left: string, right: string): string {
 
 /**
  * "youtube" plus the bare qualifier "tv" collides with the YouTube TV
- * streaming service. An earlier plain-phrase generator dropped this pairing
- * outright; boolean search lets the query keep the recall and exclude the
- * collision instead, which is strictly better as long as NOT is genuinely
- * supported -- confirmed above.
+ * streaming service. The Discovery Profile no longer generates `NOT`
+ * clauses at all, so this drops the colliding query outright (returning ""
+ * for `push()` to skip) rather than negating it -- a small recall cost for
+ * one narrow, confirmed collision, not a general exclusions mechanism.
  */
-function withKnownServiceExclusion(query: string, qualifier: string | undefined): string {
+function dropKnownServiceCollision(query: string, qualifier: string | undefined): string {
   if (qualifier !== "tv" || !/\byoutube\b/.test(query) || !/\btv\b/.test(query)) return query;
-  return `${query} NOT "youtube tv"`;
+  return "";
 }
 
 /**
@@ -136,15 +142,19 @@ export function redditQueryFamilies(
   const qualifier = categoryWords.find((word) => word.length <= 3) ?? categoryWords[0];
 
   const problems = (queries.customerProblems ?? []).filter(Boolean);
-  const problemCores = problems.map((problem) => condense(problem, 2)).filter(Boolean);
+  const problemCores = problems
+    .map((problem) => naturalPhrase(problem, CORE_PHRASE_MAX_WORDS))
+    .filter((core) => core.split(" ").filter(Boolean).length >= 2);
   const jobs = (queries.jobsToBeDone ?? []).filter(Boolean);
-  const jobCores = jobs.map((job) => condense(job, 2)).filter(Boolean);
+  const jobCores = jobs
+    .map((job) => naturalPhrase(job, CORE_PHRASE_MAX_WORDS))
+    .filter((core) => core.split(" ").filter(Boolean).length >= 2);
   const competitors = (queries.competitors ?? [])
     .map((competitor) => normalizeSearchText(competitor))
     .filter((competitor) => competitor.length >= 3);
   const families: RedditQueryFamily[] = [];
   const push = (lane: RedditSearchLane, query: string) => {
-    const cleaned = withKnownServiceExclusion(query, qualifier);
+    const cleaned = dropKnownServiceCollision(query, qualifier);
     if (cleaned.trim()) families.push({ lane, query: cleaned });
   };
 

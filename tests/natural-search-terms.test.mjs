@@ -53,8 +53,15 @@ test("terms are short natural phrases, never intent sentences", () => {
 test("the market qualifier survives and is paired with problem concepts", () => {
   const terms = naturalSearchTerms(tvcp);
   assert.ok(terms.some((t) => /\btv\b/.test(t)), "no term carries the market qualifier");
-  // Pairings the profile never states verbatim still need to exist.
-  assert.ok(terms.includes("parental controls tv") || terms.includes("parental control tv"));
+  // The parental-controls concept must reach the market qualifier in some
+  // short form. The exact wording depends on how much of the source
+  // sentence's own contiguous phrasing survives condensing -- "parental
+  // controls tv" and "parental controls android tv" are both good retrieval
+  // phrases, so the assertion checks the concept, not one exact string.
+  assert.ok(
+    terms.some((t) => /\btv\b/.test(t) && /parental control/.test(t)),
+    `no parental-controls term paired with the market: ${terms.join(" | ")}`,
+  );
   // The screen-time concept must reach the market qualifier in some short
   // form; "limit screen tv" and "screen time tv" are both good retrieval
   // phrases, so the assertion checks the concept, not one exact wording.

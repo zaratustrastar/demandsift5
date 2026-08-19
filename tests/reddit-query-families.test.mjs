@@ -92,9 +92,12 @@ test("failure/weakness queries combine competitors with generic complaint langua
   assert.match(weakness.query, /Family Link|Bark/i);
 });
 
-test("known-ambiguous youtube+tv pairing is excluded rather than dropped outright", () => {
-  // A problem phrase engineered so its condensed core is literally "youtube",
-  // so a family pairing it with the bare "tv" market qualifier is guaranteed.
+test("known-ambiguous youtube+tv pairing is dropped, never negated with NOT", () => {
+  // A problem phrase engineered so its core is literally "youtube", so a
+  // family pairing it with the bare "tv" market qualifier is guaranteed.
+  // The Discovery Profile no longer surfaces an exclusions concept, so this
+  // file must never emit a NOT clause -- the colliding pairing is simply
+  // dropped instead of negated.
   const fixture = {
     queries: {
       productCategories: ["Android TV parental control app"],
@@ -107,9 +110,17 @@ test("known-ambiguous youtube+tv pairing is excluded rather than dropped outrigh
     limit: 100,
   };
   const families = redditQueryFamilies(fixture);
-  const hit = families.find((f) => /\byoutube\b/i.test(f.query) && /\btv\b/i.test(f.query));
-  assert.ok(hit, `expected a youtube+tv query to be generated, got: ${JSON.stringify(families)}`);
-  assert.match(hit.query, /NOT "youtube tv"/);
+  const collision = families.find((f) => /\byoutube\b/i.test(f.query) && /\btv\b/i.test(f.query));
+  assert.equal(
+    collision,
+    undefined,
+    `expected the youtube+tv collision to be dropped, got: ${JSON.stringify(families)}`,
+  );
+  assert.equal(
+    families.some((f) => /\bNOT\b/.test(f.query)),
+    false,
+    "no query should ever contain a NOT clause",
+  );
 });
 
 test("excludedTerms do not get compiled into a blanket NOT clause on every query", () => {
@@ -221,5 +232,48 @@ test("contractions collapse into one word instead of leaving an orphan letter be
   assert.ok(
     families.some((f) => /\bchilds\b/.test(f.query.toLowerCase())),
     `expected "child's" to collapse to "childs" somewhere, got: ${JSON.stringify(families)}`,
+  );
+});
+
+
+test("quoted problem/job phrases are full natural excerpts, never bare two-word fragments", () => {
+  // A real production run generated meaningless *quoted, standalone* boolean
+  // terms like "cant lock" (from "can't lock the TV remotely...") and
+  // "limit long" (from "limit how long my kid watches..."), because the old
+  // condense() picked the first two filler-filtered words regardless of
+  // where they fell in the sentence, then quoted that pair as an exact
+  // phrase. Quoted cores must now be a longer contiguous slice from the
+  // sentence's own start, so a quoted term reads as an actual excerpt of
+  // what was written rather than an arbitrary two-word pick. This is
+  // specifically about *quoted* terms: an unquoted, unpunctuated broad
+  // phrase (a different lane, a different purpose -- compressed retrieval
+  // keywords, not an exact-phrase claim) is out of scope here.
+  const fixture = {
+    queries: {
+      productCategories: ["Android TV parental control app"],
+      customerProblems: [
+        "can't lock the TV remotely when guests are over",
+        "limit how long my kid watches TV every day",
+      ],
+      jobsToBeDone: [],
+      buyerIntent: [],
+      competitors: [],
+      excludedTerms: [],
+    },
+    limit: 100,
+  };
+  const families = redditQueryFamilies(fixture);
+  const quotedTerms = families
+    .flatMap((f) => [...f.query.matchAll(/"([^"]+)"/g)].map((m) => m[1].toLowerCase()));
+  for (const bareFragment of ["cant lock", "limit long"]) {
+    assert.equal(
+      quotedTerms.includes(bareFragment),
+      false,
+      `expected no bare quoted fragment "${bareFragment}" among quoted terms: ${JSON.stringify(quotedTerms)}`,
+    );
+  }
+  assert.ok(
+    quotedTerms.some((term) => term.startsWith("cant lock the tv remotely")),
+    `expected a genuine quoted excerpt of the sentence to survive, got: ${JSON.stringify(quotedTerms)}`,
   );
 });

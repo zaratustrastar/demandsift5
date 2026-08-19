@@ -242,3 +242,4 @@ jobs:
 # trigger: natural pain-language prompt (full clauses, not clipped keyword fragments) (2026-08-19T01:54:45Z)
 # trigger: fix Reddit query generator bugs -- contractions, blanket exclusions, near-dup word order, actor timeout (2026-08-19T02:48:42Z)
 # trigger: minimize Discovery Profile to 3 sections, drop all NOT clauses, fix quoted-fragment truncation (2026-08-19T04:50:47Z)
+# trigger: Reddit discovery reliability -- retry transient Apify failures, chunked query batches, retrying status (2026-08-19T17:12:55Z)

@@ -112,18 +112,25 @@ test("known-ambiguous youtube+tv pairing is excluded rather than dropped outrigh
   assert.match(hit.query, /NOT "youtube tv"/);
 });
 
-test("excludedTerms become a NOT clause instead of being silently ignored", () => {
-  const families = redditQueryFamilies(tvcp);
-  assert.ok(
-    families.some((f) => /\bNOT\b/.test(f.query) && /hulu|youtube tv service/i.test(f.query)),
-    "expected at least one query to exclude the profile's excludedTerms",
-  );
-
-  const noExclusions = redditQueryFamilies({
+test("excludedTerms do not get compiled into a blanket NOT clause on every query", () => {
+  // An earlier version appended the same NOT (...) block built from
+  // excludedTerms to every single family. A real production run showed
+  // this bloats every query with ~15 extra encoded words regardless of
+  // relevance, for little practical benefit -- AI triage downstream
+  // already hard-rejects obvious noise, so this was removed. excludedTerms
+  // simply has no effect on the generated queries now; the known-ambiguous
+  // youtube+tv exclusion above is a separate, narrowly targeted mechanism
+  // that is unaffected by this.
+  const withExclusions = redditQueryFamilies(tvcp);
+  const withoutExclusions = redditQueryFamilies({
     queries: { ...tvcp.queries, excludedTerms: [] },
     limit: 100,
   });
-  assert.equal(noExclusions.some((f) => /\bhulu\b/i.test(f.query)), false);
+  assert.deepEqual(
+    withExclusions.map((f) => f.query),
+    withoutExclusions.map((f) => f.query),
+  );
+  assert.equal(withExclusions.some((f) => /\bNOT\b.*hulu|hulu.*\bNOT\b/i.test(f.query)), false);
 });
 
 test("bounded and deduplicated by maxQueries", () => {
@@ -149,4 +156,70 @@ test("query strings only ever use uppercase AND/OR/NOT, matching Reddit's case-s
   for (const family of families) {
     assert.equal(/\b(and|or|not)\b/.test(family.query), false, `lowercase operator leaked: ${family.query}`);
   }
+});
+
+test("word-order permutations of the same broad phrase collapse into a single query", () => {
+  // naturalSearchTerms deliberately emits both "core qualifier" and
+  // "qualifier core" for a pairing (real behavior: "kid watches tv" and
+  // "tv kid watches" for this fixture) because both read naturally on
+  // their own. That is fine when there is room for many terms, but when
+  // only a handful of query slots exist per scan, two orderings of the
+  // same idea burns a slot without adding recall -- a real production run
+  // spent two of its seven startUrls this way.
+  const fixture = {
+    queries: {
+      productCategories: ["Android TV parental control app"],
+      customerProblems: ["kid watches shows constantly"],
+      jobsToBeDone: [],
+      buyerIntent: [],
+      competitors: [],
+      excludedTerms: [],
+    },
+    limit: 100,
+  };
+  const families = redditQueryFamilies(fixture);
+  const plainQueries = families
+    .map((f) => f.query)
+    .filter((q) => !/[()"]/.test(q) && !/\b(AND|OR|NOT)\b/.test(q));
+  const signatures = plainQueries.map((q) => q.toLowerCase().split(" ").sort().join(" "));
+  assert.equal(
+    new Set(signatures).size,
+    signatures.length,
+    `expected no word-order duplicates among: ${JSON.stringify(plainQueries)}`,
+  );
+  assert.ok(plainQueries.length > 0, "expected at least one plain broad query to survive dedup");
+});
+
+test("contractions collapse into one word instead of leaving an orphan letter behind", () => {
+  // A real production run generated queries like "t lock the tv remotely"
+  // and "child s" -- normalizeSearchText was turning "can't" into "can t"
+  // and "child's" into "child s", and nothing downstream recognized the
+  // stray "t"/"s" as junk once "can" (a real filler word) was stripped.
+  const fixture = {
+    queries: {
+      productCategories: ["Android TV parental control app"],
+      customerProblems: ["can't lock the TV remotely when guests are over"],
+      jobsToBeDone: ["prevent my child's access to certain apps"],
+      buyerIntent: [],
+      competitors: [],
+      excludedTerms: [],
+    },
+    limit: 100,
+  };
+  const families = redditQueryFamilies(fixture);
+  for (const family of families) {
+    const tokens = family.query.toLowerCase().replace(/[()"]/g, " ").split(/\s+/).filter(Boolean);
+    for (const token of tokens) {
+      assert.notEqual(token, "t", `orphaned contraction fragment in: ${family.query}`);
+      assert.notEqual(token, "s", `orphaned contraction fragment in: ${family.query}`);
+    }
+  }
+  assert.ok(
+    families.some((f) => /\bcant\b/.test(f.query.toLowerCase())),
+    `expected "can't" to collapse to "cant" somewhere, got: ${JSON.stringify(families)}`,
+  );
+  assert.ok(
+    families.some((f) => /\bchilds\b/.test(f.query.toLowerCase())),
+    `expected "child's" to collapse to "childs" somewhere, got: ${JSON.stringify(families)}`,
+  );
 });

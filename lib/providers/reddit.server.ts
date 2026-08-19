@@ -2256,11 +2256,20 @@ export function createRedditProviderFromEnv(
       // searchTerms in manual testing. maxTerms above still governs the
       // "search-terms" fallback mode, kept as an operational escape hatch
       // via HARSHMAUR_REDDIT_DISCOVERY_MODE rather than removed.
-      maxQueries: positiveInteger(env.HARSHMAUR_REDDIT_MAX_QUERIES, 12, 1, 20),
+      // fastMode:false means every post is a real Playwright page load
+      // rather than a fast internal shortcut, so it is much slower per
+      // item than the searchTerms path was. A real production run with
+      // 12 startUrls hit the actor's own 360s timeout partway through
+      // ("ACTOR: The Actor run has reached the timeout of 360 seconds,
+      // aborting it") having processed only ~25 posts. maxQueries is
+      // lowered so a run has fewer pages to navigate, and timeoutMs is
+      // raised to the existing bound's ceiling so a run that is still
+      // making progress is not cut off before it can finish.
+      maxQueries: positiveInteger(env.HARSHMAUR_REDDIT_MAX_QUERIES, 8, 1, 20),
       discoveryMode: env.HARSHMAUR_REDDIT_DISCOVERY_MODE?.trim() === "search-terms"
         ? "search-terms"
         : "direct-url",
-      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 600_000),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),
     });

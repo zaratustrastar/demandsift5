@@ -27,6 +27,16 @@ import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
  * scan rather than picking one style: broad queries carry recall, precise
  * boolean queries carry precision, and duplicates across them collapse once
  * results come back (candidates already dedupe by Reddit id).
+ *
+ * An earlier version also appended a blanket `NOT (...)` clause built from
+ * `queries.excludedTerms` to every single query. A real production run
+ * showed this bloats every query with the same ~15 extra encoded words
+ * regardless of relevance, for little practical benefit -- the excluded
+ * platform names are unlikely to false-positive-match unrelated queries
+ * anyway, and AI triage downstream already hard-rejects obvious noise. That
+ * blanket exclusion was removed; `withKnownServiceExclusion` below is kept
+ * because it targets one specific, narrow, confirmed collision rather than
+ * applying to every query regardless of content.
  */
 
 export interface RedditQueryFamily {
@@ -109,12 +119,6 @@ function withKnownServiceExclusion(query: string, qualifier: string | undefined)
   return `${query} NOT "youtube tv"`;
 }
 
-function withExclusions(query: string, excluded: readonly string[]): string {
-  if (!query || excluded.length === 0) return query;
-  const group = orGroup(excluded.slice(0, 3));
-  return group ? `${query} NOT ${group}` : query;
-}
-
 /**
  * Build a bounded, deduplicated set of Reddit-native search-query
  * expressions from the Discovery Profile, mixing broad recall queries with
@@ -138,14 +142,10 @@ export function redditQueryFamilies(
   const competitors = (queries.competitors ?? [])
     .map((competitor) => normalizeSearchText(competitor))
     .filter((competitor) => competitor.length >= 3);
-  const excluded = (queries.excludedTerms ?? [])
-    .map((term) => normalizeSearchText(term))
-    .filter((term) => term.length >= 3);
-
   const families: RedditQueryFamily[] = [];
   const push = (lane: RedditSearchLane, query: string) => {
-    const withExclusion = withExclusions(withKnownServiceExclusion(query, qualifier), excluded);
-    if (withExclusion.trim()) families.push({ lane, query: withExclusion });
+    const cleaned = withKnownServiceExclusion(query, qualifier);
+    if (cleaned.trim()) families.push({ lane, query: cleaned });
   };
 
   // BROAD: recall-first natural phrases. Already tuned and tested elsewhere;
@@ -196,8 +196,23 @@ export function redditQueryFamilies(
 
   const deduped = new Map<string, RedditQueryFamily>();
   for (const family of families) {
-    const key = family.query.toLowerCase();
+    const key = dedupeKey(family.query);
     if (!deduped.has(key)) deduped.set(key, family);
   }
   return [...deduped.values()].slice(0, maxQueries);
+}
+
+/**
+ * A boolean/quoted query's structure is load-bearing, so it is deduped by
+ * exact text. A plain, operator-free phrase is deduped by its sorted word
+ * set instead: `naturalSearchTerms` deliberately emits both word orders of
+ * a core-plus-qualifier pairing (e.g. "kid watches tv" and "tv kid
+ * watches") because both read naturally on their own, but when only a
+ * handful of query slots exist per scan, two orderings of the same idea is
+ * a wasted slot rather than added recall -- a real production run spent
+ * two of its seven startUrls this way.
+ */
+function dedupeKey(query: string): string {
+  if (/[()"]/.test(query) || /\b(AND|OR|NOT)\b/.test(query)) return query.toLowerCase();
+  return query.toLowerCase().split(" ").filter(Boolean).sort().join(" ");
 }

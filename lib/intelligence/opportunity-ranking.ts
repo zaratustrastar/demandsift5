@@ -29,6 +29,15 @@ export function normalizeSearchText(value: string): string {
     .replace(/[\u0300-\u036f]/g, "")
     .toLocaleLowerCase("en-US")
     .replace(/https?:\/\/\S+/g, " ")
+    // Apostrophes are dropped, not replaced with a space, so a contraction
+    // collapses into one word ("can't" -> "cant", "child's" -> "childs")
+    // instead of splitting into a real word plus an orphaned single-letter
+    // fragment ("can t", "child s"). Downstream code that condenses text
+    // down to its first few surviving words has no way to recognize "t" or
+    // "s" as junk -- they read as content words and end up in generated
+    // search queries, e.g. a real production query was "t lock the tv
+    // remotely" from "can't lock the TV remotely".
+    .replace(/['\u2019]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     .replace(/\s+/g, " ");

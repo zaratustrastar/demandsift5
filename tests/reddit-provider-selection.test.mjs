@@ -251,15 +251,19 @@ test("a Harshmaur run that times out with zero retained records is retried, not 
 });
 
 test("chunked discovery preserves a successful query batch when another batch exhausts its retries", async () => {
-  // tvcp's query families exceed the default queriesPerRun (4), so this
-  // exercises the real chunked path with no override: one batch's actor run
-  // always times out with an empty dataset, the other always succeeds. The
-  // whole discovery call must return the successful batch's candidates
-  // rather than throwing away everything because one batch never recovered.
+  // tvcp's simple, capped query families no longer reliably exceed the
+  // default queriesPerRun (4) on their own -- forcing queriesPerRun: 1
+  // guarantees multiple batches regardless of exactly how many families the
+  // fixture produces, so this still exercises the real chunked path: one
+  // batch's actor run always times out with an empty dataset, another
+  // always succeeds. The whole discovery call must return the successful
+  // batch's candidates rather than throwing away everything because one
+  // batch never recovered.
   let runStarts = 0;
   const provider = new HarshmaurRedditProvider({
     token: "test-token",
     discoveryRetryAttempts: 2,
+    queriesPerRun: 1,
     fetchImpl: async (url) => {
       const href = String(url);
       if (href.includes("/v2/actors/") && href.includes("/runs")) {

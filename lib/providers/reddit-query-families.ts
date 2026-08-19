@@ -1,44 +1,33 @@
 import type { RedditSearchLane } from "@/lib/domain/types";
 import type { RedditSearchRequest } from "@/lib/providers/contracts";
 import { normalizeSearchText } from "@/lib/intelligence/opportunity-ranking";
-import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
 
 /**
  * Reddit-native search-query expressions for Harshmaur's Direct URL
  * (`startUrls` + `fastMode:false`) discovery path.
  *
- * A manual side-by-side test against `searchTerms` found three things that
- * shape this file:
+ * Earlier versions of this file built precise boolean queries (`("a" OR "b")
+ * AND ("c" OR "d")`) and quoted exact-phrase pain queries, on the theory that
+ * boolean structure would trade some recall for real precision gains. In
+ * practice that structure made queries brittle and hard to reason about, and
+ * meant every phrase went through some form of word-count trimming before it
+ * could be embedded in a group -- exactly the kind of mechanical shortening
+ * that produced meaningless fragments in earlier production runs ("cant
+ * lock", "limit long").
  *
- *  1. Reddit's own search genuinely supports the boolean operators AND, OR,
- *     NOT (case-sensitive) and parenthetical grouping -- confirmed on
- *     Reddit's own help documentation, not just observed behavior.
- *  2. A single broad natural phrase (e.g. "parental controls Android TV")
- *     has good recall (50 candidates in the test) but low precision --
- *     most hits only shared one or two words with the query. A precise
- *     boolean query ("parental controls" OR "screen time") AND ("Android
- *     TV" OR "Google TV") cut that to a handful, most of them relevant.
- *  3. Boolean search is still lexical, not semantic: it can still return a
- *     false positive that happens to contain the right words for the wrong
- *     reason (a phone post mentioning "Google TV" because a TV app was
- *     installed on it). AI triage downstream is still required either way.
+ * This generates the simplest thing that works: a plain, lowercase, natural
+ * phrase per query, close to verbatim from the Discovery Profile, run
+ * through Reddit's default (non-boolean, non-quoted) search. No AND/OR, no
+ * quotes, no market-qualifier pairing games -- just what a person would
+ * actually type. AI triage downstream still does the real relevance
+ * filtering; this file's only job is retrieval.
  *
- * So this deliberately generates a MIX of broad and precise queries per
- * scan rather than picking one style: broad queries carry recall, precise
- * boolean queries carry precision, and duplicates across them collapse once
- * results come back (candidates already dedupe by Reddit id).
- *
- * An earlier version also appended a blanket `NOT (...)` clause built from
- * `queries.excludedTerms` to every single query. A real production run
- * showed this bloats every query with the same ~15 extra encoded words
- * regardless of relevance, for little practical benefit -- the excluded
- * platform names are unlikely to false-positive-match unrelated queries
- * anyway, and AI triage downstream already hard-rejects obvious noise. That
- * blanket exclusion was removed. A second, narrower `NOT` (for the
- * youtube/"youtube tv" collision below) was removed too: the Discovery
- * Profile no longer surfaces an exclusions concept at all, so this file
- * generates no `NOT` clauses of any kind -- a colliding pairing is simply
- * dropped rather than negated.
+ * Bounded to three query families, each independently capped, so a sparse or
+ * a rich profile both produce a small, deliberate set rather than however
+ * many combinations the source data happens to allow:
+ *   - product/category: up to 3 queries
+ *   - pain/problem: up to 3 queries
+ *   - competitor: up to 2 queries
  */
 
 export interface RedditQueryFamily {
@@ -46,183 +35,87 @@ export interface RedditQueryFamily {
   query: string;
 }
 
-const DEFAULT_MAX_QUERIES = 12;
-const MAX_QUERIES_CAP = 20;
-/** Cap for a problem/job "core" phrase used inside a boolean OR-group.
- * Long enough to stay a coherent excerpt of the source sentence, short
- * enough that AND-ing it with a market group doesn't over-narrow recall. */
-const CORE_PHRASE_MAX_WORDS = 5;
-
-/** Generic complaint/weakness vocabulary, not company-specific -- these are
- * the words people use when a competitor is failing them, regardless of
- * what the competitor or product category is. */
-const WEAKNESS_WORDS = ["problem", "bypass", "limit", "alternative"];
-
-const FILLER = new Set([
-  "a", "an", "and", "any", "are", "app", "apps", "as", "at", "be", "best",
-  "but", "can", "for", "from", "get", "has", "have", "how", "i", "in", "is",
-  "it", "its", "looking", "me", "my", "need", "needs", "of", "on", "or",
-  "our", "please", "recommend", "recommendation", "recommendations", "should",
-  "software", "solution", "solutions", "some", "that", "the", "their", "there",
-  "this", "to", "tool", "tools", "use", "using", "want", "was", "we", "what",
-  "when", "which", "who", "why", "with", "without", "would", "you", "your",
-  "no", "not", "too", "very", "just", "only", "still", "set", "make", "keep",
-  "way", "help", "stop",
-]);
-
-function words(phrase: string): string[] {
-  return normalizeSearchText(phrase)
-    .split(" ")
-    .filter((word) => word.length > 0 && !FILLER.has(word));
-}
-
-/** Condense a source sentence to a short, deduplicated phrase. */
-function condense(phrase: string, maxWords: number): string {
-  return [...new Set(words(phrase))].slice(0, maxWords).join(" ");
-}
-
-/** A gentler clean for phrases meant to be quoted verbatim as a customer's
- * own language (pain points, buying-intent phrases): drop only leading/
- * trailing filler, keep the rest in source order so it still reads like
- * something a person actually typed. */
-function naturalPhrase(phrase: string, maxWords: number): string {
-  const all = normalizeSearchText(phrase).split(" ").filter(Boolean);
-  let start = 0;
-  let end = all.length;
-  while (start < end && FILLER.has(all[start])) start += 1;
-  while (end > start && FILLER.has(all[end - 1])) end -= 1;
-  return all.slice(start, Math.min(end, start + maxWords)).join(" ");
-}
-
-function quote(term: string): string {
-  return term.includes(" ") ? `"${term}"` : term;
-}
-
-/** OR-group deduplicated, non-empty terms. A single term needs no
- * parentheses; Reddit's own examples don't wrap a lone quoted phrase. */
-function orGroup(terms: readonly string[]): string {
-  const unique = [...new Set(terms.map((term) => term.trim()).filter(Boolean))];
-  if (unique.length === 0) return "";
-  if (unique.length === 1) return quote(unique[0]);
-  return `(${unique.map(quote).join(" OR ")})`;
-}
-
-function andGroup(left: string, right: string): string {
-  if (!left) return right;
-  if (!right) return left;
-  return `${left} AND ${right}`;
-}
+const MAX_PRODUCT_QUERIES = 3;
+const MAX_PAIN_QUERIES = 3;
+const MAX_COMPETITOR_QUERIES = 2;
+const TOTAL_QUERY_CAP = MAX_PRODUCT_QUERIES + MAX_PAIN_QUERIES + MAX_COMPETITOR_QUERIES;
 
 /**
- * "youtube" plus the bare qualifier "tv" collides with the YouTube TV
- * streaming service. The Discovery Profile no longer generates `NOT`
- * clauses at all, so this drops the colliding query outright (returning ""
- * for `push()` to skip) rather than negating it -- a small recall cost for
- * one narrow, confirmed collision, not a general exclusions mechanism.
+ * "youtube" plus the bare word "tv" collides with the YouTube TV streaming
+ * service -- the same concept paired with a more specific qualifier (e.g.
+ * "android tv") is fine and is left alone. The Discovery Profile has no
+ * exclusions concept, so a colliding query is simply dropped rather than
+ * negated with a boolean NOT.
  */
-function dropKnownServiceCollision(query: string, qualifier: string | undefined): string {
-  if (qualifier !== "tv" || !/\byoutube\b/.test(query) || !/\btv\b/.test(query)) return query;
-  return "";
+function collidesWithKnownService(query: string): boolean {
+  const words = query.split(" ");
+  return words.includes("youtube") && words.includes("tv");
 }
 
 /**
- * Build a bounded, deduplicated set of Reddit-native search-query
- * expressions from the Discovery Profile, mixing broad recall queries with
- * precise boolean ones across several distinct search intents.
+ * Lowercase and strip punctuation/diacritics only -- no word-count
+ * truncation, no filler-word removal, no reordering. The Discovery Profile's
+ * product/category, pain and competitor phrases are already short, natural
+ * text; this generator's job is to use them close to verbatim, not to
+ * mechanically re-shorten them.
+ */
+function normalizedQuery(phrase: string): string {
+  return normalizeSearchText(phrase).trim();
+}
+
+/**
+ * Build a bounded, deduplicated set of plain, natural-language Reddit search
+ * queries from the Discovery Profile.
  */
 export function redditQueryFamilies(
   request: RedditSearchRequest,
   options: { maxQueries?: number } = {},
 ): RedditQueryFamily[] {
-  const maxQueries = Math.max(1, Math.min(options.maxQueries ?? DEFAULT_MAX_QUERIES, MAX_QUERIES_CAP));
   const queries = request.queries;
-
-  const categories = (queries.productCategories ?? []).filter(Boolean);
-  const categoryWords = categories[0] ? condense(categories[0], 4).split(" ").filter(Boolean) : [];
-  const qualifier = categoryWords.find((word) => word.length <= 3) ?? categoryWords[0];
-
-  const problems = (queries.customerProblems ?? []).filter(Boolean);
-  const problemCores = problems
-    .map((problem) => naturalPhrase(problem, CORE_PHRASE_MAX_WORDS))
-    .filter((core) => core.split(" ").filter(Boolean).length >= 2);
-  const jobs = (queries.jobsToBeDone ?? []).filter(Boolean);
-  const jobCores = jobs
-    .map((job) => naturalPhrase(job, CORE_PHRASE_MAX_WORDS))
-    .filter((core) => core.split(" ").filter(Boolean).length >= 2);
-  const competitors = (queries.competitors ?? [])
-    .map((competitor) => normalizeSearchText(competitor))
-    .filter((competitor) => competitor.length >= 3);
   const families: RedditQueryFamily[] = [];
-  const push = (lane: RedditSearchLane, query: string) => {
-    const cleaned = dropKnownServiceCollision(query, qualifier);
-    if (cleaned.trim()) families.push({ lane, query: cleaned });
+  const seen = new Set<string>();
+
+  const push = (lane: RedditSearchLane, rawPhrase: string, minWords: number): boolean => {
+    const query = normalizedQuery(rawPhrase);
+    if (!query) return false;
+    if (query.split(" ").length < minWords) return false;
+    if (collidesWithKnownService(query)) return false;
+    if (seen.has(query)) return false;
+    seen.add(query);
+    families.push({ lane, query });
+    return true;
   };
 
-  // BROAD: recall-first natural phrases. Already tuned and tested elsewhere;
-  // reused verbatim rather than re-derived here.
-  for (const term of naturalSearchTerms(request, { maxTerms: 3 })) {
-    push("category_recommendation", term);
+  // PRODUCT / CATEGORY: what the business is, close to verbatim. Category
+  // phrases come first since they read as a complete concept on their own;
+  // shorter product terms fill any remaining slots.
+  const productSources = [
+    ...(queries.productCategories ?? []),
+    ...(queries.productTerms ?? []),
+  ].filter(Boolean);
+  let productCount = 0;
+  for (const source of productSources) {
+    if (productCount >= MAX_PRODUCT_QUERIES) break;
+    if (push("category_recommendation", source, 2)) productCount += 1;
   }
 
-  // PRECISE CATEGORY: problem language AND the market, each as an OR-group
-  // so near-synonyms in the profile widen the match without losing focus.
-  if (problemCores.length > 0 && categories.length > 0) {
-    const marketGroup = orGroup(categories.slice(0, 2).map((category) => condense(category, 4)));
-    push("category_recommendation", andGroup(orGroup(problemCores.slice(0, 2)), marketGroup));
+  // PAIN / PROBLEM: the customer's own words, close to verbatim.
+  const painSources = (queries.customerProblems ?? []).filter(Boolean);
+  let painCount = 0;
+  for (const source of painSources) {
+    if (painCount >= MAX_PAIN_QUERIES) break;
+    if (push("pain", source, 2)) painCount += 1;
   }
 
-  // PAIN: the customer's own words, quoted, not reduced to keywords.
-  for (const problem of problems.slice(0, 2)) {
-    const phrase = naturalPhrase(problem, 6);
-    if (phrase.split(" ").length >= 2) push("pain", quote(phrase));
+  // COMPETITOR: named alternatives. A brand name is a valid query on its
+  // own, so (unlike the other two lanes) a single word is allowed here.
+  const competitorSources = (queries.competitors ?? []).filter(Boolean);
+  let competitorCount = 0;
+  for (const source of competitorSources) {
+    if (competitorCount >= MAX_COMPETITOR_QUERIES) break;
+    if (push("brand_competitor_mentions", source, 1)) competitorCount += 1;
   }
 
-  // FEATURE / JOB: the action people want AND the market it applies to.
-  if (jobCores.length > 0 && qualifier) {
-    const marketGroup = orGroup(categoryWords.filter((word) => word.length > 3).slice(0, 2)) || quote(qualifier);
-    push("explicit_demand", andGroup(orGroup(jobCores.slice(0, 3)), marketGroup));
-  }
-
-  // BUYING / RECOMMENDATION INTENT: an explicit ask, plus the market as a
-  // trailing bare word rather than AND'd -- this is how people actually
-  // phrase a recommendation request ("best parental controls app" TV).
-  if (qualifier) {
-    for (const intent of (queries.buyerIntent ?? []).slice(0, 2)) {
-      const phrase = naturalPhrase(intent, 4);
-      if (phrase.split(" ").length >= 2) push("explicit_demand", `${quote(phrase)} ${qualifier}`);
-    }
-  }
-
-  // COMPETITOR: named alternatives AND the market.
-  if (competitors.length > 0) {
-    const marketGroup = qualifier ? orGroup([qualifier, "television"]) : "";
-    push("brand_competitor_mentions", andGroup(orGroup(competitors.slice(0, 3)), marketGroup));
-  }
-
-  // FAILURE / WEAKNESS: named alternatives AND generic complaint language.
-  if (competitors.length > 0) {
-    push("switching", andGroup(orGroup(competitors.slice(0, 2)), orGroup(WEAKNESS_WORDS)));
-  }
-
-  const deduped = new Map<string, RedditQueryFamily>();
-  for (const family of families) {
-    const key = dedupeKey(family.query);
-    if (!deduped.has(key)) deduped.set(key, family);
-  }
-  return [...deduped.values()].slice(0, maxQueries);
-}
-
-/**
- * A boolean/quoted query's structure is load-bearing, so it is deduped by
- * exact text. A plain, operator-free phrase is deduped by its sorted word
- * set instead: `naturalSearchTerms` deliberately emits both word orders of
- * a core-plus-qualifier pairing (e.g. "kid watches tv" and "tv kid
- * watches") because both read naturally on their own, but when only a
- * handful of query slots exist per scan, two orderings of the same idea is
- * a wasted slot rather than added recall -- a real production run spent
- * two of its seven startUrls this way.
- */
-function dedupeKey(query: string): string {
-  if (/[()"]/.test(query) || /\b(AND|OR|NOT)\b/.test(query)) return query.toLowerCase();
-  return query.toLowerCase().split(" ").filter(Boolean).sort().join(" ");
+  const maxQueries = Math.max(1, Math.min(options.maxQueries ?? TOTAL_QUERY_CAP, TOTAL_QUERY_CAP));
+  return families.slice(0, maxQueries);
 }

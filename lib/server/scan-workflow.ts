@@ -56,6 +56,7 @@ import type {
 import { captureFunnelEvent } from "./funnel";
 import { ApiError } from "./http";
 import { createId } from "./ids";
+import { jobWillRetryScanFailure } from "./job-retry-classification";
 import { getStateRepository } from "./repository";
 
 const STAGES: ScanStage[] = [
@@ -622,7 +623,20 @@ export async function enqueueScanRun(scan: ScanRecord) {
 
 export async function runScan(
   scanId: string,
-  options: { resumeRunning?: boolean; stopAfterUnderstanding?: boolean } = {},
+  options: {
+    resumeRunning?: boolean;
+    stopAfterUnderstanding?: boolean;
+    /**
+     * The current background job attempt number and its configured ceiling,
+     * when this run is driven by the job queue. Used only to decide whether
+     * a thrown error should leave the scan at a terminal "failed" or at
+     * "retrying" -- a status the frontend keeps polling through instead of
+     * showing an error screen. Omitted (e.g. a synchronous, non-worker scan
+     * request) always falls back to "failed", matching prior behavior.
+     */
+    jobAttempts?: number;
+    jobMaxAttempts?: number;
+  } = {},
 ): Promise<ScanRecord> {
   const repository = getStateRepository();
   const claim = await repository.beginScanRun(scanId);
@@ -762,32 +776,47 @@ export async function runScan(
     const lookbackDays = 7;
     const since = new Date(Date.parse(scan.createdAt) - lookbackDays * 86_400_000).toISOString();
     await setStage(scan, "discovery", "active");
-    const discovery = await redditProvider.discover({
-      queries: {
-        productTerms: business.productTerms.value,
-        brandTerms: business.brandTerms.value,
-        productCategories: [business.productCategory.value],
-        customerProblems:
-          business.customerProblemLanguage.value.length > 0
-            ? business.customerProblemLanguage.value
-            : business.problemsSolved.value,
-        jobsToBeDone: business.jobsToBeDone?.value ?? [],
-        workarounds: business.likelyWorkarounds?.value ?? [],
-        triggerEvents: business.triggerEvents?.value ?? [],
-        buyerIntent: ["recommendations", "alternative", "comparing tools", "need a tool"],
-        competitors: business.competitors.value
-          .filter(
-            (competitor) =>
-              competitor.verification !== "unverified_hypothesis" &&
-              (competitor.relationship === "direct" || competitor.relationship === "alternative"),
-          )
-          .map((competitor) => competitor.name),
-        excludedTerms: business.irrelevantTopics.value,
-        ambiguityRisks: business.ambiguityRisks.value,
+    const discovery = await redditProvider.discover(
+      {
+        queries: {
+          productTerms: business.productTerms.value,
+          brandTerms: business.brandTerms.value,
+          productCategories: [business.productCategory.value],
+          customerProblems:
+            business.customerProblemLanguage.value.length > 0
+              ? business.customerProblemLanguage.value
+              : business.problemsSolved.value,
+          jobsToBeDone: business.jobsToBeDone?.value ?? [],
+          workarounds: business.likelyWorkarounds?.value ?? [],
+          triggerEvents: business.triggerEvents?.value ?? [],
+          buyerIntent: ["recommendations", "alternative", "comparing tools", "need a tool"],
+          competitors: business.competitors.value
+            .filter(
+              (competitor) =>
+                competitor.verification !== "unverified_hypothesis" &&
+                (competitor.relationship === "direct" || competitor.relationship === "alternative"),
+            )
+            .map((competitor) => competitor.name),
+          excludedTerms: business.irrelevantTopics.value,
+          ambiguityRisks: business.ambiguityRisks.value,
+        },
+        limit: acquisitionCandidateTarget(),
+        since,
       },
-      limit: acquisitionCandidateTarget(),
-      since,
-    }).catch((error) => {
+      {
+        // Surfaced live so a slow/retrying search isn't silent: the frontend
+        // already renders this stage's `detail` text on every poll tick.
+        onRetry: async (notice) => {
+          await setStage(
+            scan,
+            "discovery",
+            "active",
+            `Reddit search is taking longer than expected, retrying automatically ` +
+              `(attempt ${Math.min(notice.attempt + 1, notice.maxAttempts)} of ${notice.maxAttempts})…`,
+          );
+        },
+      },
+    ).catch((error) => {
       const message = error instanceof Error ? error.message : "Unknown Reddit discovery failure.";
       throw new ApiError(
         `Reddit discovery failed: ${message}`,
@@ -795,6 +824,18 @@ export async function runScan(
         "reddit_discovery_failed",
       );
     });
+    if (discovery.candidates.length === 0 && discovery.diagnostics.degraded) {
+      // Zero results here would otherwise be indistinguishable from a real
+      // "searched and found nothing" outcome. A degraded run means coverage
+      // was lost to retries being exhausted, not that the search completed
+      // cleanly with nothing to show -- that must never be reported as a
+      // successful empty scan.
+      throw new ApiError(
+        "Reddit discovery timed out and returned no usable results after retrying.",
+        503,
+        "reddit_discovery_failed",
+      );
+    }
     /**
      * `now` here is the sanity-check ceiling deterministicReason() uses to
      * reject impossible future-dated records (bad actor output, clock skew).
@@ -1742,16 +1783,34 @@ export async function runScan(
     await captureFunnelEvent(scan, "scan_completed");
     return scan;
   } catch (error) {
-    scan.status = "failed";
-    scan.error =
+    const message =
       error instanceof UnsafeWebsiteUrlError
         ? error.message
         : error instanceof Error
           ? error.message
           : "The scan failed unexpectedly.";
-    scan.progress = scan.progress.map((stage) =>
-      stage.status === "active" ? { ...stage, status: "failed" as const, detail: scan.error ?? stage.detail } : stage,
-    );
+    const code = error instanceof ApiError ? error.code : undefined;
+    // A thrown error here does not necessarily mean the scan is done: if a
+    // background job attempt is in progress and attempts remain, the job
+    // queue (scripts/background-worker.mjs) is about to retry the whole
+    // scan on its own schedule. Landing on "failed" in that window is
+    // exactly what stopped the frontend from polling while a retry was
+    // already coming -- so only do that once retries are truly exhausted or
+    // the error is one retrying cannot fix.
+    const jobWillRetry = jobWillRetryScanFailure({ code, jobAttempts: options.jobAttempts, jobMaxAttempts: options.jobMaxAttempts });
+    scan.status = jobWillRetry ? "retrying" : "failed";
+    scan.error = message;
+    scan.errorCode = code ?? null;
+    scan.progress = scan.progress.map((stage) => {
+      if (stage.status !== "active") return stage;
+      if (jobWillRetry) {
+        // Keep the stage looking "active", not "failed" -- this is what the
+        // frontend already renders live per poll tick, so no new UI plumbing
+        // is needed to show retry progress.
+        return { ...stage, detail: `${message} Retrying automatically…` };
+      }
+      return { ...stage, status: "failed" as const, detail: message };
+    });
     scan.updatedAt = new Date().toISOString();
     await repository.saveScan(scan);
     throw error;

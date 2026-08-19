@@ -27,6 +27,7 @@ export async function GET(request: Request, context: RouteContext) {
             createdAt: scan.createdAt,
             updatedAt: scan.updatedAt,
             error: scan.error,
+            errorCode: scan.errorCode ?? null,
           },
           access: await presentAccess(scan.workspaceId, scan.websiteUrl),
           report: null,

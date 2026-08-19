@@ -34,15 +34,15 @@ test("active scan orders discovery before triage before enrichment before deep q
 test("long-running scans start durably and recover an orphaned running execution", () => {
   assert.equal(executorRoute.includes("ReadableStream"), false);
   assert.match(executorRoute, /activeScanExecutions/);
-  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, false\)/);
-  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, true\)/);
+  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, false, job\.attempts, job\.maxAttempts\)/);
+  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, true, job\.attempts, job\.maxAttempts\)/);
   assert.match(executorRoute, /status: "starting", complete: false/);
   assert.match(executorRoute, /export async function GET/);
   assert.match(executorRoute, /executionSnapshot\(job, scan\)/);
-  assert.match(
-    source,
-    /options: \{ resumeRunning\?: boolean; stopAfterUnderstanding\?: boolean \} = \{\}/,
-  );
+  assert.match(source, /resumeRunning\?: boolean;/);
+  assert.match(source, /stopAfterUnderstanding\?: boolean;/);
+  assert.match(source, /jobAttempts\?: number;/);
+  assert.match(source, /jobMaxAttempts\?: number;/);
   assert.match(source, /claim\.state === "running" && !options\.resumeRunning/);
 });
 

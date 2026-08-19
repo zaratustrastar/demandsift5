@@ -56,11 +56,18 @@ async function requireClaimedScan(
 
 function terminalScanFailure(scan: ScanRecord) {
   const message = scan.error?.trim() || "The scan failed unexpectedly.";
-  const code = /structured (?:chat )?(?:json|output)/iu.test(message)
-    ? "openai_structured_output_failed"
-    : /reddit enrichment/iu.test(message)
-      ? "reddit_enrichment_failed"
-      : "scan_execution_failed";
+  // Prefer the structured code runScan already classified the error into;
+  // only fall back to regexing the message for scan records written before
+  // errorCode existed.
+  const code =
+    scan.errorCode ??
+    (/structured (?:chat )?(?:json|output)/iu.test(message)
+      ? "openai_structured_output_failed"
+      : /reddit enrichment/iu.test(message)
+        ? "reddit_enrichment_failed"
+        : /reddit discovery/iu.test(message)
+          ? "reddit_discovery_failed"
+          : "scan_execution_failed");
   return {
     ok: false,
     executorStatus: 502,
@@ -70,9 +77,14 @@ function terminalScanFailure(scan: ScanRecord) {
 
 const activeScanExecutions = new Map<string, Promise<void>>();
 
-async function executeClaimedScan(scanId: string, resumeRunning = false): Promise<void> {
+async function executeClaimedScan(
+  scanId: string,
+  resumeRunning = false,
+  jobAttempts?: number,
+  jobMaxAttempts?: number,
+): Promise<void> {
   try {
-    await runScan(scanId, { resumeRunning });
+    await runScan(scanId, { resumeRunning, jobAttempts, jobMaxAttempts });
   } catch (error) {
     if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
       console.error("Background scan exhausted structured AI recovery.");
@@ -82,10 +94,15 @@ async function executeClaimedScan(scanId: string, resumeRunning = false): Promis
   }
 }
 
-function ensureClaimedScanExecution(scanId: string, resumeRunning = false): Promise<void> {
+function ensureClaimedScanExecution(
+  scanId: string,
+  resumeRunning = false,
+  jobAttempts?: number,
+  jobMaxAttempts?: number,
+): Promise<void> {
   const existing = activeScanExecutions.get(scanId);
   if (existing) return existing;
-  const execution = executeClaimedScan(scanId, resumeRunning);
+  const execution = executeClaimedScan(scanId, resumeRunning, jobAttempts, jobMaxAttempts);
   activeScanExecutions.set(scanId, execution);
   void execution.finally(() => {
     if (activeScanExecutions.get(scanId) === execution) activeScanExecutions.delete(scanId);
@@ -94,7 +111,12 @@ function ensureClaimedScanExecution(scanId: string, resumeRunning = false): Prom
 }
 
 function executionSnapshot(job: ClaimedJob, scan: ScanRecord) {
-  if (scan.status === "failed") return terminalScanFailure(scan);
+  // "retrying" is not done executing from the job's point of view either --
+  // this attempt still ended without a result, so the worker still needs to
+  // see a failure response to run its own retry/backoff bookkeeping. The
+  // difference already happened where it matters: the scan record itself
+  // never sat at a terminal-looking "failed" while a retry was scheduled.
+  if (scan.status === "failed" || scan.status === "retrying") return terminalScanFailure(scan);
   return {
     ok: true,
     jobId: job.id,
@@ -122,7 +144,7 @@ export async function POST(request: Request, context: RouteContext) {
   if (scan.status === "running") {
     // If this web process restarted, no execution is registered for the
     // persisted running scan. Resume it instead of blocking the queue.
-    void ensureClaimedScanExecution(scan.id, true);
+    void ensureClaimedScanExecution(scan.id, true, job.attempts, job.maxAttempts);
     return Response.json(executionSnapshot(job, scan), {
       status: 202,
       headers: { "cache-control": "no-store" },
@@ -132,8 +154,11 @@ export async function POST(request: Request, context: RouteContext) {
   // The VPS is a persistent Node process, not a request-scoped serverless
     // function. Start the durable scan and release the HTTP request immediately.
     // Worker and browser status checks are then independent short requests, so
-    // no proxy/server timeout can terminate a long-running scan.
-    void ensureClaimedScanExecution(scan.id, false);
+    // no proxy/server timeout can terminate a long-running scan. This also
+    // covers a scan left at "retrying" by a prior attempt's failure: this
+    // POST only happens once the worker has freshly reclaimed the job, so
+    // it starts a brand-new attempt rather than resuming a stale one.
+    void ensureClaimedScanExecution(scan.id, false, job.attempts, job.maxAttempts);
     return Response.json(
       { ok: true, jobId: job.id, scanId: scan.id, status: "starting", complete: false },
       { status: 202, headers: { "cache-control": "no-store" } },

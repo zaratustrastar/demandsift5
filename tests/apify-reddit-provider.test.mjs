@@ -52,11 +52,38 @@ async function compileRedditProvider() {
       return (env.APP_RUNTIME_ENV || env.NODE_ENV) === "production";
     }
   `);
+  // Compiled from the real sources rather than hand-stubbed: retry
+  // classification and backoff are exactly the behavior these tests assert
+  // on ("transient status/dataset GET failures retry without duplicate
+  // runs"), so a fake stand-in would let a regression in the real modules
+  // pass silently.
+  const apifyRetrySource = await readFile(
+    new URL("../lib/providers/apify-retry.ts", import.meta.url),
+    "utf8",
+  );
+  const apifyRetryModule = moduleUrl(
+    ts.transpileModule(apifyRetrySource, {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+      fileName: "apify-retry.ts",
+    }).outputText,
+  );
+  const resilienceSource = await readFile(
+    new URL("../lib/server/resilience.ts", import.meta.url),
+    "utf8",
+  );
+  const resilienceModule = moduleUrl(
+    ts.transpileModule(resilienceSource, {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+      fileName: "resilience.ts",
+    }).outputText,
+  );
   const replacements = {
     "@/lib/providers/reddit-harshmaur.server": "data:text/javascript;base64,ZXhwb3J0IGNsYXNzIEhhcnNobWF1clJlZGRpdFByb3ZpZGVyIHt9",
     "@/lib/providers/mock-reddit": mockModule,
     "@/lib/intelligence/opportunity-ranking": rankingModule,
     "@/lib/server/runtime-env": runtimeModule,
+    "@/lib/providers/apify-retry": apifyRetryModule,
+    "@/lib/server/resilience": resilienceModule,
   };
   for (const [specifier, replacement] of Object.entries(replacements)) {
     source = source.replaceAll(`"${specifier}"`, JSON.stringify(replacement));

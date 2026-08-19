@@ -37,6 +37,12 @@ const queryFamilies = u(cc(
     .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural)), "qf.ts"));
 const searchUrl = u(cc(
   await readFile(here("../lib/providers/reddit-search-url.ts"), "utf8"), "su.ts"));
+// Compiled from the real sources so retry/backoff selection behavior is
+// actually exercised, not assumed away by a stub.
+const apifyRetry = u(cc(
+  await readFile(here("../lib/providers/apify-retry.ts"), "utf8"), "ar.ts"));
+const resilience = u(cc(
+  await readFile(here("../lib/server/resilience.ts"), "utf8"), "res.ts"));
 
 let harshSrc = await readFile(here("../lib/providers/reddit-harshmaur.server.ts"), "utf8");
 harshSrc = harshSrc
@@ -45,7 +51,9 @@ harshSrc = harshSrc
   .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
   .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural))
   .replaceAll('"@/lib/providers/reddit-query-families"', JSON.stringify(queryFamilies))
-  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl));
+  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl))
+  .replaceAll('"@/lib/providers/apify-retry"', JSON.stringify(apifyRetry))
+  .replaceAll('"@/lib/server/resilience"', JSON.stringify(resilience));
 const harshmaurModule = u(cc(harshSrc, "h.ts"));
 const { HarshmaurRedditProvider } = await import(harshmaurModule);
 
@@ -58,7 +66,9 @@ redditSrc = redditSrc
   .replaceAll('"@/lib/server/runtime-env"', JSON.stringify(u(
     "export function isProductionRuntime(env=process.env){return (env.APP_RUNTIME_ENV||env.NODE_ENV)==='production';}")))
   .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-  .replaceAll('"@/lib/domain/types"', JSON.stringify(stub));
+  .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
+  .replaceAll('"@/lib/providers/apify-retry"', JSON.stringify(apifyRetry))
+  .replaceAll('"@/lib/server/resilience"', JSON.stringify(resilience));
 const reddit = await import(u(cc(redditSrc, "reddit.server.ts")));
 
 const tvcp = {
@@ -172,6 +182,10 @@ test("discover() returns the shared contract the scan workflow consumes", async 
   ];
   const provider = new HarshmaurRedditProvider({
     token: "test-token",
+    // Large enough that tvcp's query families fit in a single batch --
+    // chunking (multiple independently-retried actor runs) is covered by
+    // its own dedicated test below; this one is about the response shape.
+    queriesPerRun: 20,
     fetchImpl: stubApify(records),
   });
   const result = await provider.discover(tvcp);
@@ -190,6 +204,100 @@ test("discover() returns the shared contract the scan workflow consumes", async 
   assert.equal(result.diagnostics.fetchedCandidates, 2);
   assert.equal(result.diagnostics.normalizedCandidates, 2);
   assert.ok(result.diagnostics.queryCount > 0);
+});
+
+test("a Harshmaur run that times out with zero retained records is retried, not silently returned as a clean zero", async () => {
+  // Regression test for the exact bug behind a real production report: an
+  // Apify run can end TIMED-OUT with a datasetId allocated but nothing ever
+  // written to it. Treating that as a usable "partial" result made a total
+  // retrieval failure indistinguishable from a scan that genuinely searched
+  // and found nothing -- this must retry instead.
+  let runStarts = 0;
+  const provider = new HarshmaurRedditProvider({
+    token: "test-token",
+    queriesPerRun: 20, // keep this to one batch; retry behavior is the point here
+    discoveryRetryAttempts: 2,
+    fetchImpl: async (url, init = {}) => {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs")) {
+        runStarts += 1;
+        if (runStarts === 1) {
+          return new Response(JSON.stringify({
+            data: { id: `run_${runStarts}`, status: "TIMED-OUT", defaultDatasetId: "ds_empty" },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({
+          data: { id: `run_${runStarts}`, status: "SUCCEEDED", defaultDatasetId: "ds_ok" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/ds_empty/items")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/ds_ok/items")) {
+        return new Response(
+          JSON.stringify([harshmaurRecord(1, "android tv parental control")]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected mocked Harshmaur URL: ${href}`);
+    },
+  });
+
+  const result = await provider.discover(tvcp);
+
+  assert.equal(runStarts, 2, "the empty timed-out run must trigger exactly one retry, starting a fresh run");
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.diagnostics.degraded, undefined, "a batch that eventually succeeds is not degraded");
+});
+
+test("chunked discovery preserves a successful query batch when another batch exhausts its retries", async () => {
+  // tvcp's query families exceed the default queriesPerRun (4), so this
+  // exercises the real chunked path with no override: one batch's actor run
+  // always times out with an empty dataset, the other always succeeds. The
+  // whole discovery call must return the successful batch's candidates
+  // rather than throwing away everything because one batch never recovered.
+  let runStarts = 0;
+  const provider = new HarshmaurRedditProvider({
+    token: "test-token",
+    discoveryRetryAttempts: 2,
+    fetchImpl: async (url) => {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs")) {
+        runStarts += 1;
+        // The very first start call belongs to the first chunk (batches run
+        // concurrently, but each chunk's own first fetch call is issued
+        // synchronously in array order before any chunk's promise settles).
+        // Every batch after it -- including all of the poison batch's own
+        // retries -- times out with nothing retained.
+        if (runStarts === 1) {
+          return new Response(JSON.stringify({
+            data: { id: "run_ok", status: "SUCCEEDED", defaultDatasetId: "ds_ok" },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({
+          data: { id: `run_poison_${runStarts}`, status: "TIMED-OUT", defaultDatasetId: "ds_empty" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/ds_empty/items")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/ds_ok/items")) {
+        return new Response(
+          JSON.stringify([harshmaurRecord(1, "android tv parental control"), harshmaurRecord(2, "screen time tv")]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected mocked Harshmaur URL: ${href}`);
+    },
+  });
+
+  const result = await provider.discover(tvcp);
+
+  assert.ok(runStarts > 2, "more than one query batch, and the failing batch retried, so more than 2 start calls occurred");
+  assert.equal(result.candidates.length, 2, "the successful batch's candidates are kept");
+  assert.equal(result.diagnostics.degraded, true);
+  assert.ok(result.diagnostics.queriesFailed > 0);
+  assert.ok(result.diagnostics.queriesSucceeded > 0);
 });
 
 test("searchTerm attribution survives the whole provider path", async () => {

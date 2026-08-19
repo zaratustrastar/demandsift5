@@ -7,8 +7,10 @@ import {
 } from "@/lib/intelligence/opportunity-ranking";
 import type {
   ProviderRejectionReason,
+  RedditDiscoverOptions,
   RedditDiscoveryDiagnostics,
   RedditDiscoveryResponse,
+  RedditDiscoveryRetryNotice,
   RedditEnrichmentRequest,
   RedditEnrichmentResponse,
   RedditProvider,
@@ -18,6 +20,8 @@ import type {
   RedditSearchResponse,
 } from "@/lib/providers/contracts";
 import { isProductionRuntime } from "@/lib/server/runtime-env";
+import { ApifyTransientError, APIFY_RETRYABLE_RUN_STATUSES, isApifyRetryableHttpStatus } from "@/lib/providers/apify-retry";
+import { withRetry } from "@/lib/server/resilience";
 import type {
   EnrichedRedditConversation,
   RedditContextMessage,
@@ -1441,6 +1445,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
   private readonly timeoutMs: number;
   private readonly timeRange: ApifySearchActorInput["time"];
   private readonly fetchImpl: typeof fetch;
+  private readonly discoveryRetryAttempts: number;
 
   constructor(input: {
     actorId: string;
@@ -1450,6 +1455,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
     enrichmentComments?: number;
     timeoutMs?: number;
     timeRange?: ApifySearchActorInput["time"];
+    discoveryRetryAttempts?: number;
     fetchImpl?: typeof fetch;
   }) {
     this.actorId = apifyActorId(input.actorId);
@@ -1458,8 +1464,9 @@ export class ApifyRedditTestProvider implements RedditProvider {
     this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(0, Math.min(20, Math.trunc(input.enrichmentComments ?? 6)));
-    this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
+    this.timeoutMs = Math.max(20_000, Math.min(900_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.timeRange = input.timeRange ?? "month";
+    this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
@@ -1485,7 +1492,10 @@ export class ApifyRedditTestProvider implements RedditProvider {
         throw new Error("The Apify Reddit test response exceeded the size limit.");
       }
       if (!response.ok) {
-        throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
+        const message = `Apify Reddit test request failed with HTTP ${response.status}.`;
+        throw isApifyRetryableHttpStatus(response.status)
+          ? new ApifyTransientError(message)
+          : new Error(message);
       }
       try {
         return raw ? JSON.parse(raw) : {};
@@ -1495,7 +1505,6 @@ export class ApifyRedditTestProvider implements RedditProvider {
     };
 
     const safeGet = async (endpoint: URL): Promise<Response> => {
-      const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -1504,7 +1513,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
             headers,
             signal: controller.signal,
           });
-          if (response.ok || !retryableStatuses.has(response.status) || attempt === 2) return response;
+          if (response.ok || !isApifyRetryableHttpStatus(response.status) || attempt === 2) return response;
 
           const retryAfterHeader = response.headers.get("retry-after");
           const retryAfterSeconds = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
@@ -1519,7 +1528,9 @@ export class ApifyRedditTestProvider implements RedditProvider {
           await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
         }
       }
-      throw lastError ?? new Error("Apify Reddit test GET request failed.");
+      throw lastError instanceof Error
+        ? new ApifyTransientError(lastError.message)
+        : new ApifyTransientError("Apify Reddit test GET request failed.");
     };
 
     const runData = (payload: unknown): Record<string, unknown> => {
@@ -1557,12 +1568,28 @@ export class ApifyRedditTestProvider implements RedditProvider {
       const chargeCapUsd = Math.min(3, Math.max(0.5, actorInput.maxItems * 0.006));
       startEndpoint.searchParams.set("maxTotalChargeUsd", chargeCapUsd.toFixed(2));
 
-      const startResponse = await this.fetchImpl(startEndpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(actorInput),
-        signal: controller.signal,
-      });
+      let startResponse: Response;
+      try {
+        startResponse = await this.fetchImpl(startEndpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(actorInput),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        // No response was ever received, so no run could have been billed --
+        // always safe to retry, unlike an ambiguous mid-flight gateway error.
+        if (controller.signal.aborted) {
+          throw new ApifyTransientError(
+            `The Apify Reddit test actor could not be started within ${Math.ceil(timeoutMs / 1_000)} seconds.`,
+          );
+        }
+        throw new ApifyTransientError(
+          error instanceof Error
+            ? `The Apify Reddit test actor could not be started: ${error.message}`
+            : "The Apify Reddit test actor could not be started due to a network error.",
+        );
+      }
       const started = runData(await readJson(startResponse, 1_000_000));
       runId = stringValue(started.id, 120);
       status = stringValue(started.status, 40).toUpperCase();
@@ -1592,12 +1619,11 @@ export class ApifyRedditTestProvider implements RedditProvider {
 
       const usablePartialDataset = status === "TIMED-OUT" && Boolean(datasetId);
       if (status !== "SUCCEEDED" && !usablePartialDataset) {
-        throw new Error(
-          `The Apify Reddit test run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`,
-        );
+        const message = `The Apify Reddit test run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`;
+        throw APIFY_RETRYABLE_RUN_STATUSES.has(status) ? new ApifyTransientError(message) : new Error(message);
       }
       if (!datasetId) {
-        throw new Error("The Apify Reddit test run completed without a dataset.");
+        throw new ApifyTransientError("The Apify Reddit test run completed without a dataset.");
       }
 
       // Apify returns dataset items in pages. A single 100-item request used to
@@ -1625,7 +1651,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
         if (page.length < Math.min(datasetPageSize, wanted - offset)) break;
       }
       if (usablePartialDataset && payload.length === 0) {
-        throw new Error("The timed-out Apify Reddit test run did not retain any usable records.");
+        throw new ApifyTransientError("The timed-out Apify Reddit test run did not retain any usable records.");
       }
       if (usablePartialDataset) {
         console.warn("Using bounded partial Apify Reddit results after Actor timeout", {
@@ -1636,7 +1662,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
       return payload;
     } catch (error) {
       if (controller.signal.aborted) {
-        throw new Error(
+        throw new ApifyTransientError(
           `The Apify Reddit test run timed out after ${Math.ceil(timeoutMs / 1_000)} seconds ` +
           `(actor status ${status || "UNKNOWN"}, polls ${pollCount}, run ${runId || "not-started"}).`,
         );
@@ -1647,7 +1673,10 @@ export class ApifyRedditTestProvider implements RedditProvider {
     }
   }
 
-  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+  async discover(
+    request: RedditSearchRequest,
+    options?: RedditDiscoverOptions,
+  ): Promise<RedditDiscoveryResponse> {
     const searchPlan = buildApifyRedditSearchPlan(request);
     if (searchPlan.length === 0) {
       throw new Error("The company context did not produce any usable Reddit search lanes.");
@@ -1710,7 +1739,20 @@ export class ApifyRedditTestProvider implements RedditProvider {
     // remain capped; the remote Actor receives a 570-second budget and the
     // client gets 30 seconds to observe its terminal status and dataset.
     const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 600_000));
-    const payload = await this.runActor(discoveryInput, discoveryTimeoutMs);
+    const payload = await withRetry(() => this.runActor(discoveryInput, discoveryTimeoutMs), {
+      attempts: this.discoveryRetryAttempts,
+      initialDelayMs: 1_500,
+      maximumDelayMs: 8_000,
+      shouldRetry: (error) => error instanceof ApifyTransientError,
+      onRetry: async (error, attempt, delayMs) => {
+        await options?.onRetry?.({
+          reason: error instanceof Error ? error.message : "Reddit search hit a transient error.",
+          attempt,
+          maxAttempts: this.discoveryRetryAttempts,
+          delayMs,
+        });
+      },
+    });
     const rejectedByReason = emptyProviderRejections();
     const parsed: ApifyCandidate[] = [];
     for (const value of payload) {
@@ -1962,16 +2004,25 @@ export class HarshmaurWithTrudaxFallbackProvider implements RedditProvider {
     private readonly fallback: ApifyRedditTestProvider | null,
   ) {}
 
-  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+  async discover(
+    request: RedditSearchRequest,
+    options?: RedditDiscoverOptions,
+  ): Promise<RedditDiscoveryResponse> {
     try {
-      return await this.primary.discover(request);
+      return await this.primary.discover(request, options);
     } catch (error) {
       if (!this.fallback) throw error;
       console.error(
-        "Harshmaur Reddit discovery failed; falling back to the Trudax Reddit provider for this scan.",
+        "Harshmaur Reddit discovery failed after retries; falling back to the Trudax Reddit provider for this scan.",
         error,
       );
-      return await this.fallback.discover(request);
+      options?.onRetry?.({
+        reason: "Primary Reddit search failed after retries; trying a backup search provider.",
+        attempt: 1,
+        maxAttempts: 1,
+        delayMs: 0,
+      });
+      return await this.fallback.discover(request, options);
     }
   }
 
@@ -2225,7 +2276,7 @@ export function createRedditProviderFromEnv(
       maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 250, 1, 400),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
-      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 900_000),
       timeRange: configuredTimeRange as "day" | "week" | "month" | "year" | "all",
     });
   }
@@ -2269,7 +2320,7 @@ export function createRedditProviderFromEnv(
       discoveryMode: env.HARSHMAUR_REDDIT_DISCOVERY_MODE?.trim() === "search-terms"
         ? "search-terms"
         : "direct-url",
-      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 600_000),
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 900_000),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),
     });
@@ -2285,7 +2336,7 @@ export function createRedditProviderFromEnv(
           maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 250, 1, 400),
           enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
           enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
-          timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
+          timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 900_000),
           timeRange: (env.APIFY_REDDIT_TIME_RANGE?.trim().toLowerCase() || "month") as
             "day" | "week" | "month" | "year" | "all",
         })

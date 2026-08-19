@@ -41,6 +41,16 @@ async function loadRedditProvider() {
     new URL("../lib/providers/reddit.server.ts", import.meta.url),
     "utf8",
   );
+  const apifyRetrySource = await readFile(
+    new URL("../lib/providers/apify-retry.ts", import.meta.url),
+    "utf8",
+  );
+  const apifyRetry = moduleUrl(compile(apifyRetrySource, "apify-retry.ts"));
+  const resilienceSource = await readFile(
+    new URL("../lib/server/resilience.ts", import.meta.url),
+    "utf8",
+  );
+  const resilience = moduleUrl(compile(resilienceSource, "resilience.ts"));
   const replacements = {
     "@/lib/providers/reddit-harshmaur.server": "data:text/javascript;base64,ZXhwb3J0IGNsYXNzIEhhcnNobWF1clJlZGRpdFByb3ZpZGVyIHt9",
     "@/lib/providers/mock-reddit": moduleUrl(
@@ -52,6 +62,8 @@ async function loadRedditProvider() {
     ),
     "@/lib/providers/contracts": typesStub,
     "@/lib/domain/types": typesStub,
+    "@/lib/providers/apify-retry": apifyRetry,
+    "@/lib/server/resilience": resilience,
   };
   for (const [specifier, replacement] of Object.entries(replacements)) {
     source = source.replaceAll(`"${specifier}"`, JSON.stringify(replacement));

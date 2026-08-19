@@ -186,7 +186,13 @@ type ApiReport = {
 export type ApiScanResponse = {
   scan: {
     id: string;
-    status: "queued" | "running" | "complete" | "failed";
+    /**
+     * "retrying" mirrors lib/server/contracts.ts's ScanRecord.status: the
+     * pipeline hit an error, but a background job attempt is still
+     * scheduled to try again. Treat it like "running" -- keep polling, do
+     * not show an error screen.
+     */
+    status: "queued" | "running" | "retrying" | "complete" | "failed";
     websiteUrl: string;
     progress: Array<{
       id: string;
@@ -197,6 +203,7 @@ export type ApiScanResponse = {
     createdAt: string;
     updatedAt: string;
     error: string | null;
+    errorCode?: string | null;
   };
   access : {
     plan: "free" | "pass" | "core";

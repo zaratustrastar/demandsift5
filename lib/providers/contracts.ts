@@ -206,6 +206,21 @@ export interface RedditDiscoveryDiagnostics {
   verifiedRecentCandidates: number;
   rejectedByReason: Record<ProviderRejectionReason, number>;
   laneQueryCounts: Partial<Record<RedditSearchLane, number>>;
+  /**
+   * True when discovery lost coverage it could not recover even after
+   * retries -- e.g. one or more query batches exhausted every retry, or a
+   * timed-out run retained zero usable records. `candidates` may still be
+   * non-empty (other batches can succeed); this flag is what lets a caller
+   * distinguish "genuinely searched and found nothing" from "the search
+   * itself was incomplete", which a bare empty `candidates` array cannot.
+   */
+  degraded?: boolean;
+  /** How many of the planned queries never returned usable results, after retries. */
+  queriesFailed?: number;
+  /** How many of the planned queries succeeded (possibly after a retry). */
+  queriesSucceeded?: number;
+  /** Total retry attempts spent across all query batches. */
+  retryAttempts?: number;
 }
 
 export interface RedditDiscoveryResponse {
@@ -257,10 +272,22 @@ export interface RedditSearchResponse {
  * Production implementations must use an approved API. The `apify-test` mode
  * is an explicitly guarded MVP test adapter and is never treated as approved.
  */
+/** Reported once per retry attempt so a caller can surface live progress. */
+export interface RedditDiscoveryRetryNotice {
+  reason: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
+export interface RedditDiscoverOptions {
+  onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>;
+}
+
 export interface RedditProvider {
   readonly name: string;
   readonly sourceMode: RedditConversation["sourceMode"];
-  discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse>;
+  discover(request: RedditSearchRequest, options?: RedditDiscoverOptions): Promise<RedditDiscoveryResponse>;
   enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse>;
   /** Deprecated compatibility path. The active scan never calls it. */
   search?(request: RedditSearchRequest): Promise<RedditSearchResponse>;

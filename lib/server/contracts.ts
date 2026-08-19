@@ -407,11 +407,26 @@ export type ScanRecord = {
   id: string;
   workspaceId: string;
   websiteUrl: string;
-  status: "queued" | "running" | "complete" | "failed";
+  /**
+   * "retrying" means the pipeline threw but a background job attempt is
+   * still scheduled to try again -- it is NOT terminal, and must never be
+   * treated the same as "failed" by a poller. Only `runScan`'s own catch
+   * block (lib/server/scan-workflow.ts) ever assigns it, and only when it
+   * was given the current job's attempt count and confirmed more attempts
+   * remain. Absent that information (e.g. a synchronous, non-worker scan
+   * request) a failure always lands on "failed" as before.
+   */
+  status: "queued" | "running" | "retrying" | "complete" | "failed";
   progress: ScanStage[];
   createdAt: string;
   updatedAt: string;
   error: string | null;
+  /**
+   * Structured classification of `error`, set alongside it. Lets consumers
+   * (the background job executor, the frontend) branch on a stable code
+   * instead of pattern-matching `error`'s free-text message.
+   */
+  errorCode?: string | null;
   result: ScanResult | null;
   /**
    * User edits to the discovery terms, applied before query planning. Stored

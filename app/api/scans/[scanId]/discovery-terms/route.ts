@@ -24,7 +24,7 @@ export async function PUT(request: Request, context: RouteContext) {
     // Editable between website analysis and Reddit retrieval. Requiring only
     // "queued" was not enough on its own: before analysis there is nothing to
     // review, and once retrieval has begun an edit would silently not apply.
-    if (scan.status === "running" || scan.status === "complete") {
+    if (scan.status === "running" || scan.status === "retrying" || scan.status === "complete") {
       throw new ApiError(
         "Discovery terms can only be edited before the Reddit scan starts.",
         409,
@@ -70,7 +70,11 @@ export async function GET(request: Request, context: RouteContext) {
     return Response.json(
       {
         analyzed: Boolean(analysis),
-        editable: Boolean(analysis) && scan.status !== "running" && scan.status !== "complete",
+        editable:
+          Boolean(analysis) &&
+          scan.status !== "running" &&
+          scan.status !== "retrying" &&
+          scan.status !== "complete",
         discoveryOverrides: scan.discoveryOverrides ?? null,
         profile: analysis?.profile ?? null,
         // Derived terms are shown so the user edits from what was found rather

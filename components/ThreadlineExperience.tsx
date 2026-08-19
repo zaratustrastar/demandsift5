@@ -663,6 +663,10 @@ export function ThreadlineExperience() {
             if (latest.scan.status === "failed") {
               throw new Error(latest.scan.error ?? "The scan stopped before completion.");
             }
+            // "retrying" is not an error: a background job attempt failed but
+            // another is already scheduled. Keep polling -- the active
+            // stage's own `detail` text (already updated server-side) shows
+            // the retry message, so no separate error state is needed here.
             transientPollFailures = 0;
           } catch (pollError) {
             if (!isTransientPollFailure(pollError)) throw pollError;

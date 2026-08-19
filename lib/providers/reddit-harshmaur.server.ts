@@ -6,8 +6,10 @@ import type {
   RedditStructuredContext,
 } from "@/lib/domain/types";
 import type {
+  RedditDiscoverOptions,
   RedditDiscoveryDiagnostics,
   RedditDiscoveryResponse,
+  RedditDiscoveryRetryNotice,
   RedditEnrichmentRequest,
   RedditEnrichmentResponse,
   RedditProvider,
@@ -16,8 +18,10 @@ import type {
 } from "@/lib/providers/contracts";
 import { contentFingerprint } from "@/lib/intelligence/opportunity-ranking";
 import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
-import { redditQueryFamilies } from "@/lib/providers/reddit-query-families";
+import { redditQueryFamilies, type RedditQueryFamily } from "@/lib/providers/reddit-query-families";
 import { redditSearchUrl } from "@/lib/providers/reddit-search-url";
+import { ApifyTransientError, APIFY_RETRYABLE_RUN_STATUSES, isApifyRetryableHttpStatus } from "@/lib/providers/apify-retry";
+import { withRetry } from "@/lib/server/resilience";
 
 /**
  * Adapter for the `harshmaur/reddit-scraper` Apify actor.
@@ -211,13 +215,11 @@ export function buildHarshmaurInput(
  * against a live run; if a production scan shows early URLs crowding out
  * later ones, splitting into per-URL runs is the fix.
  */
-export function buildHarshmaurDirectInput(
-  request: RedditSearchRequest,
-  options: { targetTotal: number; maxQueries?: number },
+function directDiscoveryInputFromFamilies(
+  families: RedditQueryFamily[],
+  targetTotal: number,
 ): HarshmaurDirectDiscoveryInput {
-  const families = redditQueryFamilies(request, { maxQueries: options.maxQueries ?? 12 });
   const startUrls = families.map((family) => ({ url: redditSearchUrl(family.query, { time: "week" }) }));
-
   return {
     searchTerms: [],
     searchPosts: true,
@@ -227,11 +229,86 @@ export function buildHarshmaurDirectInput(
     fastMode: false,
     crawlCommentsPerPost: false,
     includeNSFW: false,
-    maxPostsCount: Math.max(1, Math.trunc(options.targetTotal)),
+    maxPostsCount: Math.max(1, Math.trunc(targetTotal)),
     maxCommentsCount: 0,
     maxCommentsPerPost: 0,
     maxCommunitiesCount: 0,
     proxy: { useApifyProxy: true, apifyProxyGroups: ["RESIDENTIAL"] },
+  };
+}
+
+export function buildHarshmaurDirectInput(
+  request: RedditSearchRequest,
+  options: { targetTotal: number; maxQueries?: number },
+): HarshmaurDirectDiscoveryInput {
+  const families = redditQueryFamilies(request, { maxQueries: options.maxQueries ?? 12 });
+  return directDiscoveryInputFromFamilies(families, options.targetTotal);
+}
+
+function emptyRejectionCounts(): RedditDiscoveryDiagnostics["rejectedByReason"] {
+  return {
+    invalid_record: 0,
+    invalid_url: 0,
+    query_mismatch: 0,
+    bot_author: 0,
+    deleted: 0,
+    nsfw: 0,
+    missing_timestamp: 0,
+    outside_window: 0,
+  };
+}
+
+/**
+ * Combine several independently-run query batches into one response. Simple
+ * concatenation is safe: `cleanDiscoveryCandidates` downstream already
+ * dedupes overlapping records across batches by content hash, permalink and
+ * near-duplicate token overlap.
+ */
+function mergeDiscoveryResponses(
+  responses: RedditDiscoveryResponse[],
+  sourceMode: RedditDiscoveryResponse["sourceMode"],
+): RedditDiscoveryResponse {
+  const candidates: RedditDiscoveryCandidate[] = [];
+  const searchPlan: RedditSearchPlanEntry[] = [];
+  const rejectedByReason = emptyRejectionCounts();
+  const laneQueryCounts: Partial<Record<RedditSearchLane, number>> = {};
+  let queryCount = 0;
+  let fetchedCandidates = 0;
+  let normalizedCandidates = 0;
+  let verifiedRecentCandidates = 0;
+  let retryAttempts = 0;
+
+  for (const response of responses) {
+    candidates.push(...response.candidates);
+    searchPlan.push(...response.searchPlan);
+    queryCount += response.diagnostics.queryCount;
+    fetchedCandidates += response.diagnostics.fetchedCandidates;
+    normalizedCandidates += response.diagnostics.normalizedCandidates;
+    verifiedRecentCandidates += response.diagnostics.verifiedRecentCandidates;
+    retryAttempts += response.diagnostics.retryAttempts ?? 0;
+    for (const [reason, count] of Object.entries(response.diagnostics.rejectedByReason)) {
+      const key = reason as keyof typeof rejectedByReason;
+      rejectedByReason[key] = (rejectedByReason[key] ?? 0) + count;
+    }
+    for (const [lane, count] of Object.entries(response.diagnostics.laneQueryCounts)) {
+      const key = lane as RedditSearchLane;
+      laneQueryCounts[key] = (laneQueryCounts[key] ?? 0) + (count ?? 0);
+    }
+  }
+
+  return {
+    candidates,
+    searchPlan,
+    sourceMode,
+    diagnostics: {
+      queryCount,
+      fetchedCandidates,
+      normalizedCandidates,
+      verifiedRecentCandidates,
+      rejectedByReason,
+      laneQueryCounts,
+      retryAttempts,
+    },
   };
 }
 
@@ -675,6 +752,19 @@ export class HarshmaurRedditProvider implements RedditProvider {
   private readonly enrichmentLimit: number;
   private readonly enrichmentComments: number;
   private readonly fetchImpl: typeof fetch;
+  /**
+   * How many query families share a single actor run. A prior production
+   * incident found 12 startUrls in one run hitting the actor's own internal
+   * timeout partway through, having processed only ~25 posts -- queries
+   * later in the list never ran at all, and that partial run was
+   * indistinguishable from a clean search that found little. Splitting into
+   * smaller batches, each its own retryable run, bounds how much a single
+   * slow/failing batch can cost the others and is the fix that doc comment
+   * on buildHarshmaurDirectInput anticipated.
+   */
+  private readonly queriesPerRun: number;
+  /** Bounded retry attempts per query batch for transient Apify failures. */
+  private readonly discoveryRetryAttempts: number;
 
   constructor(input: {
     actorId?: string;
@@ -696,6 +786,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
     maxChargeUsd?: number;
     enrichmentLimit?: number;
     enrichmentComments?: number;
+    queriesPerRun?: number;
+    discoveryRetryAttempts?: number;
     fetchImpl?: typeof fetch;
   }) {
     // Apify's API path takes an actor id or `username~actor-name`; a slash
@@ -706,10 +798,12 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 8)));
     this.maxQueries = Math.max(1, Math.min(20, Math.trunc(input.maxQueries ?? 12)));
     this.discoveryMode = input.discoveryMode ?? "direct-url";
-    this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
+    this.timeoutMs = Math.max(20_000, Math.min(900_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(1, Math.min(50, Math.trunc(input.enrichmentComments ?? 6)));
+    this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 4)));
+    this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
@@ -739,7 +833,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
     const readJson = async (response: Response): Promise<unknown> => {
       const raw = await response.text();
       if (!response.ok) {
-        throw new Error(`Harshmaur request failed with HTTP ${response.status}.`);
+        const message = `Harshmaur request failed with HTTP ${response.status}.`;
+        throw isApifyRetryableHttpStatus(response.status)
+          ? new ApifyTransientError(message)
+          : new Error(message);
       }
       try {
         return raw ? JSON.parse(raw) : {};
@@ -749,7 +846,6 @@ export class HarshmaurRedditProvider implements RedditProvider {
     };
 
     const safeGet = async (endpoint: URL): Promise<Response> => {
-      const retryable = new Set([408, 425, 429, 500, 502, 503, 504]);
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -757,7 +853,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
             headers,
             signal: controller.signal,
           });
-          if (!retryable.has(response.status)) return response;
+          if (!isApifyRetryableHttpStatus(response.status)) return response;
           await response.text().catch(() => "");
         } catch (error) {
           lastError = error;
@@ -765,7 +861,9 @@ export class HarshmaurRedditProvider implements RedditProvider {
         }
         await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
       }
-      throw lastError ?? new Error("Harshmaur GET request failed.");
+      throw lastError instanceof Error
+        ? new ApifyTransientError(lastError.message)
+        : new ApifyTransientError("Harshmaur GET request failed.");
     };
 
     const runData = (payload: unknown): Record<string, unknown> => {
@@ -791,12 +889,29 @@ export class HarshmaurRedditProvider implements RedditProvider {
       startEndpoint.searchParams.set("maxItems", String(platformMaxItems));
       startEndpoint.searchParams.set("maxTotalChargeUsd", this.maxChargeUsd.toFixed(2));
 
-      const startResponse = await this.fetchImpl(startEndpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(actorInput),
-        signal: controller.signal,
-      });
+      let startResponse: Response;
+      try {
+        startResponse = await this.fetchImpl(startEndpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(actorInput),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        // No response was ever received, so no run could have been billed --
+        // unlike the ambiguous-gateway-error case the module doc comment
+        // warns about, this is always safe to retry.
+        if (controller.signal.aborted) {
+          throw new ApifyTransientError(
+            `The Harshmaur actor could not be started within ${Math.ceil(this.timeoutMs / 1_000)} seconds.`,
+          );
+        }
+        throw new ApifyTransientError(
+          error instanceof Error
+            ? `The Harshmaur actor could not be started: ${error.message}`
+            : "The Harshmaur actor could not be started due to a network error.",
+        );
+      }
       const started = runData(await readJson(startResponse));
       const runId = str(started.id);
       let status = str(started.status).toUpperCase();
@@ -824,11 +939,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
       // would waste a paid run.
       const usablePartial = status === "TIMED-OUT" && Boolean(datasetId);
       if (status !== "SUCCEEDED" && !usablePartial) {
-        throw new Error(
-          `The Harshmaur run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`,
-        );
+        const message = `The Harshmaur run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`;
+        throw APIFY_RETRYABLE_RUN_STATUSES.has(status) ? new ApifyTransientError(message) : new Error(message);
       }
-      if (!datasetId) throw new Error("The Harshmaur run completed without a dataset.");
+      if (!datasetId) throw new ApifyTransientError("The Harshmaur run completed without a dataset.");
 
       const pageSize = 100;
       const payload: unknown[] = [];
@@ -850,7 +964,27 @@ export class HarshmaurRedditProvider implements RedditProvider {
         payload.push(...page);
         if (page.length < limit) break;
       }
+      // A timed-out run whose dataset never actually received any records
+      // is not a usable partial result -- it is a failed run that happened
+      // to have a datasetId allocated. Treating it as success previously let
+      // a full-timeout, zero-record run flow through as an ordinary
+      // "searched and found nothing" result, indistinguishable from a
+      // genuine zero. Mirrors the same guard already proven in the Trudax
+      // provider (ApifyRedditTestProvider.runActor).
+      if (usablePartial && payload.length === 0) {
+        throw new ApifyTransientError(
+          "The timed-out Harshmaur run did not retain any usable records.",
+        );
+      }
       return payload;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new ApifyTransientError(
+          `The Harshmaur run timed out after ${Math.ceil(this.timeoutMs / 1_000)} seconds.`,
+        );
+      }
+      if (error instanceof ApifyTransientError || error instanceof Error) throw error;
+      throw new ApifyTransientError("The Harshmaur request failed with a network error.");
     } finally {
       clearTimeout(timer);
     }
@@ -863,11 +997,27 @@ export class HarshmaurRedditProvider implements RedditProvider {
     request: RedditSearchRequest,
     searchPlan: RedditSearchPlanEntry[],
     targetTotal: number,
+    onRetry?: (notice: RedditDiscoveryRetryNotice) => void,
   ): Promise<RedditDiscoveryResponse> {
     // Headroom over the target so per-query rounding cannot silently
     // truncate, while still capping spend at the platform level.
     const platformMaxItems = Math.min(1_000, Math.ceil(targetTotal * 1.3));
-    const payload = await this.runActor(actorInput, platformMaxItems);
+    let retryAttempts = 0;
+    const payload = await withRetry(() => this.runActor(actorInput, platformMaxItems), {
+      attempts: this.discoveryRetryAttempts,
+      initialDelayMs: 1_500,
+      maximumDelayMs: 8_000,
+      shouldRetry: (error) => error instanceof ApifyTransientError,
+      onRetry: async (error, attempt, delayMs) => {
+        retryAttempts += 1;
+        await onRetry?.({
+          reason: error instanceof Error ? error.message : "Reddit search hit a transient error.",
+          attempt,
+          maxAttempts: this.discoveryRetryAttempts,
+          delayMs,
+        });
+      },
+    });
     const window = sevenDayWindow();
     const since = request.since && Number.isFinite(Date.parse(request.since))
       ? request.since
@@ -905,6 +1055,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
         verifiedRecentCandidates: candidates.length,
         rejectedByReason: rejected as RedditDiscoveryDiagnostics["rejectedByReason"],
         laneQueryCounts,
+        retryAttempts,
       },
     };
   }
@@ -918,22 +1069,16 @@ export class HarshmaurRedditProvider implements RedditProvider {
    * with a second paid run. `discoveryMode: "search-terms"` selects the
    * legacy path outright as an operational escape hatch.
    */
-  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+  async discover(
+    request: RedditSearchRequest,
+    options?: RedditDiscoverOptions,
+  ): Promise<RedditDiscoveryResponse> {
     const targetTotal = Math.min(this.maximumItems, Math.max(40, request.limit));
 
     if (this.discoveryMode === "direct-url") {
       const families = redditQueryFamilies(request, { maxQueries: this.maxQueries });
       if (families.length > 0) {
-        const directInput = buildHarshmaurDirectInput(request, {
-          targetTotal,
-          maxQueries: this.maxQueries,
-        });
-        const searchPlan: RedditSearchPlanEntry[] = families.map((family) => ({
-          lane: family.lane,
-          query: family.query,
-          seed: family.query,
-        }));
-        return this.runDiscovery(directInput, request, searchPlan, targetTotal);
+        return this.runChunkedDirectDiscovery(request, families, targetTotal, options?.onRetry);
       }
     }
 
@@ -949,7 +1094,89 @@ export class HarshmaurRedditProvider implements RedditProvider {
       query: term,
       seed: term,
     }));
-    return this.runDiscovery(actorInput, request, searchPlan, targetTotal);
+    return this.runDiscovery(actorInput, request, searchPlan, targetTotal, options?.onRetry);
+  }
+
+  /**
+   * Split query families across several smaller, independently-retried
+   * actor runs instead of one run covering everything. This bounds how much
+   * a single slow/failing batch can cost the rest (see `queriesPerRun`'s doc
+   * comment) and means a batch that exhausts its retries loses only its own
+   * candidates, not the whole discovery result -- other batches' results are
+   * preserved rather than discarded.
+   */
+  private async runChunkedDirectDiscovery(
+    request: RedditSearchRequest,
+    families: RedditQueryFamily[],
+    targetTotal: number,
+    onRetry?: (notice: RedditDiscoveryRetryNotice) => void,
+  ): Promise<RedditDiscoveryResponse> {
+    const chunkSize = Math.min(families.length, this.queriesPerRun);
+    const chunks: RedditQueryFamily[][] = [];
+    for (let index = 0; index < families.length; index += chunkSize) {
+      chunks.push(families.slice(index, index + chunkSize));
+    }
+
+    const runChunk = (chunkFamilies: RedditQueryFamily[], chunkIndex: number) => {
+      const perChunkTarget = Math.max(10, Math.ceil(targetTotal / chunks.length));
+      const directInput = directDiscoveryInputFromFamilies(chunkFamilies, perChunkTarget);
+      const searchPlan: RedditSearchPlanEntry[] = chunkFamilies.map((family) => ({
+        lane: family.lane,
+        query: family.query,
+        seed: family.query,
+      }));
+      return this.runDiscovery(directInput, request, searchPlan, perChunkTarget, (notice) =>
+        onRetry?.({
+          ...notice,
+          reason: chunks.length > 1
+            ? `[query batch ${chunkIndex + 1}/${chunks.length}] ${notice.reason}`
+            : notice.reason,
+        }),
+      );
+    };
+
+    if (chunks.length <= 1) return runChunk(families, 0);
+
+    const outcomes = await Promise.allSettled(
+      chunks.map((chunkFamilies, index) => runChunk(chunkFamilies, index)),
+    );
+
+    const succeeded: RedditDiscoveryResponse[] = [];
+    const failures: unknown[] = [];
+    let queriesSucceeded = 0;
+    let queriesFailed = 0;
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled") {
+        succeeded.push(outcome.value);
+        queriesSucceeded += chunks[index].length;
+      } else {
+        failures.push(outcome.reason);
+        queriesFailed += chunks[index].length;
+      }
+    });
+
+    if (succeeded.length === 0) {
+      // Every batch exhausted its retries. Surface the first failure as-is
+      // -- the caller classifies it by type (ApifyTransientError vs not),
+      // not by this message text.
+      throw failures[0] instanceof Error
+        ? failures[0]
+        : new Error("Reddit discovery failed for every query batch.");
+    }
+
+    const merged = mergeDiscoveryResponses(succeeded, this.sourceMode);
+    merged.diagnostics.queriesSucceeded = queriesSucceeded;
+    merged.diagnostics.queriesFailed = queriesFailed;
+    if (queriesFailed > 0) {
+      merged.diagnostics.degraded = true;
+      console.error(
+        `Reddit discovery: ${failures.length} of ${chunks.length} query batches failed after ` +
+          `retries; preserving ${succeeded.length} successful batch(es) rather than discarding ` +
+          "the whole run.",
+        failures.map((error) => (error instanceof Error ? error.message : String(error))),
+      );
+    }
+    return merged;
   }
 
   /**

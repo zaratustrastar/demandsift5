@@ -147,6 +147,7 @@ export async function presentScan(scan: ScanRecord) {
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt,
         error: scan.error,
+        errorCode: scan.errorCode ?? null,
       },
       access,
       report: null,
@@ -234,6 +235,7 @@ export async function presentScan(scan: ScanRecord) {
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt,
       error: scan.error,
+      errorCode: scan.errorCode ?? null,
     },
     access,
     report: {

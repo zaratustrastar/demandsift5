@@ -402,6 +402,7 @@ export type FunnelEventRecord = {
 
 import type { BusinessUnderstanding } from "@/lib/domain/types";
 import type { DiscoveryTermOverrides } from "@/lib/intelligence/discovery-overrides";
+import type { RedditDiscoveryResponse } from "@/lib/providers/contracts";
 
 export type ScanRecord = {
   id: string;
@@ -450,6 +451,24 @@ export type ScanRecord = {
     analysisMode: ScanResult["analysisMode"];
     analyzedAt: string;
   } | null;
+  /**
+   * Checkpoint of a successful Reddit discovery call, persisted the same way
+   * `discoveryProfile` is: as soon as discovery clears the zero-candidates
+   * guard, before any later stage (enrichment, AI qualification) has a
+   * chance to fail.
+   *
+   * The background job retries a failed scan up to its configured max
+   * attempts, and every retry re-runs `runScan()` from the top. Without this
+   * checkpoint, a downstream failure on attempt 2 would silently re-trigger
+   * a brand new (paid) Reddit discovery call, even though attempt 1 already
+   * paid for and obtained good results -- a real production incident showed
+   * a single 6-query scan spawn roughly 10 Apify actor runs this way, one
+   * full discovery re-run per job attempt. `discoveryProfile` and
+   * `discoveryOverrides` are both fixed once a scan starts, so discovery's
+   * inputs are deterministic across attempts of the same scan: reusing this
+   * checkpoint is always safe, never stale.
+   */
+  redditDiscovery?: RedditDiscoveryResponse | null;
 };
 
 export type EntitlementRecord = {

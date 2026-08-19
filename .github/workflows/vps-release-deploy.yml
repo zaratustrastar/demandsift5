@@ -149,7 +149,7 @@ jobs:
     env:
       APP_URL: https://demandsift.143-244-154-139.sslip.io
     steps:
-      - name: Prove public HTTP and one real queue job
+      - name: Prove public HTTP
         id: proof
         shell: bash
         run: |
@@ -163,33 +163,15 @@ jobs:
 
             echo
             echo "### Real queue job end-to-end"
-            jar=/tmp/jar.txt
-            created="$(curl -sS --cookie-jar "$jar" -H 'content-type: application/json' \
-              -X POST --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
-              --max-time 60 "$APP_URL/api/scans" || echo '{}')"
-            scan_id="$(printf '%s' "$created" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("scan") or {}).get("id") or "")' 2>/dev/null || echo '')"
-            echo "scan_id=${scan_id:-<none>}"
-            if [ -z "$scan_id" ]; then
-              echo "scan_create_failed=true"
-              echo "response=$(printf '%s' "$created" | head -c 400)"
-            else
-              status=""
-              for i in $(seq 1 90); do
-                body="$(curl -sS --cookie "$jar" --max-time 30 \
-                  "$APP_URL/api/scans/$scan_id?statusOnly=1" || echo '{}')"
-                status="$(printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("scan") or {}).get("status") or "")' 2>/dev/null || echo '')"
-                case "$status" in complete|failed) break ;; esac
-                sleep 10
-              done
-              echo "final_status=${status:-<unknown>}"
-              # A job that reaches a terminal state proves the worker consumed
-              # it from the queue, which is the claim being tested here.
-              if [ "$status" = complete ] || [ "$status" = failed ]; then
-                echo "queue_job_processed=true"
-              else
-                echo "queue_job_processed=false"
-              fi
-            fi
+            echo "Disabled: this used to POST a real scan of tvcp.app on"
+            echo "every deploy, spending real Apify budget against the live"
+            echo "production Reddit provider. Combined with the background"
+            echo "job's retry-up-to-5x behavior, two deploys pushed back to"
+            echo "back were found to spawn roughly 10-20 real Apify actor"
+            echo "runs from this step alone (2026-08-19). Re-enable"
+            echo "deliberately -- e.g. behind a manual workflow_dispatch"
+            echo "input -- rather than running it unconditionally on every"
+            echo "push."
           } > "$OUT" 2>&1
           cat "$OUT"
           echo "proof_b64=$(base64 -w0 "$OUT")" >> "$GITHUB_OUTPUT"
@@ -245,3 +227,4 @@ jobs:
 # trigger: Reddit discovery reliability -- retry transient Apify failures, chunked query batches, retrying status (2026-08-19T17:12:55Z)
 # trigger: Simplify Reddit query generation -- plain natural-language, no boolean/quotes, capped 3/3/2 (2026-08-19T22:27:09Z)
 # trigger: Cap discovery-terms UI add-controls to 3/3/2 per category (2026-08-19T23:02:09Z)
+# trigger: checkpoint Reddit discovery across job retries, 9-query cap with per-query post budget, disable real-scan prove step (2026-08-19T23:54:27Z)

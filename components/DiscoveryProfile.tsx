@@ -36,7 +36,7 @@ export type DiscoveryProfileResponse = {
  * Only these reach the backend as overrides; the rest are read-only context.
  *
  * `max` mirrors the hard per-bucket caps redditQueryFamilies() enforces
- * server-side (3 product/category, 3 pain/problem, 2 competitor) -- capping
+ * server-side (3 product/category, 3 pain/problem, 3 competitor) -- capping
  * the add UI to the same numbers means every term a user adds here is one
  * that will actually be searched, rather than letting them stockpile terms
  * past the point where the backend silently stops using them.
@@ -58,7 +58,7 @@ const EDITABLE_FIELDS = [
     key: "competitors" as const,
     label: "Competitors / alternatives",
     hint: "Tools people compare you with or switch from.",
-    max: 2,
+    max: 3,
   },
 ];
 

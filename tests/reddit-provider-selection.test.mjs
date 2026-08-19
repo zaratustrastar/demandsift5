@@ -206,6 +206,43 @@ test("discover() returns the shared contract the scan workflow consumes", async 
   assert.ok(result.diagnostics.queryCount > 0);
 });
 
+test("by default, each query runs as its own dedicated actor run with a per-query post budget", async () => {
+  // Regression test for a real production finding: a shared scan-wide post
+  // budget divided across query batches meant more (smaller, more precise)
+  // queries produced a THINNER per-query budget, not a bigger one. Each
+  // query should now get its own run and its own fixed postsPerQuery budget
+  // -- tvcp's 3 query families should produce 3 separate actor starts, each
+  // with exactly one startUrls entry and maxPostsCount equal to the default
+  // postsPerQuery (20), not a divided-down fraction of some larger total.
+  const starts = [];
+  const provider = new HarshmaurRedditProvider({
+    token: "test-token",
+    // No queriesPerRun override: this is exactly the production default.
+    fetchImpl: async (url, init = {}) => {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs") && init.method === "POST") {
+        const input = JSON.parse(init.body);
+        starts.push(input);
+        return new Response(JSON.stringify({
+          data: { id: `run_${starts.length}`, status: "SUCCEEDED", defaultDatasetId: `ds_${starts.length}` },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected mocked Harshmaur URL: ${href}`);
+    },
+  });
+
+  await provider.discover(tvcp);
+
+  assert.equal(starts.length, 3, `expected one dedicated actor run per query family, got ${starts.length}`);
+  for (const input of starts) {
+    assert.equal(input.startUrls.length, 1, "each default-mode run should carry exactly one query");
+    assert.equal(input.maxPostsCount, 20, "expected the default postsPerQuery budget, not a divided-down total");
+  }
+});
+
 test("a Harshmaur run that times out with zero retained records is retried, not silently returned as a clean zero", async () => {
   // Regression test for the exact bug behind a real production report: an
   // Apify run can end TIMED-OUT with a datasetId allocated but nothing ever

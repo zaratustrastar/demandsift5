@@ -209,11 +209,14 @@ export function buildHarshmaurInput(
  * actor build rejects -- see `redditSearchUrl`).
  *
  * `maxPostsCount` is requested as a flat total across every `startUrls`
- * entry, matching the schema's documented "total across all inputs"
- * semantics used for `searchTerms` too. Whether the actor can starve later
- * URLs in a many-URL run under that shared budget has not been verified
- * against a live run; if a production scan shows early URLs crowding out
- * later ones, splitting into per-URL runs is the fix.
+ * entry in THIS call, matching the schema's documented "total across all
+ * inputs" semantics used for `searchTerms` too -- a many-URL run can starve
+ * later URLs under a shared budget. `queriesPerRun` defaults to 1 (see its
+ * doc comment) specifically so each call here normally has exactly one
+ * `startUrls` entry, which makes that starvation risk moot: the caller
+ * multiplies `postsPerQuery` by the number of queries actually in this
+ * batch, so `targetTotal` here is already sized for however many URLs are
+ * about to share it.
  */
 function directDiscoveryInputFromFamilies(
   families: RedditQueryFamily[],
@@ -761,10 +764,26 @@ export class HarshmaurRedditProvider implements RedditProvider {
    * smaller batches, each its own retryable run, bounds how much a single
    * slow/failing batch can cost the others and is the fix that doc comment
    * on buildHarshmaurDirectInput anticipated.
+   *
+   * Defaults to 1 -- one query, one dedicated actor run -- rather than
+   * batching several queries per run. This is the finest possible retry
+   * granularity (a failing query only ever loses its own results, never a
+   * batch-mate's) and removes the within-run starvation risk entirely,
+   * since a single-query run has nothing else to starve.
    */
   private readonly queriesPerRun: number;
   /** Bounded retry attempts per query batch for transient Apify failures. */
   private readonly discoveryRetryAttempts: number;
+  /**
+   * Posts requested per query, not divided down as query count grows. A
+   * scan's total Reddit post budget scales with however many queries it
+   * actually runs (up to `postsPerQuery * families.length`) rather than a
+   * single scan-wide total getting split thinner as more queries are added
+   * -- the earlier design divided one shared total across all query
+   * batches, so a scan with more (smaller, more targeted) queries ended up
+   * requesting fewer posts per query, not more.
+   */
+  private readonly postsPerQuery: number;
 
   constructor(input: {
     actorId?: string;
@@ -788,6 +807,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     enrichmentComments?: number;
     queriesPerRun?: number;
     discoveryRetryAttempts?: number;
+    postsPerQuery?: number;
     fetchImpl?: typeof fetch;
   }) {
     // Apify's API path takes an actor id or `username~actor-name`; a slash
@@ -802,8 +822,9 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(1, Math.min(50, Math.trunc(input.enrichmentComments ?? 6)));
-    this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 4)));
+    this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 1)));
     this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
+    this.postsPerQuery = Math.max(5, Math.min(100, Math.trunc(input.postsPerQuery ?? 20)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
@@ -1078,7 +1099,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     if (this.discoveryMode === "direct-url") {
       const families = redditQueryFamilies(request, { maxQueries: this.maxQueries });
       if (families.length > 0) {
-        return this.runChunkedDirectDiscovery(request, families, targetTotal, options?.onRetry);
+        return this.runChunkedDirectDiscovery(request, families, options?.onRetry);
       }
     }
 
@@ -1108,7 +1129,6 @@ export class HarshmaurRedditProvider implements RedditProvider {
   private async runChunkedDirectDiscovery(
     request: RedditSearchRequest,
     families: RedditQueryFamily[],
-    targetTotal: number,
     onRetry?: (notice: RedditDiscoveryRetryNotice) => void,
   ): Promise<RedditDiscoveryResponse> {
     const chunkSize = Math.min(families.length, this.queriesPerRun);
@@ -1118,7 +1138,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
     }
 
     const runChunk = (chunkFamilies: RedditQueryFamily[], chunkIndex: number) => {
-      const perChunkTarget = Math.max(10, Math.ceil(targetTotal / chunks.length));
+      // Scales with how many queries are actually in this chunk, not with
+      // the overall scan-wide acquisition target -- more queries means more
+      // total posts requested, not a thinner slice of a fixed pie.
+      const perChunkTarget = this.postsPerQuery * chunkFamilies.length;
       const directInput = directDiscoveryInputFromFamilies(chunkFamilies, perChunkTarget);
       const searchPlan: RedditSearchPlanEntry[] = chunkFamilies.map((family) => ({
         lane: family.lane,

@@ -776,7 +776,13 @@ export async function runScan(
     const lookbackDays = 7;
     const since = new Date(Date.parse(scan.createdAt) - lookbackDays * 86_400_000).toISOString();
     await setStage(scan, "discovery", "active");
-    const discovery = await redditProvider.discover(
+    // A checkpoint from a prior job attempt of this same scan is always safe
+    // to reuse: discoveryProfile and discoveryOverrides are both fixed once
+    // a scan starts, so discovery's inputs cannot have changed between
+    // attempts. Reusing it skips a real, paid Apify call entirely instead of
+    // re-running discovery from scratch on every retry.
+    const persistedDiscovery = scan.redditDiscovery;
+    const discovery = persistedDiscovery ?? await redditProvider.discover(
       {
         queries: {
           productTerms: business.productTerms.value,
@@ -829,12 +835,18 @@ export async function runScan(
       // "searched and found nothing" outcome. A degraded run means coverage
       // was lost to retries being exhausted, not that the search completed
       // cleanly with nothing to show -- that must never be reported as a
-      // successful empty scan.
+      // successful empty scan. Never checkpointed either, so the next job
+      // attempt correctly retries discovery instead of reusing this failure.
       throw new ApiError(
         "Reddit discovery timed out and returned no usable results after retrying.",
         503,
         "reddit_discovery_failed",
       );
+    }
+    if (!persistedDiscovery) {
+      scan.redditDiscovery = discovery;
+      scan.updatedAt = new Date().toISOString();
+      await repository.saveScan(scan);
     }
     /**
      * `now` here is the sanity-check ceiling deterministicReason() uses to

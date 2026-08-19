@@ -27,7 +27,7 @@ import { normalizeSearchText } from "@/lib/intelligence/opportunity-ranking";
  * many combinations the source data happens to allow:
  *   - product/category: up to 3 queries
  *   - pain/problem: up to 3 queries
- *   - competitor: up to 2 queries
+ *   - competitor: up to 3 queries
  */
 
 export interface RedditQueryFamily {
@@ -37,7 +37,7 @@ export interface RedditQueryFamily {
 
 const MAX_PRODUCT_QUERIES = 3;
 const MAX_PAIN_QUERIES = 3;
-const MAX_COMPETITOR_QUERIES = 2;
+const MAX_COMPETITOR_QUERIES = 3;
 const TOTAL_QUERY_CAP = MAX_PRODUCT_QUERIES + MAX_PAIN_QUERIES + MAX_COMPETITOR_QUERIES;
 
 /**

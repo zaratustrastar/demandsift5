@@ -2316,10 +2316,19 @@ export function createRedditProviderFromEnv(
       // lowered so a run has fewer pages to navigate, and timeoutMs is
       // raised to the existing bound's ceiling so a run that is still
       // making progress is not cut off before it can finish.
-      maxQueries: positiveInteger(env.HARSHMAUR_REDDIT_MAX_QUERIES, 8, 1, 20),
+      maxQueries: positiveInteger(env.HARSHMAUR_REDDIT_MAX_QUERIES, 9, 1, 20),
       discoveryMode: env.HARSHMAUR_REDDIT_DISCOVERY_MODE?.trim() === "search-terms"
         ? "search-terms"
         : "direct-url",
+      // One query per dedicated actor run by default: finest retry
+      // granularity (a failing query only ever loses its own results) and
+      // no within-run starvation risk. postsPerQuery is the deliberate
+      // per-query post budget -- a scan's total requested posts scales with
+      // however many queries it runs (queriesPerRun batches x postsPerQuery
+      // x queries-per-batch) rather than one shared total getting divided
+      // thinner as more queries are added.
+      queriesPerRun: positiveInteger(env.HARSHMAUR_REDDIT_QUERIES_PER_RUN, 1, 1, 20),
+      postsPerQuery: positiveInteger(env.HARSHMAUR_REDDIT_POSTS_PER_QUERY, 20, 5, 100),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 900_000),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),

@@ -89,7 +89,7 @@ test("uses the profile phrase close to verbatim rather than mechanically shorten
   assert.equal(pain.query, "i cant figure out how to limit how long my kid watches tv every single day");
 });
 
-test("enforces per-bucket caps: max 3 product/category, max 3 pain, max 2 competitor", () => {
+test("enforces per-bucket caps: max 3 product/category, max 3 pain, max 3 competitor", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: ["term one", "term two", "term three", "term four", "term five"],
@@ -104,8 +104,8 @@ test("enforces per-bucket caps: max 3 product/category, max 3 pain, max 2 compet
   const byLane = (lane) => families.filter((f) => f.lane === lane);
   assert.ok(byLane("category_recommendation").length <= 3, `too many product/category queries: ${byLane("category_recommendation").length}`);
   assert.ok(byLane("pain").length <= 3, `too many pain queries: ${byLane("pain").length}`);
-  assert.ok(byLane("brand_competitor_mentions").length <= 2, `too many competitor queries: ${byLane("brand_competitor_mentions").length}`);
-  assert.ok(families.length <= 8, `expected at most 8 total queries, got ${families.length}`);
+  assert.ok(byLane("brand_competitor_mentions").length <= 3, `too many competitor queries: ${byLane("brand_competitor_mentions").length}`);
+  assert.ok(families.length <= 9, `expected at most 9 total queries, got ${families.length}`);
 });
 
 test("category phrases are prioritized over product terms when both compete for the product/category cap", () => {

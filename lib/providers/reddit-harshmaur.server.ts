@@ -16,6 +16,8 @@ import type {
 } from "@/lib/providers/contracts";
 import { contentFingerprint } from "@/lib/intelligence/opportunity-ranking";
 import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
+import { redditQueryFamilies } from "@/lib/providers/reddit-query-families";
+import { redditSearchUrl } from "@/lib/providers/reddit-search-url";
 
 /**
  * Adapter for the `harshmaur/reddit-scraper` Apify actor.
@@ -73,6 +75,44 @@ export interface HarshmaurEnrichmentInput {
   maxCommentsCount: 0;
   maxCommentsPerPost: number;
   maxCommunitiesCount: 0;
+}
+
+/**
+ * Input for Direct Reddit search-page URLs (`startUrls` + `fastMode:false`),
+ * the primary discovery path.
+ *
+ * A manual side-by-side Apify test found this route -- Harshmaur driving an
+ * actual Playwright pass over `reddit.com/search/?q=...` -- surfaced
+ * substantially more relevant conversations than the plain `searchTerms`
+ * path at the same post count, because it goes through Reddit's real search
+ * page rather than a faster internal shortcut. `searchTerms` always uses
+ * that faster path regardless of `fastMode`, which is why this is a
+ * genuinely different actor mode rather than a flag on the existing one.
+ *
+ * `searchSort`/`searchTime`/`postedAfter`/`commentedAfter` are Keyword-
+ * search-only fields per the actor's own schema and do not apply to
+ * `startUrls`; the time window instead lives in each URL's own `&t=`
+ * parameter, and -- as with every other retrieval path here -- is still
+ * re-verified per record after scraping rather than trusted.
+ *
+ * Comment search is not available in this mode (`searchComments` is a
+ * Keyword-search-only option too), so this is posts-only; comments still
+ * arrive later through per-thread enrichment via `HarshmaurEnrichmentInput`.
+ */
+export interface HarshmaurDirectDiscoveryInput {
+  searchTerms: [];
+  searchPosts: true;
+  searchComments: false;
+  searchCommunities: false;
+  startUrls: { url: string }[];
+  fastMode: false;
+  crawlCommentsPerPost: false;
+  includeNSFW: false;
+  maxPostsCount: number;
+  maxCommentsCount: 0;
+  maxCommentsPerPost: 0;
+  maxCommunitiesCount: 0;
+  proxy: { useApifyProxy: true; apifyProxyGroups: ["RESIDENTIAL"] };
 }
 
 export interface HarshmaurRunSummary {
@@ -155,6 +195,43 @@ export function buildHarshmaurInput(
     maxCommentsCount,
     maxCommentsPerPost: 0,
     maxCommunitiesCount: 0,
+  };
+}
+
+/**
+ * Build the Direct-URL discovery input: one Reddit search-page URL per
+ * query family, each URL generated deterministically rather than ever
+ * copied from Reddit's own UI (which carries extra tracking params this
+ * actor build rejects -- see `redditSearchUrl`).
+ *
+ * `maxPostsCount` is requested as a flat total across every `startUrls`
+ * entry, matching the schema's documented "total across all inputs"
+ * semantics used for `searchTerms` too. Whether the actor can starve later
+ * URLs in a many-URL run under that shared budget has not been verified
+ * against a live run; if a production scan shows early URLs crowding out
+ * later ones, splitting into per-URL runs is the fix.
+ */
+export function buildHarshmaurDirectInput(
+  request: RedditSearchRequest,
+  options: { targetTotal: number; maxQueries?: number },
+): HarshmaurDirectDiscoveryInput {
+  const families = redditQueryFamilies(request, { maxQueries: options.maxQueries ?? 12 });
+  const startUrls = families.map((family) => ({ url: redditSearchUrl(family.query, { time: "week" }) }));
+
+  return {
+    searchTerms: [],
+    searchPosts: true,
+    searchComments: false,
+    searchCommunities: false,
+    startUrls,
+    fastMode: false,
+    crawlCommentsPerPost: false,
+    includeNSFW: false,
+    maxPostsCount: Math.max(1, Math.trunc(options.targetTotal)),
+    maxCommentsCount: 0,
+    maxCommentsPerPost: 0,
+    maxCommunitiesCount: 0,
+    proxy: { useApifyProxy: true, apifyProxyGroups: ["RESIDENTIAL"] },
   };
 }
 
@@ -591,6 +668,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
   private readonly token: string;
   private readonly maximumItems: number;
   private readonly maxTerms: number;
+  private readonly maxQueries: number;
+  private readonly discoveryMode: "direct-url" | "search-terms";
   private readonly timeoutMs: number;
   private readonly maxChargeUsd: number;
   private readonly enrichmentLimit: number;
@@ -602,6 +681,17 @@ export class HarshmaurRedditProvider implements RedditProvider {
     token: string;
     maximumItems?: number;
     maxTerms?: number;
+    maxQueries?: number;
+    /**
+     * "direct-url" (default) drives Harshmaur's `startUrls` + `fastMode:false`
+     * Playwright search-page path, which a manual test found materially more
+     * relevant than plain `searchTerms` at the same volume. "search-terms"
+     * keeps the original, faster, lower-precision path as an explicit
+     * operational fallback rather than deleting it -- flip this if Direct
+     * URL discovery underperforms in production rather than silently
+     * retrying with a second paid run on every call.
+     */
+    discoveryMode?: "direct-url" | "search-terms";
     timeoutMs?: number;
     maxChargeUsd?: number;
     enrichmentLimit?: number;
@@ -614,6 +704,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.token = input.token;
     this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 40)));
     this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 8)));
+    this.maxQueries = Math.max(1, Math.min(20, Math.trunc(input.maxQueries ?? 12)));
+    this.discoveryMode = input.discoveryMode ?? "direct-url";
     this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
@@ -633,7 +725,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
    * proven in the Trudax provider.
    */
   private async runActor(
-    actorInput: HarshmaurActorInput | HarshmaurEnrichmentInput,
+    actorInput: HarshmaurActorInput | HarshmaurEnrichmentInput | HarshmaurDirectDiscoveryInput,
     platformMaxItems: number,
   ): Promise<unknown[]> {
     const controller = new AbortController();
@@ -764,18 +856,16 @@ export class HarshmaurRedditProvider implements RedditProvider {
     }
   }
 
-  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
-    const targetTotal = Math.min(this.maximumItems, Math.max(40, request.limit));
-    const actorInput = buildHarshmaurInput(request, {
-      targetTotal,
-      maxTerms: this.maxTerms,
-    });
-    if (actorInput.searchTerms.length === 0) {
-      throw new Error("The company context did not produce any usable Reddit search terms.");
-    }
-
-    // Headroom over the target so per-term rounding cannot silently truncate,
-    // while still capping spend at the platform level.
+  /** Shared between both discovery modes: run the actor, parse the dataset,
+   * and assemble the response the rest of the pipeline consumes. */
+  private async runDiscovery(
+    actorInput: HarshmaurDirectDiscoveryInput | HarshmaurActorInput,
+    request: RedditSearchRequest,
+    searchPlan: RedditSearchPlanEntry[],
+    targetTotal: number,
+  ): Promise<RedditDiscoveryResponse> {
+    // Headroom over the target so per-query rounding cannot silently
+    // truncate, while still capping spend at the platform level.
     const platformMaxItems = Math.min(1_000, Math.ceil(targetTotal * 1.3));
     const payload = await this.runActor(actorInput, platformMaxItems);
     const window = sevenDayWindow();
@@ -783,14 +873,6 @@ export class HarshmaurRedditProvider implements RedditProvider {
       ? request.since
       : window.since;
     const { candidates, summary } = parseHarshmaurDataset(payload, { since });
-
-    // Each search term is its own plan entry, so per-term yield stays
-    // attributable all the way through the report.
-    const searchPlan: RedditSearchPlanEntry[] = actorInput.searchTerms.map((term) => ({
-      lane: "category_recommendation" as RedditSearchLane,
-      query: term,
-      seed: term,
-    }));
 
     const rejected: Record<string, number> = {
       invalid_record: 0,
@@ -807,19 +889,67 @@ export class HarshmaurRedditProvider implements RedditProvider {
       else rejected.invalid_record += value;
     }
 
+    const laneQueryCounts: Partial<Record<RedditSearchLane, number>> = {};
+    for (const entry of searchPlan) {
+      laneQueryCounts[entry.lane] = (laneQueryCounts[entry.lane] ?? 0) + 1;
+    }
+
     return {
       candidates,
       searchPlan,
       sourceMode: this.sourceMode,
       diagnostics: {
-        queryCount: actorInput.searchTerms.length,
+        queryCount: searchPlan.length,
         fetchedCandidates: summary.rawRecords,
         normalizedCandidates: candidates.length,
         verifiedRecentCandidates: candidates.length,
         rejectedByReason: rejected as RedditDiscoveryDiagnostics["rejectedByReason"],
-        laneQueryCounts: { category_recommendation: actorInput.searchTerms.length },
+        laneQueryCounts,
       },
     };
+  }
+
+  /**
+   * Primary discovery path: Reddit search-page URLs via `startUrls` +
+   * `fastMode:false` (see `HarshmaurDirectDiscoveryInput`). Falls through to
+   * the legacy `searchTerms` path only when the Discovery Profile is too
+   * sparse to produce a single usable query family -- not on an actor
+   * failure, which is left to propagate rather than silently doubling cost
+   * with a second paid run. `discoveryMode: "search-terms"` selects the
+   * legacy path outright as an operational escape hatch.
+   */
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    const targetTotal = Math.min(this.maximumItems, Math.max(40, request.limit));
+
+    if (this.discoveryMode === "direct-url") {
+      const families = redditQueryFamilies(request, { maxQueries: this.maxQueries });
+      if (families.length > 0) {
+        const directInput = buildHarshmaurDirectInput(request, {
+          targetTotal,
+          maxQueries: this.maxQueries,
+        });
+        const searchPlan: RedditSearchPlanEntry[] = families.map((family) => ({
+          lane: family.lane,
+          query: family.query,
+          seed: family.query,
+        }));
+        return this.runDiscovery(directInput, request, searchPlan, targetTotal);
+      }
+    }
+
+    const actorInput = buildHarshmaurInput(request, {
+      targetTotal,
+      maxTerms: this.maxTerms,
+    });
+    if (actorInput.searchTerms.length === 0) {
+      throw new Error("The company context did not produce any usable Reddit search terms.");
+    }
+    const searchPlan: RedditSearchPlanEntry[] = actorInput.searchTerms.map((term) => ({
+      lane: "category_recommendation" as RedditSearchLane,
+      query: term,
+      seed: term,
+    }));
+    return this.runDiscovery(actorInput, request, searchPlan, targetTotal);
   }
 
   /**

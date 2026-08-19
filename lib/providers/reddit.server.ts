@@ -2251,6 +2251,15 @@ export function createRedditProviderFromEnv(
       // once real yield-per-term data justifies it.
       maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 40, 1, 400),
       maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 8, 1, 25),
+      // Primary discovery path: Reddit search-page URLs via startUrls +
+      // fastMode:false, found materially more relevant than plain
+      // searchTerms in manual testing. maxTerms above still governs the
+      // "search-terms" fallback mode, kept as an operational escape hatch
+      // via HARSHMAUR_REDDIT_DISCOVERY_MODE rather than removed.
+      maxQueries: positiveInteger(env.HARSHMAUR_REDDIT_MAX_QUERIES, 12, 1, 20),
+      discoveryMode: env.HARSHMAUR_REDDIT_DISCOVERY_MODE?.trim() === "search-terms"
+        ? "search-terms"
+        : "direct-url",
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 600_000),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),

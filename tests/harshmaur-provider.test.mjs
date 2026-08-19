@@ -25,13 +25,23 @@ const natural = u(cc(
   (await readFile(new URL("../lib/providers/reddit-natural-queries.ts", import.meta.url), "utf8"))
     .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
     .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking)), "n.ts"));
+const queryFamilies = u(cc(
+  (await readFile(new URL("../lib/providers/reddit-query-families.ts", import.meta.url), "utf8"))
+    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
+    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
+    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
+    .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural)), "qf.ts"));
+const searchUrl = u(cc(
+  await readFile(new URL("../lib/providers/reddit-search-url.ts", import.meta.url), "utf8"), "su.ts"));
 
 let src = await readFile(new URL("../lib/providers/reddit-harshmaur.server.ts", import.meta.url), "utf8");
 src = src
   .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
   .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
   .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural));
+  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural))
+  .replaceAll('"@/lib/providers/reddit-query-families"', JSON.stringify(queryFamilies))
+  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl));
 const harshmaur = await import(u(cc(src, "h.ts")));
 
 const NOW = new Date("2026-08-16T12:00:00.000Z");

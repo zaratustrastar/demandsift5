@@ -29,13 +29,23 @@ const natural = u(cc(
   (await readFile(here("../lib/providers/reddit-natural-queries.ts"), "utf8"))
     .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
     .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking)), "n.ts"));
+const queryFamilies = u(cc(
+  (await readFile(here("../lib/providers/reddit-query-families.ts"), "utf8"))
+    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
+    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
+    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
+    .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural)), "qf.ts"));
+const searchUrl = u(cc(
+  await readFile(here("../lib/providers/reddit-search-url.ts"), "utf8"), "su.ts"));
 
 let harshSrc = await readFile(here("../lib/providers/reddit-harshmaur.server.ts"), "utf8");
 harshSrc = harshSrc
   .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
   .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
   .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural));
+  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural))
+  .replaceAll('"@/lib/providers/reddit-query-families"', JSON.stringify(queryFamilies))
+  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl));
 const harshmaurModule = u(cc(harshSrc, "h.ts"));
 const { HarshmaurRedditProvider } = await import(harshmaurModule);
 
@@ -280,39 +290,96 @@ test("thread enrichment crawls the candidate's own thread and marks it verified"
   assert.ok(conversation.threadContext.includes("A real reply to the post"));
 });
 
-test("actor input never leaks intent sentences or startUrls", async () => {
+function capturingFetch(records = []) {
   let captured = null;
-  const provider = new HarshmaurRedditProvider({
-    token: "t",
-    fetchImpl: async (url, init) => {
-      const href = String(url);
-      if (href.includes("/v2/actors/") && href.includes("/runs")) {
-        captured = JSON.parse(init.body);
-        return new Response(JSON.stringify({
-          data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" },
-        }), { status: 200 });
-      }
-      if (href.includes("/v2/actor-runs/")) {
-        return new Response(JSON.stringify({
-          data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" },
-        }), { status: 200 });
-      }
-      return new Response("[]", { status: 200 });
-    },
-  });
+  const impl = async (url, init) => {
+    const href = String(url);
+    if (href.includes("/v2/actors/") && href.includes("/runs")) {
+      captured = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" },
+      }), { status: 200 });
+    }
+    if (href.includes("/v2/actor-runs/")) {
+      return new Response(JSON.stringify({
+        data: { id: "r", status: "SUCCEEDED", defaultDatasetId: "d" },
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify(records), { status: 200 });
+  };
+  return { impl, get captured() { return captured; } };
+}
+
+test("discover() defaults to Direct URL discovery: real reddit.com search URLs, no leaked platform fields", async () => {
+  const fetcher = capturingFetch();
+  const provider = new HarshmaurRedditProvider({ token: "t", fetchImpl: fetcher.impl });
   await provider.discover(tvcp);
+  const captured = fetcher.captured;
   assert.ok(captured);
+  assert.equal(captured.searchTerms.length, 0, "Direct URL mode does not use searchTerms");
+  assert.equal(captured.searchPosts, true);
+  assert.equal(captured.searchComments, false, "comment search is a Keyword-search-only option");
   assert.equal(captured.searchCommunities, false);
-  assert.equal(captured.searchSort, "new");
-  assert.equal(captured.searchTime, "week");
+  assert.equal(captured.fastMode, false);
   assert.equal(captured.crawlCommentsPerPost, false);
   assert.equal(captured.includeNSFW, false);
-  assert.equal("startUrls" in captured, false);
+  // searchSort/searchTime/postedAfter/commentedAfter are Keyword-search-only
+  // fields per the actor's own schema; they must not appear here, since the
+  // time window instead lives in each URL's own &t= parameter.
+  for (const field of ["searchSort", "searchTime", "postedAfter", "commentedAfter"]) {
+    assert.equal(field in captured, false, `${field} does not apply to startUrls`);
+  }
   // maxItems belongs on the run URL, never in the actor input.
   assert.equal("maxItems" in captured, false);
+  assert.ok(Array.isArray(captured.startUrls) && captured.startUrls.length > 0);
+  for (const entry of captured.startUrls) {
+    const url = new URL(entry.url);
+    assert.equal(url.origin, "https://www.reddit.com");
+    assert.equal(url.pathname, "/search/");
+    assert.deepEqual([...url.searchParams.keys()].sort(), ["q", "t"]);
+    assert.equal(url.searchParams.get("t"), "week");
+  }
+});
+
+test("the legacy searchTerms path stays reachable as an explicit fallback mode", async () => {
+  const fetcher = capturingFetch();
+  const provider = new HarshmaurRedditProvider({
+    token: "t",
+    discoveryMode: "search-terms",
+    fetchImpl: fetcher.impl,
+  });
+  await provider.discover(tvcp);
+  const captured = fetcher.captured;
+  assert.ok(captured);
+  assert.equal("startUrls" in captured, false);
+  assert.equal(captured.searchSort, "new");
+  assert.equal(captured.searchTime, "week");
+  assert.ok(captured.searchTerms.length > 0);
   for (const term of captured.searchTerms) {
     assert.ok(term.split(" ").length <= 4, `intent-shaped term: "${term}"`);
   }
+});
+
+test("Direct URL discovery falls back to the searchTerms builder when the profile yields no query families", async () => {
+  // redditQueryFamilies includes naturalSearchTerms's own broad output as
+  // one of its families, so a profile sparse enough to empty out one
+  // empties out the other too -- both attempts land on the same honest
+  // "no usable Reddit search terms" error rather than one silently sending
+  // zero startUrls.
+  const emptyProfile = {
+    queries: { productTerms: [], customerProblems: [], competitors: [], excludedTerms: [], buyerIntent: [] },
+    limit: 100,
+  };
+  const provider = new HarshmaurRedditProvider({ token: "t", fetchImpl: capturingFetch().impl });
+  await assert.rejects(
+    () => provider.discover(emptyProfile),
+    /did not produce any usable Reddit search terms/,
+  );
+});
+
+test("an actual actor failure propagates rather than triggering a second paid run through the fallback", async () => {
+  const failing = new HarshmaurRedditProvider({ token: "t", fetchImpl: stubApify([], { finalStatus: "FAILED" }) });
+  await assert.rejects(() => failing.discover(tvcp), /ended with status FAILED/);
 });
 
 test("execution starts asynchronously and never uses run-sync", async () => {

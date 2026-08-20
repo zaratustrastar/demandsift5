@@ -2329,6 +2329,16 @@ export function createRedditProviderFromEnv(
       // thinner as more queries are added.
       queriesPerRun: positiveInteger(env.HARSHMAUR_REDDIT_QUERIES_PER_RUN, 1, 1, 20),
       postsPerQuery: positiveInteger(env.HARSHMAUR_REDDIT_POSTS_PER_QUERY, 20, 5, 100),
+      // One dedicated run per query (above) means a 9-query scan wants 9
+      // simultaneous actor runs; a production scan with just 6 queries was
+      // observed spawning ~23 Apify runs because this account's concurrent
+      // run limit is below that, so the excess queued as "READY" and
+      // per-query retries (meant for real transient failures) kept
+      // starting fresh runs for chunks that were only ever queued, not
+      // failed. Chunks now execute through a small worker pool instead of
+      // all at once -- this bounds how many runs are ever open for one
+      // scan regardless of how many queries it has.
+      maxConcurrentDiscoveryRuns: positiveInteger(env.HARSHMAUR_REDDIT_MAX_CONCURRENT_RUNS, 3, 1, 9),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 900_000),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),

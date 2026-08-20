@@ -784,6 +784,20 @@ export class HarshmaurRedditProvider implements RedditProvider {
    * requesting fewer posts per query, not more.
    */
   private readonly postsPerQuery: number;
+  /**
+   * How many query-batch chunks (each its own Apify actor run) may be in
+   * flight at the same time. `queriesPerRun` defaulting to 1 means a
+   * 9-query scan now wants 9 dedicated runs; firing all of them at once
+   * with no cap regularly exceeded this Apify account's concurrent-run
+   * limit, which queues the excess as "READY" runs rather than rejecting
+   * them outright. Client-side retries (meant for genuine transient
+   * failures) then kept starting fresh runs for chunks that were merely
+   * queued, not failed, compounding a handful of queries into dozens of
+   * runs. Chunks now run through a small worker pool instead of all at
+   * once, so at most this many actor runs are ever open simultaneously
+   * regardless of how many queries a scan has.
+   */
+  private readonly maxConcurrentDiscoveryRuns: number;
 
   constructor(input: {
     actorId?: string;
@@ -808,6 +822,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     queriesPerRun?: number;
     discoveryRetryAttempts?: number;
     postsPerQuery?: number;
+    maxConcurrentDiscoveryRuns?: number;
     fetchImpl?: typeof fetch;
   }) {
     // Apify's API path takes an actor id or `username~actor-name`; a slash
@@ -825,6 +840,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 1)));
     this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
     this.postsPerQuery = Math.max(5, Math.min(100, Math.trunc(input.postsPerQuery ?? 20)));
+    this.maxConcurrentDiscoveryRuns = Math.max(1, Math.min(9, Math.trunc(input.maxConcurrentDiscoveryRuns ?? 3)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
@@ -850,6 +866,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
       authorization: `Bearer ${this.token}`,
       "content-type": "application/json",
     };
+    // Set once the run actually exists, so a client-side give-up (below)
+    // can tell Apify to actually cancel it instead of leaving it
+    // running/queued while a retry starts a second one on top of it.
+    let capturedRunId = "";
 
     const readJson = async (response: Response): Promise<unknown> => {
       const raw = await response.text();
@@ -935,6 +955,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
       }
       const started = runData(await readJson(startResponse));
       const runId = str(started.id);
+      capturedRunId = runId;
       let status = str(started.status).toUpperCase();
       let datasetId = str(started.defaultDatasetId);
       let statusMessage = str(started.statusMessage);
@@ -1000,6 +1021,22 @@ export class HarshmaurRedditProvider implements RedditProvider {
       return payload;
     } catch (error) {
       if (controller.signal.aborted) {
+        if (capturedRunId) {
+          // Best-effort: release the run on Apify's side so it stops
+          // occupying a concurrency slot and, if it later finishes on its
+          // own, doesn't bill for a run this call already gave up on and a
+          // retry is about to duplicate. Never let this delay or mask the
+          // real timeout error below.
+          const abortEndpoint = new URL(
+            `/v2/actor-runs/${encodeURIComponent(capturedRunId)}/abort`,
+            "https://api.apify.com",
+          );
+          await this.fetchImpl(abortEndpoint, {
+            method: "POST",
+            headers,
+            signal: AbortSignal.timeout(5_000),
+          }).catch(() => {});
+        }
         throw new ApifyTransientError(
           `The Harshmaur run timed out after ${Math.ceil(this.timeoutMs / 1_000)} seconds.`,
         );
@@ -1160,9 +1197,29 @@ export class HarshmaurRedditProvider implements RedditProvider {
 
     if (chunks.length <= 1) return runChunk(families, 0);
 
-    const outcomes = await Promise.allSettled(
-      chunks.map((chunkFamilies, index) => runChunk(chunkFamilies, index)),
-    );
+    // Bounded worker pool rather than firing every chunk's actor-start
+    // request at once: this account's Apify concurrency limit is well
+    // below `chunks.length` once a scan has 6-9 queries, and starting them
+    // all simultaneously queued the excess as "READY" runs which then
+    // looked stuck to the client-side retry logic, which started yet more
+    // runs on top of the still-queued ones. Capping concurrency keeps at
+    // most `maxConcurrentDiscoveryRuns` runs open at a time; a finished
+    // slot (success or retries-exhausted) picks up the next chunk.
+    const outcomes: PromiseSettledResult<RedditDiscoveryResponse>[] = new Array(chunks.length);
+    let nextChunkIndex = 0;
+    const worker = async () => {
+      while (nextChunkIndex < chunks.length) {
+        const index = nextChunkIndex;
+        nextChunkIndex += 1;
+        try {
+          outcomes[index] = { status: "fulfilled", value: await runChunk(chunks[index], index) };
+        } catch (reason) {
+          outcomes[index] = { status: "rejected", reason };
+        }
+      }
+    };
+    const workerCount = Math.min(this.maxConcurrentDiscoveryRuns, chunks.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
     const succeeded: RedditDiscoveryResponse[] = [];
     const failures: unknown[] = [];

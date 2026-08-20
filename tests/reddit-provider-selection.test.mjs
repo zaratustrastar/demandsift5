@@ -243,6 +243,64 @@ test("by default, each query runs as its own dedicated actor run with a per-quer
   }
 });
 
+test("chunk execution is capped by maxConcurrentDiscoveryRuns instead of firing every query's actor run at once", async () => {
+  // Regression test for a real production report: a scan with 6 user-picked
+  // queries (3 product, 3 pain, 0 competitors) spawned roughly 23 Apify
+  // runs. Root cause: queriesPerRun defaults to 1, so 6 queries meant 6
+  // chunks, and every chunk's actor-start request fired at once with no
+  // concurrency cap -- well above this Apify account's concurrent-run
+  // limit, which queued the excess as "READY" runs that client-side
+  // per-chunk retries then piled fresh runs on top of. This pins the fix:
+  // at most `maxConcurrentDiscoveryRuns` actor-start requests may be
+  // outstanding at once, and all 6 chunks still eventually complete.
+  const sixQueries = {
+    queries: {
+      productTerms: [],
+      productCategories: ["project management software", "team task tracker", "kanban board app"],
+      customerProblems: ["projects scattered across tools", "cant see project status", "leads falling through cracks"],
+      buyerIntent: [],
+      competitors: [],
+      excludedTerms: [],
+    },
+    limit: 250,
+    since: new Date(Date.now() - 7 * 86_400_000).toISOString(),
+  };
+
+  let inFlight = 0;
+  let maxObservedInFlight = 0;
+  let totalStarts = 0;
+  const provider = new HarshmaurRedditProvider({
+    token: "test-token",
+    maxConcurrentDiscoveryRuns: 2,
+    fetchImpl: async (url, init = {}) => {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs") && init.method === "POST") {
+        totalStarts += 1;
+        inFlight += 1;
+        maxObservedInFlight = Math.max(maxObservedInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        inFlight -= 1;
+        return new Response(JSON.stringify({
+          data: { id: `run_${totalStarts}`, status: "SUCCEEDED", defaultDatasetId: `ds_${totalStarts}` },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected mocked Harshmaur URL: ${href}`);
+    },
+  });
+
+  const result = await provider.discover(sixQueries);
+
+  assert.equal(totalStarts, 6, `expected exactly one actor start per query with no spurious retries, got ${totalStarts}`);
+  assert.ok(
+    maxObservedInFlight <= 2,
+    `expected at most 2 concurrent actor-start requests, observed ${maxObservedInFlight}`,
+  );
+  assert.equal(result.diagnostics.queriesFailed ?? 0, 0);
+});
+
 test("a Harshmaur run that times out with zero retained records is retried, not silently returned as a clean zero", async () => {
   // Regression test for the exact bug behind a real production report: an
   // Apify run can end TIMED-OUT with a datasetId allocated but nothing ever

@@ -232,3 +232,4 @@ jobs:
 # trigger: customerProblemLanguage caps at up to 5 (no padding), semantic minimum-context composition instead of category-concatenation (2026-08-20T14:29:21Z)
 # trigger: cap discovery-terms initial display to 3 per card, not just future adds (2026-08-20T14:46:30Z)
 # trigger: cap Apify discovery concurrency, abort orphaned runs on client timeout (2026-08-20T15:08:56Z)
+# trigger: abort-before-retry invariant hardened, concurrency defaults to full query cap (2026-08-20T15:36:41Z)

@@ -240,3 +240,18 @@ test("recurring monitoring is disabled unless explicitly enabled", async () => {
   assert.equal(monitoringSchedulerEnabled({ MONITORING_SCHEDULER_ENABLED: "true" }), true);
   assert.match(worker, /monitoringSchedulerEnabled\(\)\s*\?\s*runMonitoringScheduler/);
 });
+
+test("public surfacing gates relax the verification bar when enrichment is deliberately disabled, but the trace stays honest", () => {
+  // Enrichment (the extra actor run that fetches real comments) was turned
+  // off by explicit request -- HarshmaurRedditProvider.enrich() defaults to
+  // enrichmentLimit 0. Without a matching relaxation here, every candidate
+  // would stay unverified forever and no scan could ever produce a lead or
+  // market-intelligence signal again. This pins that the relaxation exists,
+  // that it's scoped to the two public-surfacing gates (not the trace/
+  // diagnostics, which must keep reporting real verification honestly), and
+  // that the raw hasVerifiedThreadContext check -- used for the scan trace's
+  // per-candidate "full thread context" field -- is unchanged by it.
+  assert.match(source, /const enrichmentDisabled = Number\(process\.env\.APIFY_REDDIT_ENRICHMENT_LIMIT \?\? 0\) === 0;/);
+  assert.match(source, /const meetsPublishingContextBar = .*=>\s*\n\s*hasVerifiedThreadContext\(conversation\) \|\| enrichmentDisabled;/);
+  assert.match(source, /threadContextVerified: deep \? hasVerifiedThreadContext\(deep\.conversation\) : false,/);
+});

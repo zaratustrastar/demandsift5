@@ -473,8 +473,56 @@ test("searchTerm attribution survives the whole provider path", async () => {
   assert.equal(candidates[0].provenance.metadata.searchTerm, "block youtube tv");
 });
 
+test("thread enrichment is off by default: no actor run, every candidate stays discovery-only", async () => {
+  // A user explicitly asked to stop the extra enrichment run entirely
+  // (cost/latency, accepting the trade-off that deep qualification then
+  // judges candidates on discovery-time data alone). This pins that the
+  // default provider never calls the actor for enrichment, and returns
+  // every requested candidate rather than silently dropping any of them.
+  let actorCalled = false;
+  const provider = new HarshmaurRedditProvider({
+    token: "t",
+    fetchImpl: async (url) => {
+      if (String(url).includes("/v2/actors/")) actorCalled = true;
+      return new Response("[]", { status: 200 });
+    },
+  });
+  const candidates = [
+    {
+      provider: "apify-harshmaur-reddit", sourceMode: "live", externalId: "t3_a",
+      kind: "post", subreddit: "AndroidTV", body: "a",
+      permalink: "https://www.reddit.com/r/AndroidTV/comments/a/x/",
+      createdAt: new Date().toISOString(),
+      metrics: { score: 1, comments: 0 }, matchedQueries: [], discoveryLanes: [],
+      provenance: { id: "pa", kind: "reddit", provider: "apify-harshmaur-reddit", contentHash: "ha", observedAt: new Date().toISOString(), isMock: false },
+    },
+    {
+      provider: "apify-harshmaur-reddit", sourceMode: "live", externalId: "t3_b",
+      kind: "post", subreddit: "AndroidTV", body: "b",
+      permalink: "https://www.reddit.com/r/AndroidTV/comments/b/x/",
+      createdAt: new Date().toISOString(),
+      metrics: { score: 1, comments: 0 }, matchedQueries: [], discoveryLanes: [],
+      provenance: { id: "pb", kind: "reddit", provider: "apify-harshmaur-reddit", contentHash: "hb", observedAt: new Date().toISOString(), isMock: false },
+    },
+  ];
+
+  const result = await provider.enrich({ candidates });
+
+  assert.equal(actorCalled, false, "enrichment must not call the actor by default");
+  assert.equal(result.diagnostics.requested, 2);
+  assert.equal(result.diagnostics.enriched, 0);
+  assert.equal(result.diagnostics.fallbackUsed, 2);
+  assert.equal(result.conversations.length, 2, "every requested candidate is still returned, discovery-only");
+  for (const conversation of result.conversations) {
+    assert.notEqual(conversation.provenance.metadata?.enriched, true);
+  }
+});
+
 test("enrichment without a resolvable permalink is honest about staying discovery-only", async () => {
-  const provider = new HarshmaurRedditProvider({ token: "t", fetchImpl: stubApify([]) });
+  // enrichmentLimit is explicit here: it defaults to 0 (enrichment off) in
+  // production now, which would short-circuit before this test ever
+  // exercises the missing-permalink fallback path it's pinning.
+  const provider = new HarshmaurRedditProvider({ token: "t", enrichmentLimit: 8, fetchImpl: stubApify([]) });
   const result = await provider.enrich({
     candidates: [
       {
@@ -496,6 +544,8 @@ test("enrichment without a resolvable permalink is honest about staying discover
 });
 
 test("thread enrichment crawls the candidate's own thread and marks it verified", async () => {
+  // enrichmentLimit defaults to 0 (enrichment off) in production now; set
+  // it explicitly so this test still exercises the real actor-call path.
   const postId = "abc123";
   const permalink = `https://www.reddit.com/r/AndroidTV/comments/${postId}/some_title/`;
   const payload = [
@@ -520,6 +570,7 @@ test("thread enrichment crawls the candidate's own thread and marks it verified"
   let captured = null;
   const provider = new HarshmaurRedditProvider({
     token: "t",
+    enrichmentLimit: 8,
     fetchImpl: async (url, init) => {
       const href = String(url);
       if (href.includes("/v2/actors/") && href.includes("/runs")) {

@@ -857,7 +857,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.discoveryMode = input.discoveryMode ?? "direct-url";
     this.timeoutMs = Math.max(20_000, Math.min(900_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.maxChargeUsd = Math.max(0.05, Math.min(5, input.maxChargeUsd ?? 1));
-    this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
+    this.enrichmentLimit = Math.max(0, Math.min(20, Math.trunc(input.enrichmentLimit ?? 0)));
     this.enrichmentComments = Math.max(1, Math.min(50, Math.trunc(input.enrichmentComments ?? 6)));
     this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 1)));
     this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
@@ -1310,8 +1310,31 @@ export class HarshmaurRedditProvider implements RedditProvider {
    * A candidate whose thread could not be reached falls back to a
    * discovery-only conversation rather than failing the whole batch, matching
    * the bounded-recovery philosophy the rest of the pipeline already uses.
+   *
+   * `enrichmentLimit: 0` (the default) skips the actor run entirely: every
+   * requested candidate is returned as a discovery-only conversation --
+   * title, body and score from the search result, no confirmed comments, no
+   * fetched thread. This is a deliberate trade-off, not a bug: deep
+   * qualification then has to judge intent and timing from the post alone,
+   * with no visibility into whether a top reply already solved the person's
+   * problem or whether the OP is a troll. scan-workflow.ts's
+   * hasVerifiedThreadContext check is relaxed to match -- otherwise nothing
+   * would ever be allowed to become a lead, since that gate exists
+   * specifically to require this step.
    */
   async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    if (this.enrichmentLimit === 0) {
+      return {
+        conversations: request.candidates.map(harshmaurDiscoveryOnlyConversation),
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: request.candidates.length,
+          enriched: 0,
+          failed: 0,
+          fallbackUsed: request.candidates.length,
+        },
+      };
+    }
     const candidates = request.candidates.slice(0, this.enrichmentLimit);
     if (candidates.length === 0) {
       return {

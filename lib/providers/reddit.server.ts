@@ -2342,7 +2342,13 @@ export function createRedditProviderFromEnv(
       // query cap so a scan's queries all start together.
       maxConcurrentDiscoveryRuns: positiveInteger(env.HARSHMAUR_REDDIT_MAX_CONCURRENT_RUNS, 9, 1, 20),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 900_000),
-      enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
+      // 0: the thread-enrichment actor run (fetching each shortlisted
+      // candidate's real comments) is disabled by default. Deep
+      // qualification now judges every candidate on its discovery-time
+      // data alone -- title, body, score -- with no confirmed comment
+      // evidence. A deliberate trade-off, not an oversight: see the doc
+      // comment on HarshmaurRedditProvider.enrich().
+      enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 0, 0, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),
     });
     // The fallback needs its own actor id and token; if either is missing,

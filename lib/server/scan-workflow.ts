@@ -1050,8 +1050,26 @@ export async function runScan(
     // alone let a live discovery-only pass-through (no comments/replies ever
     // fetched) masquerade as verified -- exempting only mock, whose fixtures
     // are synthetic full context by construction.
+    //
+    // Thread enrichment (the extra actor run that fetches each shortlisted
     const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>
       conversation.sourceMode === "mock" || conversation.provenance.metadata?.enriched === true;
+
+    // Thread enrichment (the extra actor run that fetches each shortlisted
+    // candidate's real comments) is disabled by default -- see
+    // HarshmaurRedditProvider.enrich()'s doc comment for the reasoning and
+    // trade-off. hasVerifiedThreadContext above stays honest everywhere --
+    // the scan trace and the "N full threads verified" diagnostic must keep
+    // truthfully reporting that nothing was actually fetched, not claim
+    // verification that never happened. This second, relaxed check exists
+    // only for the public-surfacing gates below (isQualifiedPotentialCustomer
+    // / isRelevantMarketConversation call sites): when enrichment is off,
+    // every conversation is discovery-only by construction, so gating public
+    // leads/signals on real verification would zero out every scan's
+    // results rather than just being honest about reduced confidence.
+    const enrichmentDisabled = Number(process.env.APIFY_REDDIT_ENRICHMENT_LIMIT ?? 0) === 0;
+    const meetsPublishingContextBar = (conversation: EnrichedRedditConversation): boolean =>
+      hasVerifiedThreadContext(conversation) || enrichmentDisabled;
 
     // Enrichment is useful context, not an all-or-nothing website-analysis gate.
     // If one selected Reddit URL cannot be expanded, try the next-best candidate
@@ -1222,13 +1240,15 @@ export async function runScan(
     const deepRows = [...deepById.values()];
     // A discovery-only fallback may still look promising to deep AI. Keep that
     // provisional judgment in the transparent scan trace, but never promote it
-    // to a public lead or market-intelligence claim without verified thread context.
+    // to a public lead or market-intelligence claim without meeting the
+    // publishing context bar (real verification, or enrichment deliberately
+    // off -- see meetsPublishingContextBar above).
     const unverifiedQualifiedCandidates = deepRows.filter((row) =>
-      isQualifiedPotentialCustomer(row.qualification) && !hasVerifiedThreadContext(row.conversation),
+      isQualifiedPotentialCustomer(row.qualification) && !meetsPublishingContextBar(row.conversation),
     );
     const relevantCompetitorByExternalId = new Map<string, string | null>();
     const relevantDeepRows = deepRows.filter((row) => {
-      if (!hasVerifiedThreadContext(row.conversation)) return false;
+      if (!meetsPublishingContextBar(row.conversation)) return false;
       const qualification = row.qualification;
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${row.conversation.title ?? ""}\n${row.conversation.body}`,
@@ -1324,7 +1344,7 @@ export async function runScan(
       // source-backed intelligence layer, but it must not become a lead card
       // without the grounded reply promised by the product. Apify discovery-only
       // fallbacks are never promoted as reply-ready leads.
-      if (!isQualifiedPotentialCustomer(qualification) || !hasVerifiedThreadContext(conversation)) return [];
+      if (!isQualifiedPotentialCustomer(qualification) || !meetsPublishingContextBar(conversation)) return [];
       const score = opportunityRankScore(qualification);
       const competitorEvidence = identifyVerifiedCompetitorSignal({
         conversationText: `${conversation.title ?? ""}\n${conversation.body}`,

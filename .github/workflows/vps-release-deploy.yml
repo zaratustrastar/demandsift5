@@ -234,3 +234,4 @@ jobs:
 # trigger: cap Apify discovery concurrency, abort orphaned runs on client timeout (2026-08-20T15:08:56Z)
 # trigger: abort-before-retry invariant hardened, concurrency defaults to full query cap (2026-08-20T15:36:41Z)
 # trigger: widen Reddit discovery window to 1 year, 50 posts per query (2026-08-20T19:15:01Z)
+# trigger: disable thread enrichment run by default, relax publish gate to match (2026-08-20T19:29:44Z)

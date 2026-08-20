@@ -228,3 +228,4 @@ jobs:
 # trigger: Simplify Reddit query generation -- plain natural-language, no boolean/quotes, capped 3/3/2 (2026-08-19T22:27:09Z)
 # trigger: Cap discovery-terms UI add-controls to 3/3/2 per category (2026-08-19T23:02:09Z)
 # trigger: checkpoint Reddit discovery across job retries, 9-query cap with per-query post budget, disable real-scan prove step (2026-08-19T23:54:27Z)
+# trigger: customerProblemLanguage prompt now generates market-anchored search concepts, not raw complaint sentences (2026-08-20T00:17:20Z)

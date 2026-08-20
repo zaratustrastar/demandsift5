@@ -230,3 +230,4 @@ jobs:
 # trigger: checkpoint Reddit discovery across job retries, 9-query cap with per-query post budget, disable real-scan prove step (2026-08-19T23:54:27Z)
 # trigger: customerProblemLanguage prompt now generates market-anchored search concepts, not raw complaint sentences (2026-08-20T00:17:20Z)
 # trigger: customerProblemLanguage caps at up to 5 (no padding), semantic minimum-context composition instead of category-concatenation (2026-08-20T14:29:21Z)
+# trigger: cap discovery-terms initial display to 3 per card, not just future adds (2026-08-20T14:46:30Z)

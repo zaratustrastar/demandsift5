@@ -87,6 +87,15 @@ export function DiscoveryProfile({
 }) {
   const [data, setData] = useState<DiscoveryProfileResponse | null>(null);
   const [terms, setTerms] = useState<Record<EditableKey, string[]> | null>(null);
+  // The capped starting point terms is compared against to decide whether
+  // the user actually changed anything (see `edited` below). Capping the
+  // AI's own output to each card's max is not itself an edit -- the crawl
+  // routinely returns more candidates than the search caps ever use (e.g. 8
+  // product terms when only 3 are ever searched), and treating that
+  // pre-selection as a user override would misattribute an untouched
+  // profile and, on every future load, silently re-show the same
+  // (harmless but confusing) over-max count this baseline exists to fix.
+  const [baselineTerms, setBaselineTerms] = useState<Record<EditableKey, string[]> | null>(null);
   const [additions, setAdditions] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -105,11 +114,18 @@ export function DiscoveryProfile({
         setData(payload);
         const base = payload.derived;
         const overrides = payload.discoveryOverrides;
-        setTerms({
-          productTerms: overrides?.productTerms ?? base?.productTerms ?? [],
-          customerProblems: overrides?.customerProblems ?? base?.customerProblems ?? [],
-          competitors: overrides?.competitors ?? base?.competitors ?? [],
-        });
+        // Show the best `max` candidates per card, not however many the
+        // crawl happened to return -- the AI already returns its strongest
+        // candidates first, and this is the same cap the backend enforces
+        // when compiling searches, so trimming here is display-only, never
+        // a change in what actually gets searched.
+        const capped: Record<EditableKey, string[]> = {
+          productTerms: (overrides?.productTerms ?? base?.productTerms ?? []).slice(0, MAX_TERMS.productTerms),
+          customerProblems: (overrides?.customerProblems ?? base?.customerProblems ?? []).slice(0, MAX_TERMS.customerProblems),
+          competitors: (overrides?.competitors ?? base?.competitors ?? []).slice(0, MAX_TERMS.competitors),
+        };
+        setTerms(capped);
+        setBaselineTerms(capped);
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError instanceof Error ? loadError.message : "Something went wrong.");
@@ -122,11 +138,11 @@ export function DiscoveryProfile({
   }, [scanId]);
 
   const edited = useMemo(() => {
-    if (!data?.derived || !terms) return false;
+    if (!baselineTerms || !terms) return false;
     return EDITABLE_FIELDS.some(
-      ({ key }) => (terms[key] ?? []).join("\u0000") !== (data.derived?.[key] ?? []).join("\u0000"),
+      ({ key }) => (terms[key] ?? []).join("\u0000") !== (baselineTerms[key] ?? []).join("\u0000"),
     );
-  }, [data, terms]);
+  }, [baselineTerms, terms]);
 
   function removeTerm(key: EditableKey, term: string) {
     setTerms((current) =>

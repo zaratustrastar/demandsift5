@@ -301,6 +301,70 @@ test("chunk execution is capped by maxConcurrentDiscoveryRuns instead of firing 
   assert.equal(result.diagnostics.queriesFailed ?? 0, 0);
 });
 
+test("a run is explicitly aborted before retry even when the failure is not a client-side timeout", async () => {
+  // The concurrency-cap fix alone does not prevent duplicate live runs --
+  // what actually prevents them is runActor aborting the run it is giving
+  // up on before a retry can start a replacement. That used to only fire
+  // on controller.signal.aborted (the client timeout branch); this pins
+  // that it now fires for ANY give-up while the run is still non-terminal,
+  // using a persistent status-check network failure (not a timeout) as the
+  // trigger, so a queued/running run can never be left live while a retry
+  // starts a second one for the same query.
+  const singleCompetitorQuery = {
+    queries: {
+      productTerms: [],
+      productCategories: [],
+      customerProblems: [],
+      buyerIntent: [],
+      competitors: ["Bark"],
+      excludedTerms: [],
+    },
+    limit: 100,
+  };
+
+  let starts = 0;
+  const abortedRunIds = [];
+  const provider = new HarshmaurRedditProvider({
+    token: "test-token",
+    discoveryRetryAttempts: 2,
+    fetchImpl: async (url, init = {}) => {
+      const href = String(url);
+      if (href.includes("/v2/actors/") && href.includes("/runs") && init.method === "POST") {
+        starts += 1;
+        return new Response(JSON.stringify({
+          data: { id: `run_${starts}`, status: "READY", defaultDatasetId: "" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/v2/actor-runs/run_1") && href.includes("/abort")) {
+        abortedRunIds.push("run_1");
+        return new Response(JSON.stringify({ data: { id: "run_1", status: "ABORTED" } }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      if (href.includes("/v2/actor-runs/run_1")) {
+        // Persistent network failure checking on the first run's status --
+        // not a client timeout, just this call giving up on Apify.
+        throw new Error("simulated network failure");
+      }
+      if (href.includes("/v2/actor-runs/run_2")) {
+        return new Response(JSON.stringify({
+          data: { id: "run_2", status: "SUCCEEDED", defaultDatasetId: "ds_2" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (href.includes("/datasets/")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected mocked Harshmaur URL: ${href}`);
+    },
+  });
+
+  const result = await provider.discover(singleCompetitorQuery);
+
+  assert.deepEqual(abortedRunIds, ["run_1"], "the abandoned run_1 must be explicitly aborted");
+  assert.equal(starts, 2, "exactly one retry run should replace the aborted one, not more");
+  assert.ok(result.candidates.length === 0, "the retried run's empty dataset should still resolve cleanly");
+});
+
 test("a Harshmaur run that times out with zero retained records is retried, not silently returned as a clean zero", async () => {
   // Regression test for the exact bug behind a real production report: an
   // Apify run can end TIMED-OUT with a datasetId allocated but nothing ever

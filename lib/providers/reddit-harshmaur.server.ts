@@ -786,16 +786,20 @@ export class HarshmaurRedditProvider implements RedditProvider {
   private readonly postsPerQuery: number;
   /**
    * How many query-batch chunks (each its own Apify actor run) may be in
-   * flight at the same time. `queriesPerRun` defaulting to 1 means a
-   * 9-query scan now wants 9 dedicated runs; firing all of them at once
-   * with no cap regularly exceeded this Apify account's concurrent-run
-   * limit, which queues the excess as "READY" runs rather than rejecting
-   * them outright. Client-side retries (meant for genuine transient
-   * failures) then kept starting fresh runs for chunks that were merely
-   * queued, not failed, compounding a handful of queries into dozens of
-   * runs. Chunks now run through a small worker pool instead of all at
-   * once, so at most this many actor runs are ever open simultaneously
-   * regardless of how many queries a scan has.
+   * flight at the same time. This is a resource/performance knob, not a
+   * correctness one: a "READY" (queued) or "RUNNING" run never triggers a
+   * retry -- runActor just keeps long-polling until the run reaches a
+   * terminal status or this call's own timeoutMs elapses, and any retry
+   * (via withRetry, one layer up in runDiscovery) only happens once the
+   * run it replaces has conclusively finished on its own or been
+   * explicitly aborted first (see the abort call in runActor's catch
+   * block). So raising this cannot reintroduce the duplicate-run cascade
+   * a production incident traced to queued runs being retried out from
+   * under themselves -- that was a missing-abort-before-retry bug, now
+   * fixed independently of concurrency. Defaults to the full query cap
+   * (9) so a normal scan's queries all start at once; lower this only if
+   * Apify-side queueing under real load turns out to slow scans down more
+   * than running fewer at a time would.
    */
   private readonly maxConcurrentDiscoveryRuns: number;
 
@@ -840,7 +844,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 1)));
     this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
     this.postsPerQuery = Math.max(5, Math.min(100, Math.trunc(input.postsPerQuery ?? 20)));
-    this.maxConcurrentDiscoveryRuns = Math.max(1, Math.min(9, Math.trunc(input.maxConcurrentDiscoveryRuns ?? 3)));
+    this.maxConcurrentDiscoveryRuns = Math.max(1, Math.min(20, Math.trunc(input.maxConcurrentDiscoveryRuns ?? 9)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
@@ -866,10 +870,15 @@ export class HarshmaurRedditProvider implements RedditProvider {
       authorization: `Bearer ${this.token}`,
       "content-type": "application/json",
     };
-    // Set once the run actually exists, so a client-side give-up (below)
-    // can tell Apify to actually cancel it instead of leaving it
-    // running/queued while a retry starts a second one on top of it.
+    // Set once the run actually exists, so any give-up below (timeout,
+    // repeated status-check failures, anything) can tell Apify to actually
+    // cancel it instead of leaving it running/queued while a retry starts a
+    // second one on top of it. lastKnownStatus lets the catch block skip
+    // that call once the run has already reached a terminal state on its
+    // own -- nothing to abort at that point.
     let capturedRunId = "";
+    let lastKnownStatus = "";
+    const TERMINAL_RUN_STATUSES = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
 
     const readJson = async (response: Response): Promise<unknown> => {
       const raw = await response.text();
@@ -898,7 +907,21 @@ export class HarshmaurRedditProvider implements RedditProvider {
           await response.text().catch(() => "");
         } catch (error) {
           lastError = error;
-          if (controller.signal.aborted || attempt === 2) throw error;
+          // A genuine client timeout is classified by the outer catch
+          // regardless of what's thrown here. Exhausting these 3 attempts
+          // for any other reason (persistent network failure hitting the
+          // status-check endpoint, say) must still surface as
+          // ApifyTransientError -- rethrowing the raw error here bypassed
+          // runDiscovery's shouldRetry (which only retries
+          // ApifyTransientError), silently turning "3 flaky GETs in a row"
+          // into a hard failure with no retry at all instead of the
+          // recoverable case it actually is.
+          if (controller.signal.aborted) throw error;
+          if (attempt === 2) {
+            throw error instanceof Error
+              ? new ApifyTransientError(error.message)
+              : new ApifyTransientError("Harshmaur GET request failed.");
+          }
         }
         await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
       }
@@ -957,14 +980,14 @@ export class HarshmaurRedditProvider implements RedditProvider {
       const runId = str(started.id);
       capturedRunId = runId;
       let status = str(started.status).toUpperCase();
+      lastKnownStatus = status;
       let datasetId = str(started.defaultDatasetId);
       let statusMessage = str(started.statusMessage);
       if (!runId || !status) {
         throw new Error("The Harshmaur actor returned incomplete run metadata.");
       }
 
-      const terminal = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
-      while (!terminal.has(status)) {
+      while (!TERMINAL_RUN_STATUSES.has(status)) {
         const statusEndpoint = new URL(
           `/v2/actor-runs/${encodeURIComponent(runId)}`,
           "https://api.apify.com",
@@ -972,6 +995,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
         statusEndpoint.searchParams.set("waitForFinish", "60");
         const current = runData(await readJson(await safeGet(statusEndpoint)));
         status = str(current.status).toUpperCase();
+        lastKnownStatus = status;
         statusMessage = str(current.statusMessage);
         datasetId = str(current.defaultDatasetId) || datasetId;
         if (!status) throw new Error("The Harshmaur actor returned incomplete run status.");
@@ -1020,23 +1044,27 @@ export class HarshmaurRedditProvider implements RedditProvider {
       }
       return payload;
     } catch (error) {
+      // Invariant: this call may retry (via withRetry, one layer up) only
+      // after the run it started is conclusively finished -- either it
+      // reached a terminal status on its own, or this abort call put it
+      // there. Scoped to "capturedRunId is known and not already terminal"
+      // rather than just the timeout branch, so a retry is never started
+      // while an earlier live run (READY or RUNNING) is still out there --
+      // whatever the reason this attempt is giving up on it, including
+      // exhausted status-check retries that are not a timeout at all.
+      // Never let this delay or mask the real error thrown below.
+      if (capturedRunId && !TERMINAL_RUN_STATUSES.has(lastKnownStatus)) {
+        const abortEndpoint = new URL(
+          `/v2/actor-runs/${encodeURIComponent(capturedRunId)}/abort`,
+          "https://api.apify.com",
+        );
+        await this.fetchImpl(abortEndpoint, {
+          method: "POST",
+          headers,
+          signal: AbortSignal.timeout(5_000),
+        }).catch(() => {});
+      }
       if (controller.signal.aborted) {
-        if (capturedRunId) {
-          // Best-effort: release the run on Apify's side so it stops
-          // occupying a concurrency slot and, if it later finishes on its
-          // own, doesn't bill for a run this call already gave up on and a
-          // retry is about to duplicate. Never let this delay or mask the
-          // real timeout error below.
-          const abortEndpoint = new URL(
-            `/v2/actor-runs/${encodeURIComponent(capturedRunId)}/abort`,
-            "https://api.apify.com",
-          );
-          await this.fetchImpl(abortEndpoint, {
-            method: "POST",
-            headers,
-            signal: AbortSignal.timeout(5_000),
-          }).catch(() => {});
-        }
         throw new ApifyTransientError(
           `The Harshmaur run timed out after ${Math.ceil(this.timeoutMs / 1_000)} seconds.`,
         );
@@ -1197,14 +1225,12 @@ export class HarshmaurRedditProvider implements RedditProvider {
 
     if (chunks.length <= 1) return runChunk(families, 0);
 
-    // Bounded worker pool rather than firing every chunk's actor-start
-    // request at once: this account's Apify concurrency limit is well
-    // below `chunks.length` once a scan has 6-9 queries, and starting them
-    // all simultaneously queued the excess as "READY" runs which then
-    // looked stuck to the client-side retry logic, which started yet more
-    // runs on top of the still-queued ones. Capping concurrency keeps at
-    // most `maxConcurrentDiscoveryRuns` runs open at a time; a finished
-    // slot (success or retries-exhausted) picks up the next chunk.
+    // Worker pool bounded by maxConcurrentDiscoveryRuns (default: every
+    // chunk at once). The pool itself is not what prevents duplicate runs
+    // -- runActor's own abort-before-retry invariant does that regardless
+    // of how many chunks run in parallel. This just avoids opening more
+    // simultaneous runs than is useful when a caller deliberately lowers
+    // the default.
     const outcomes: PromiseSettledResult<RedditDiscoveryResponse>[] = new Array(chunks.length);
     let nextChunkIndex = 0;
     const worker = async () => {

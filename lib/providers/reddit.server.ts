@@ -2328,7 +2328,7 @@ export function createRedditProviderFromEnv(
       // x queries-per-batch) rather than one shared total getting divided
       // thinner as more queries are added.
       queriesPerRun: positiveInteger(env.HARSHMAUR_REDDIT_QUERIES_PER_RUN, 1, 1, 20),
-      postsPerQuery: positiveInteger(env.HARSHMAUR_REDDIT_POSTS_PER_QUERY, 20, 5, 100),
+      postsPerQuery: positiveInteger(env.HARSHMAUR_REDDIT_POSTS_PER_QUERY, 50, 5, 100),
       // A production scan with 6 queries was observed spawning ~23 Apify
       // runs, root-caused to a missing invariant in runActor: a client-side
       // give-up (timeout, or exhausted status-check retries) started a

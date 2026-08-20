@@ -141,10 +141,24 @@ export function harshmaurActorId(value: string): string {
   return normalized;
 }
 
-/** Exact previous-7-day bounds, used for both actor input and local checks. */
-export function sevenDayWindow(now: Date = new Date()): { since: string; until: string } {
+/**
+ * Exact previous-365-day bounds, used for both actor input and local checks.
+ *
+ * A narrow (7-day) window meant Reddit's own search had a thin pool to rank
+ * within for any but the highest-volume terms -- for niche/low-traffic
+ * topics that often left "most relevant this week" picking from just a
+ * handful of posts. A manual comparison against Reddit's own "All time"
+ * search for the same query found dramatically more relevant matches.
+ * Widening this alone would not have helped, since candidates are also
+ * independently rejected downstream ("outside_window") if they fall outside
+ * this same window -- so both the search-time window and the recency floor
+ * move together, deliberately: Reddit's relevance ranking gets a much
+ * larger pool to pick real matches from, while still only ever surfacing
+ * conversations from the last year, not truly stale ones.
+ */
+export function oneYearWindow(now: Date = new Date()): { since: string; until: string } {
   const until = new Date(now.getTime());
-  const since = new Date(now.getTime() - 7 * 86_400_000);
+  const since = new Date(now.getTime() - 365 * 86_400_000);
   return { since: since.toISOString(), until: until.toISOString() };
 }
 
@@ -173,7 +187,7 @@ export function buildHarshmaurInput(
   request: RedditSearchRequest,
   options: { targetTotal: number; now?: Date; maxTerms?: number },
 ): HarshmaurActorInput {
-  const { since } = sevenDayWindow(options.now);
+  const { since } = oneYearWindow(options.now);
   const windowStart = request.since && Number.isFinite(Date.parse(request.since))
     ? request.since
     : since;
@@ -222,7 +236,11 @@ function directDiscoveryInputFromFamilies(
   families: RedditQueryFamily[],
   targetTotal: number,
 ): HarshmaurDirectDiscoveryInput {
-  const startUrls = families.map((family) => ({ url: redditSearchUrl(family.query, { time: "week" }) }));
+  // "year" rather than a narrower window: Reddit's own relevance ranking
+  // needs a large enough pool to find real matches for niche terms, and the
+  // separate `since`-based recency filter downstream (see oneYearWindow)
+  // still governs which of these results are actually kept.
+  const startUrls = families.map((family) => ({ url: redditSearchUrl(family.query, { time: "year" }) }));
   return {
     searchTerms: [],
     searchPosts: true,
@@ -843,7 +861,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.enrichmentComments = Math.max(1, Math.min(50, Math.trunc(input.enrichmentComments ?? 6)));
     this.queriesPerRun = Math.max(1, Math.min(this.maxQueries, Math.trunc(input.queriesPerRun ?? 1)));
     this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
-    this.postsPerQuery = Math.max(5, Math.min(100, Math.trunc(input.postsPerQuery ?? 20)));
+    this.postsPerQuery = Math.max(5, Math.min(100, Math.trunc(input.postsPerQuery ?? 50)));
     this.maxConcurrentDiscoveryRuns = Math.max(1, Math.min(20, Math.trunc(input.maxConcurrentDiscoveryRuns ?? 9)));
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
@@ -1104,7 +1122,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
         });
       },
     });
-    const window = sevenDayWindow();
+    const window = oneYearWindow();
     const since = request.since && Number.isFinite(Date.parse(request.since))
       ? request.since
       : window.since;

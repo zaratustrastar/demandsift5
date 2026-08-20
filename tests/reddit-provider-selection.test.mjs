@@ -213,7 +213,7 @@ test("by default, each query runs as its own dedicated actor run with a per-quer
   // query should now get its own run and its own fixed postsPerQuery budget
   // -- tvcp's 3 query families should produce 3 separate actor starts, each
   // with exactly one startUrls entry and maxPostsCount equal to the default
-  // postsPerQuery (20), not a divided-down fraction of some larger total.
+  // postsPerQuery (50), not a divided-down fraction of some larger total.
   const starts = [];
   const provider = new HarshmaurRedditProvider({
     token: "test-token",
@@ -239,7 +239,7 @@ test("by default, each query runs as its own dedicated actor run with a per-quer
   assert.equal(starts.length, 3, `expected one dedicated actor run per query family, got ${starts.length}`);
   for (const input of starts) {
     assert.equal(input.startUrls.length, 1, "each default-mode run should carry exactly one query");
-    assert.equal(input.maxPostsCount, 20, "expected the default postsPerQuery budget, not a divided-down total");
+    assert.equal(input.maxPostsCount, 50, "expected the default postsPerQuery budget, not a divided-down total");
   }
 });
 
@@ -608,7 +608,13 @@ test("discover() defaults to Direct URL discovery: real reddit.com search URLs, 
     assert.equal(url.origin, "https://www.reddit.com");
     assert.equal(url.pathname, "/search/");
     assert.deepEqual([...url.searchParams.keys()].sort(), ["q", "t"]);
-    assert.equal(url.searchParams.get("t"), "week");
+    // "year" rather than "week": a manual comparison against Reddit's own
+    // search found dramatically more relevant matches once the window was
+    // widened, since a narrow window left thin pools for Reddit's own
+    // relevance ranking to pick from on niche/low-volume terms. The
+    // downstream since-based recency filter (oneYearWindow) still bounds
+    // which results actually survive, independent of this parameter.
+    assert.equal(url.searchParams.get("t"), "year");
   }
 });
 

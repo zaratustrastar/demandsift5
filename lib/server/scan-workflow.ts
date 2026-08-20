@@ -768,12 +768,16 @@ export async function runScan(
     const previousResult = previousScan?.result && sameWebsite(previousScan.websiteUrl, scan.websiteUrl)
       ? previousScan.result
       : null;
-    // The acquisition scan establishes a real demand baseline. Recurring scans
-    // remain incremental and search only the latest seven-day window.
-    // MVP: one user-triggered scan covering the previous 7 days. Review depth
-    // is chosen independently of this window (see minimumFullContextReviews),
-    // so narrowing the window cannot quietly lower verification quality.
-    const lookbackDays = 7;
+    // A 7-day window gave Reddit's own search a thin pool to rank within for
+    // any but the highest-volume terms -- for niche/low-traffic topics,
+    // "most relevant this week" was often picking from a handful of posts.
+    // A manual comparison against Reddit's own "All time" search for the
+    // same query found dramatically more relevant matches once the window
+    // was widened. Review depth is chosen independently of this window (see
+    // minimumFullContextReviews), so widening it cannot quietly lower
+    // verification quality -- it only changes how far back a candidate is
+    // allowed to have been posted, not how thoroughly each one is reviewed.
+    const lookbackDays = 365;
     const since = new Date(Date.parse(scan.createdAt) - lookbackDays * 86_400_000).toISOString();
     await setStage(scan, "discovery", "active");
     // A checkpoint from a prior job attempt of this same scan is always safe

@@ -55,8 +55,12 @@ test("running scan polling does not invoke completed-report presentation", () =>
   assert.match(scanStatusRoute, /searchParams\.get\("statusOnly"\) === "1"/);
 });
 
-test("the MVP is a single on-demand scan over the previous 7 days", () => {
-  assert.match(source, /const lookbackDays = 7;/);
+test("the MVP is a single on-demand scan over the previous 365 days", () => {
+  // Widened from 7 to 365: a 7-day window left Reddit's own search ranking
+  // a thin pool for niche/low-volume terms, and a manual comparison against
+  // Reddit's own "All time" search for the same query found dramatically
+  // more relevant matches once the window was widened.
+  assert.match(source, /const lookbackDays = 365;/);
   assert.match(source, /lookbackDays \* 86_400_000/);
   assert.match(source, /windowDays: lookbackDays/);
   // Review depth must not ride on the window.

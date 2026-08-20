@@ -55,7 +55,7 @@ src = src
 const harshmaur = await import(u(cc(src, "h.ts")));
 
 const NOW = new Date("2026-08-16T12:00:00.000Z");
-const WINDOW = harshmaur.sevenDayWindow(NOW);
+const WINDOW = harshmaur.oneYearWindow(NOW);
 
 const tvcp = {
   queries: {
@@ -73,7 +73,7 @@ test("actor input matches the real Harshmaur schema", () => {
   assert.equal(input.searchComments, true);
   assert.equal(input.searchCommunities, false);
   // "relevance" re-ranks across all time and would smuggle in records from
-  // outside the seven-day window we asked for.
+  // outside the one-year window we asked for.
   assert.equal(input.searchSort, "new");
   assert.equal(input.searchTime, "week");
   assert.equal(input.postedAfter, WINDOW.since);
@@ -118,9 +118,9 @@ test("both posts and comments are budgeted so comment search is exercised", () =
   assert.ok(input.maxCommentsCount >= 1, "comment search must not be starved to zero");
 });
 
-test("the seven-day window is exact", () => {
+test("the one-year window is exact", () => {
   const span = Date.parse(WINDOW.until) - Date.parse(WINDOW.since);
-  assert.equal(span, 7 * 86_400_000);
+  assert.equal(span, 365 * 86_400_000);
 });
 
 const post = {
@@ -191,7 +191,11 @@ test("a record found by several terms keeps every attribution once", () => {
 });
 
 test("our own timestamp check overrides the actor's filtering", () => {
-  const stale = { ...post, id: "t3_old", createdAt: "2026-07-01T00:00:00.000Z" };
+  // Well outside the one-year window (NOW is 2026-08-16): a year-old-plus
+  // post the actor's own "year" search filter would already exclude, but
+  // this pins that our downstream check is the one actually enforced,
+  // independent of whatever Reddit's own filter did or didn't catch.
+  const stale = { ...post, id: "t3_old", createdAt: "2025-01-01T00:00:00.000Z" };
   const { candidates, summary } = harshmaur.parseHarshmaurDataset([stale], {
     since: WINDOW.since,
     until: WINDOW.until,
@@ -287,7 +291,7 @@ test("a real comment record parses and stays inside the 7-day window", () => {
 
   const created = Date.parse(candidate.createdAt);
   assert.ok(created >= Date.parse(WINDOW.since) && created <= Date.parse(WINDOW.until),
-    "parsed timestamp must fall inside the seven-day window");
+    "parsed timestamp must fall inside the one-year window");
 });
 
 test("a real post record preserves engagement from commentsCount", () => {

@@ -60,7 +60,7 @@ import type {
 import { captureFunnelEvent } from "./funnel";
 import { ApiError } from "./http";
 import { createId } from "./ids";
-import { jobWillRetryScanFailure } from "./job-retry-classification";
+import { jobWillRetryScanFailure, scanPipelineErrorCode } from "./job-retry-classification";
 import { getStateRepository } from "./repository";
 
 const STAGES: ScanStage[] = [
@@ -2278,7 +2278,7 @@ export async function runScan(
         : error instanceof Error
           ? error.message
           : "The scan failed unexpectedly.";
-    const code = error instanceof ApiError ? error.code : undefined;
+    const code = scanPipelineErrorCode(error);
     // A thrown error here does not necessarily mean the scan is done: if a
     // background job attempt is in progress and attempts remain, the job
     // queue (scripts/background-worker.mjs) is about to retry the whole

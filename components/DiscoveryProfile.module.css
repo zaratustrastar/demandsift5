@@ -136,6 +136,88 @@
 
 .addRow button:hover { border-color: var(--green); color: var(--green-dark); }
 
+.tabs {
+  width: 100%;
+  max-width: 880px;
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab,
+.tabActive {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  border: 0;
+  background: transparent;
+  padding: 10px 4px;
+  margin-right: 20px;
+  cursor: pointer;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+
+.tab:hover { color: var(--ink); }
+
+.tabActive {
+  color: var(--green-dark);
+  border-bottom-color: var(--green);
+}
+
+.competitors {
+  width: 100%;
+  max-width: 880px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.urlList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.urlRow {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--card);
+}
+
+.urlPrefix {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 13px;
+  border-right: 1px solid var(--line);
+}
+
+.urlRow input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+  background: transparent;
+  color: var(--ink);
+}
+
+.urlRow input:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
+
+.competitorResults {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
 .context {
   margin-top: 22px;
   display: grid;

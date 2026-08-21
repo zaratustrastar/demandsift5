@@ -40,6 +40,7 @@ import type { FastBusinessProfile } from "@/lib/providers/contracts";
 import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
 import type { WebsiteCrawlResult } from "@/lib/security/website-crawler";
 import type {
+  CompetitorProfile,
   CompetitorWeaknessRecord,
   DemandInsightRecord,
   MarketIntelligenceRecord,
@@ -531,6 +532,30 @@ async function refineDiscoveryProfile(scanId: string): Promise<void> {
   await repository.saveScan(latest);
 }
 
+/**
+ * Turns analyzed competitor profiles into extra Reddit query material,
+ * kept structurally separate from the primary business's own
+ * BusinessUnderstanding the whole way through (see CompetitorProfile's doc
+ * comment in contracts.ts) -- these are never merged into `business`, only
+ * appended to the query arrays built from it, and only for competitors that
+ * analyzed successfully. Skipped competitors (no URLs submitted, or every
+ * submission failed) simply contribute nothing, which is exactly today's
+ * behavior with no competitorProfiles.
+ */
+function competitorDiscoverySignals(
+  competitorProfiles: readonly CompetitorProfile[] | null | undefined,
+): { names: string[]; painPhrases: string[] } {
+  const ready = (competitorProfiles ?? []).filter((competitor) => competitor.status === "ready");
+  const names = ready
+    .flatMap((competitor) => [competitor.name, `${competitor.name} alternative`])
+    .filter(isUsefulSearchPhrase);
+  // A couple of phrases per competitor, not every one they found: this is a
+  // supplementary signal filling any budget the primary business's own pain
+  // phrases left, not a second full query family of its own.
+  const painPhrases = ready.flatMap((competitor) => competitor.painPhrases.slice(0, 2));
+  return { names, painPhrases };
+}
+
 function usageRecord(
   result: { model: string; usage: { inputTokens: number; outputTokens: number }; estimatedCostUsd: number },
   purpose: UsageRecord["purpose"],
@@ -1000,27 +1025,39 @@ export async function runScan(
     // attempts. Reusing it skips a real, paid Apify call entirely instead of
     // re-running discovery from scratch on every retry.
     const persistedDiscovery = scan.redditDiscovery;
+    // Competitor-derived signals (see lib/server/competitor-analysis.ts) are
+    // appended after, never in place of, the primary business's own terms
+    // below. redditQueryFamilies() caps each lane at 3 queries and fills it
+    // in array order, so the user's own product/pain/competitor terms
+    // always get first claim on that budget; a competitor's own name or
+    // pain phrases only occupy a slot the primary business left empty.
+    const competitorSignals = competitorDiscoverySignals(scan.competitorProfiles);
     const discovery = persistedDiscovery ?? await redditProvider.discover(
       {
         queries: {
           productTerms: business.productTerms.value,
           brandTerms: business.brandTerms.value,
           productCategories: [business.productCategory.value],
-          customerProblems:
-            business.customerProblemLanguage.value.length > 0
+          customerProblems: [
+            ...(business.customerProblemLanguage.value.length > 0
               ? business.customerProblemLanguage.value
-              : business.problemsSolved.value,
+              : business.problemsSolved.value),
+            ...competitorSignals.painPhrases,
+          ],
           jobsToBeDone: business.jobsToBeDone?.value ?? [],
           workarounds: business.likelyWorkarounds?.value ?? [],
           triggerEvents: business.triggerEvents?.value ?? [],
           buyerIntent: ["recommendations", "alternative", "comparing tools", "need a tool"],
-          competitors: business.competitors.value
-            .filter(
-              (competitor) =>
-                competitor.verification !== "unverified_hypothesis" &&
-                (competitor.relationship === "direct" || competitor.relationship === "alternative"),
-            )
-            .map((competitor) => competitor.name),
+          competitors: [
+            ...business.competitors.value
+              .filter(
+                (competitor) =>
+                  competitor.verification !== "unverified_hypothesis" &&
+                  (competitor.relationship === "direct" || competitor.relationship === "alternative"),
+              )
+              .map((competitor) => competitor.name),
+            ...competitorSignals.names,
+          ],
           excludedTerms: business.irrelevantTopics.value,
           ambiguityRisks: business.ambiguityRisks.value,
         },

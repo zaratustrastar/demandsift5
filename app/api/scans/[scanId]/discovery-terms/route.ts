@@ -83,6 +83,10 @@ export async function GET(request: Request, context: RouteContext) {
         // silently refresh an untouched profile once refinement lands,
         // without clobbering anything the user has already edited.
         profileStage: analysis?.profileStage ?? (analysis ? "full" : null),
+        // Optional competitor homepages the user has analyzed on the
+        // Competitors tab. Empty until they add and analyze any -- see
+        // POST /api/competitors/analyze.
+        competitorProfiles: scan.competitorProfiles ?? [],
         // Derived terms are shown so the user edits from what was found rather
         // than from a blank form.
         derived: business

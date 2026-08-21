@@ -11,6 +11,14 @@ import styles from "./DiscoveryProfile.module.css";
  * what we understood and press "Scan Reddit", so nothing is required and no
  * field starts empty. And Boolean syntax is never shown — the user curates
  * plain terms, DemandSift compiles the searches.
+ *
+ * A second, optional tab lets the user analyze up to 3 competitor websites.
+ * That is a sidecar to the business profile above, not a rewrite of it:
+ * competitor-derived phrases are stored and shown completely separately
+ * (see CompetitorProfileView below) and are never merged into `terms` or
+ * `discoveryOverrides` -- the backend only folds them into Reddit query
+ * planning, after the user's own product/pain/competitor terms, once the
+ * scan actually starts (see scan-workflow.ts's competitorDiscoverySignals).
  */
 
 export type DiscoveryDerived = {
@@ -22,6 +30,18 @@ export type DiscoveryDerived = {
   useCases: string[];
   purchaseTriggers: string[];
   alternatives: string[];
+};
+
+export type CompetitorProfileView = {
+  url: string;
+  domain: string;
+  name: string;
+  summary: string;
+  productCategory: string;
+  keyphrases: string[];
+  painPhrases: string[];
+  status: "ready" | "failed";
+  error?: string;
 };
 
 export type DiscoveryProfileResponse = {
@@ -37,6 +57,8 @@ export type DiscoveryProfileResponse = {
    * "fast" screen in place once refinement lands.
    */
   profileStage?: "fast" | "full" | null;
+  /** Previously analyzed competitors, if any. Empty until the user adds some. */
+  competitorProfiles?: CompetitorProfileView[];
 };
 
 /**
@@ -81,6 +103,18 @@ const CONTEXT_FIELDS = [
 
 type EditableKey = (typeof EDITABLE_FIELDS)[number]["key"];
 
+const MAX_COMPETITOR_URLS = 3;
+const MAX_COMPETITOR_PHRASES = 5;
+type CompetitorPhraseField = "keyphrases" | "painPhrases";
+const COMPETITOR_PHRASE_FIELDS: Array<{
+  key: CompetitorPhraseField;
+  label: string;
+  hint: string;
+}> = [
+  { key: "keyphrases", label: "Keyphrases", hint: "What they sell, from their own homepage." },
+  { key: "painPhrases", label: "Pain phrases", hint: "Problems their homepage speaks to." },
+];
+
 export function DiscoveryProfile({
   scanId,
   websiteUrl,
@@ -92,6 +126,7 @@ export function DiscoveryProfile({
   onStartScan: () => void;
   onBack: () => void;
 }) {
+  const [activeTab, setActiveTab] = useState<"profile" | "competitors">("profile");
   const [data, setData] = useState<DiscoveryProfileResponse | null>(null);
   const [terms, setTerms] = useState<Record<EditableKey, string[]> | null>(null);
   // The capped starting point terms is compared against to decide whether
@@ -106,6 +141,15 @@ export function DiscoveryProfile({
   const [additions, setAdditions] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const [competitorUrls, setCompetitorUrls] = useState<string[]>(
+    Array.from({ length: MAX_COMPETITOR_URLS }, () => ""),
+  );
+  const [competitorProfiles, setCompetitorProfiles] = useState<CompetitorProfileView[]>([]);
+  const [baselineCompetitorProfiles, setBaselineCompetitorProfiles] = useState<CompetitorProfileView[]>([]);
+  const [competitorAdditions, setCompetitorAdditions] = useState<Record<string, string>>({});
+  const [analyzingCompetitors, setAnalyzingCompetitors] = useState(false);
+  const [competitorError, setCompetitorError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -133,6 +177,15 @@ export function DiscoveryProfile({
         };
         setTerms(capped);
         setBaselineTerms(capped);
+
+        const existingCompetitors = payload.competitorProfiles ?? [];
+        if (existingCompetitors.length > 0) {
+          setCompetitorProfiles(existingCompetitors);
+          setBaselineCompetitorProfiles(existingCompetitors);
+          setCompetitorUrls(
+            Array.from({ length: MAX_COMPETITOR_URLS }, (_, index) => existingCompetitors[index]?.url ?? ""),
+          );
+        }
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError instanceof Error ? loadError.message : "Something went wrong.");
@@ -147,9 +200,22 @@ export function DiscoveryProfile({
   const edited = useMemo(() => {
     if (!baselineTerms || !terms) return false;
     return EDITABLE_FIELDS.some(
-      ({ key }) => (terms[key] ?? []).join("\u0000") !== (baselineTerms[key] ?? []).join("\u0000"),
+      ({ key }) => (terms[key] ?? []).join(" ") !== (baselineTerms[key] ?? []).join(" "),
     );
   }, [baselineTerms, terms]);
+
+  const competitorPhrasesEdited = useMemo(() => {
+    if (competitorProfiles.length !== baselineCompetitorProfiles.length) return false;
+    const baselineByUrl = new Map(baselineCompetitorProfiles.map((profile) => [profile.url, profile]));
+    return competitorProfiles.some((profile) => {
+      const baseline = baselineByUrl.get(profile.url);
+      if (!baseline) return false;
+      return (
+        profile.keyphrases.join(" ") !== baseline.keyphrases.join(" ") ||
+        profile.painPhrases.join(" ") !== baseline.painPhrases.join(" ")
+      );
+    });
+  }, [competitorProfiles, baselineCompetitorProfiles]);
 
   // Fast-pass profiles exist only to render this screen quickly; a fuller
   // analysis keeps running in the background. While the user hasn't touched
@@ -220,6 +286,68 @@ export function DiscoveryProfile({
     setAdditions((current) => ({ ...current, [key]: "" }));
   }
 
+  function updateCompetitorUrl(index: number, value: string) {
+    setCompetitorUrls((current) => current.map((url, i) => (i === index ? value : url)));
+  }
+
+  async function analyzeCompetitors() {
+    const urls = competitorUrls.map((url) => url.trim()).filter(Boolean);
+    if (urls.length === 0) {
+      setCompetitorError("Add at least one competitor website first.");
+      return;
+    }
+    setAnalyzingCompetitors(true);
+    setCompetitorError("");
+    try {
+      const response = await fetch("/api/competitors/analyze", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scanId, urls }),
+      });
+      const payload = (await response.json()) as {
+        competitorProfiles?: CompetitorProfileView[];
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new Error(payload.error?.message ?? "We could not analyze those competitors.");
+      }
+      const analyzed = payload.competitorProfiles ?? [];
+      setCompetitorProfiles(analyzed);
+      setBaselineCompetitorProfiles(analyzed);
+    } catch (analyzeError) {
+      setCompetitorError(
+        analyzeError instanceof Error ? analyzeError.message : "Something went wrong.",
+      );
+    } finally {
+      setAnalyzingCompetitors(false);
+    }
+  }
+
+  function removeCompetitorPhrase(url: string, field: CompetitorPhraseField, phrase: string) {
+    setCompetitorProfiles((current) =>
+      current.map((profile) =>
+        profile.url === url
+          ? { ...profile, [field]: profile[field].filter((value) => value !== phrase) }
+          : profile,
+      ),
+    );
+  }
+
+  function addCompetitorPhrase(url: string, field: CompetitorPhraseField) {
+    const additionKey = `${url}|${field}`;
+    const value = (competitorAdditions[additionKey] ?? "").trim();
+    if (!value) return;
+    setCompetitorProfiles((current) =>
+      current.map((profile) => {
+        if (profile.url !== url) return profile;
+        if (profile[field].length >= MAX_COMPETITOR_PHRASES) return profile;
+        const exists = profile[field].some((phrase) => phrase.toLowerCase() === value.toLowerCase());
+        return exists ? profile : { ...profile, [field]: [...profile[field], value] };
+      }),
+    );
+    setCompetitorAdditions((current) => ({ ...current, [additionKey]: "" }));
+  }
+
   async function startScan() {
     setSaving(true);
     setError("");
@@ -236,6 +364,14 @@ export function DiscoveryProfile({
           },
         );
         if (!response.ok) throw new Error("We could not save your changes.");
+      }
+      if (competitorPhrasesEdited) {
+        const response = await fetch("/api/competitors", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ scanId, competitorProfiles }),
+        });
+        if (!response.ok) throw new Error("We could not save your competitor edits.");
       }
       onStartScan();
     } catch (saveError) {
@@ -262,7 +398,30 @@ export function DiscoveryProfile({
 
       {!data && !error && <p className={styles.loading}>Reading the discovery profile&hellip;</p>}
 
-      {derived && terms && (
+      {data && (
+        <div className={styles.tabs} role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "profile"}
+            className={activeTab === "profile" ? styles.tabActive : styles.tab}
+            onClick={() => setActiveTab("profile")}
+          >
+            Business profile
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "competitors"}
+            className={activeTab === "competitors" ? styles.tabActive : styles.tab}
+            onClick={() => setActiveTab("competitors")}
+          >
+            Competitors{competitorProfiles.length > 0 ? ` (${competitorProfiles.length})` : ""}
+          </button>
+        </div>
+      )}
+
+      {activeTab === "profile" && derived && terms && (
         <>
           <section className={styles.grid}>
             {EDITABLE_FIELDS.map(({ key, label, hint, max }) => {
@@ -333,6 +492,115 @@ export function DiscoveryProfile({
         </>
       )}
 
+      {activeTab === "competitors" && data && (
+        <section className={styles.competitors}>
+          <p className={styles.hint}>
+            Optional. We&rsquo;ll watch Reddit for mentions of them alongside the keywords we
+            generate from your own description. You can always add more later.
+          </p>
+
+          {data.editable && (
+            <>
+              <div className={styles.urlList}>
+                {competitorUrls.map((url, index) => (
+                  <div className={styles.urlRow} key={index}>
+                    <span className={styles.urlPrefix}>https://</span>
+                    <input
+                      value={url}
+                      placeholder="competitor.com"
+                      onChange={(event) => updateCompetitorUrl(index, event.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className={styles.addRow}>
+                <button
+                  type="button"
+                  className={styles.secondary}
+                  onClick={analyzeCompetitors}
+                  disabled={analyzingCompetitors}
+                >
+                  {analyzingCompetitors ? "Analyzing…" : "Analyze competitors"}
+                </button>
+              </div>
+              {competitorError && <p className={styles.error}>{competitorError}</p>}
+            </>
+          )}
+
+          {competitorProfiles.length > 0 && (
+            <div className={styles.competitorResults}>
+              {competitorProfiles.map((profile) => (
+                <div className={styles.card} key={profile.url}>
+                  <h2 className={styles.cardTitle}>{profile.name || profile.domain}</h2>
+                  {profile.status === "failed" ? (
+                    <p className={styles.hint}>
+                      Could not analyze {profile.domain}
+                      {profile.error ? `: ${profile.error}` : "."}
+                    </p>
+                  ) : (
+                    <>
+                      {profile.summary && <p className={styles.hint}>{profile.summary}</p>}
+                      {COMPETITOR_PHRASE_FIELDS.map(({ key, label, hint }) => {
+                        const additionKey = `${profile.url}|${key}`;
+                        const atMax = profile[key].length >= MAX_COMPETITOR_PHRASES;
+                        return (
+                          <div key={key}>
+                            <p className={styles.hint}>
+                              {label} &mdash; {hint} ({profile[key].length}/{MAX_COMPETITOR_PHRASES})
+                            </p>
+                            <ul className={styles.chips}>
+                              {profile[key].length === 0 && (
+                                <li className={styles.empty}>Nothing here yet.</li>
+                              )}
+                              {profile[key].map((phrase) => (
+                                <li className={styles.chip} key={phrase}>
+                                  <span>{phrase}</span>
+                                  <button
+                                    type="button"
+                                    aria-label={`Remove ${phrase}`}
+                                    onClick={() => removeCompetitorPhrase(profile.url, key, phrase)}
+                                    disabled={!data.editable}
+                                  >
+                                    ×
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                            {data.editable && !atMax && (
+                              <div className={styles.addRow}>
+                                <input
+                                  value={competitorAdditions[additionKey] ?? ""}
+                                  placeholder="Add a phrase"
+                                  onChange={(event) =>
+                                    setCompetitorAdditions((current) => ({
+                                      ...current,
+                                      [additionKey]: event.target.value,
+                                    }))
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      addCompetitorPhrase(profile.url, key);
+                                    }
+                                  }}
+                                />
+                                <button type="button" onClick={() => addCompetitorPhrase(profile.url, key)}>
+                                  Add
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {error && <p className={styles.error}>{error}</p>}
 
       <footer className={styles.actions}>
@@ -349,7 +617,7 @@ export function DiscoveryProfile({
         </button>
       </footer>
       <p className={styles.note}>
-        We search the last 7 days of public Reddit activity and build the searches for you.
+        We search the last year of public Reddit activity and build the searches for you.
       </p>
     </main>
   );

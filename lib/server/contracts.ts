@@ -42,6 +42,30 @@ export type Provenance = {
   sourceMode?: "live" | "mock" | "apify-test";
 };
 
+/**
+ * A competitor's own homepage understood through the same fast, cheap
+ * first-pass pipeline as the primary business's fast profile (see
+ * lib/server/competitor-analysis.ts) -- deliberately a separate model from
+ * ScanBusinessProfile/BusinessUnderstanding. A competitor's site describes
+ * itself, not the user's business, so its claims must never be folded into
+ * discoveryProfile or treated as facts about the business being scanned.
+ * Only its name and phrases are ever read downstream, and only to extend
+ * (never replace) the primary business's own Reddit query terms -- see
+ * runScan's discovery query-building step.
+ */
+export type CompetitorProfile = {
+  url: string;
+  domain: string;
+  name: string;
+  summary: string;
+  productCategory: string;
+  keyphrases: string[];
+  painPhrases: string[];
+  status: "ready" | "failed";
+  error?: string;
+  analyzedAt: string;
+};
+
 export type ScanBusinessProfile = {
   name: string;
   websiteUrl: string;
@@ -479,6 +503,13 @@ export type ScanRecord = {
    * checkpoint is always safe, never stale.
    */
   redditDiscovery?: RedditDiscoveryResponse | null;
+  /**
+   * Optional, user-supplied competitor URLs and what DemandSift understood
+   * from each of their homepages. Fixed by the user before the Reddit scan
+   * starts, same lifecycle as discoveryProfile/discoveryOverrides -- edited
+   * on the review screen, then read (never re-analyzed) once the scan runs.
+   */
+  competitorProfiles?: CompetitorProfile[] | null;
 };
 
 export type EntitlementRecord = {

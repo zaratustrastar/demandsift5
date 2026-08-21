@@ -14,3 +14,10 @@ test("Reddit OAuth and daily monitoring settings load independently", () => {
   );
   assert.match(experience, /void loadRedditConnection\(\);\s*void loadRedditMonitoring\(\);/u);
 });
+
+
+test("daily monitoring UI communicates and enforces the launch bounds", () => {
+  assert.match(experience, /REDDIT_MONITOR_LIMITS\.maxWatchTerms/u);
+  assert.match(experience, /REDDIT_MONITOR_LIMITS\.maxResultsPerRun/u);
+  assert.match(experience, /Up to \{REDDIT_MONITOR_LIMITS\.maxWatchTerms\} terms/u);
+});

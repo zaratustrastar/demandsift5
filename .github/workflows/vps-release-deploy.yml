@@ -244,3 +244,4 @@ jobs:
 # trigger: fix daily Reddit monitoring persist regression (dead-comment bug) + tsc regressions (2026-08-21T20:34:47Z)
 # trigger: fix onboarding error masking, competitor analysis, unify Reddit carousel (2026-08-21T23:42:19Z)
 # trigger: fix fast-tier profile stuck on review screen (2026-08-21T23:51:36Z)
+# trigger: upgrade competitor analysis to the full model (2026-08-21T23:57:32Z)

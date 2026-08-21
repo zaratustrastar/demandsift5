@@ -243,3 +243,4 @@ jobs:
 # trigger: context-mode onboarding -- describe your market/idea without a website, shared pipeline (2026-08-21T17:16:04Z)
 # trigger: fix daily Reddit monitoring persist regression (dead-comment bug) + tsc regressions (2026-08-21T20:34:47Z)
 # trigger: fix onboarding error masking, competitor analysis, unify Reddit carousel (2026-08-21T23:42:19Z)
+# trigger: fix fast-tier profile stuck on review screen (2026-08-21T23:51:36Z)

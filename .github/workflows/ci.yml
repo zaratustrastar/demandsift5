@@ -301,6 +301,7 @@ jobs:
           echo "acceptance_result=timeout" >&2
           exit 1
 
+      # Reuse the accepted business session to prove one real daily monitor run.
       - name: Prove one opted-in daily monitoring cycle
         shell: bash
         run: |

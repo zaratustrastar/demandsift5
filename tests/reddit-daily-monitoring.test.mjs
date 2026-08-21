@@ -247,6 +247,12 @@ test("monitor storage enforces cross-run dedupe and advances watermark only on s
     .includes("lastSuccessfulMonitorAt"), false);
   assert.match(workflow, /checkpointFromCandidates\(unseen/u);
   assert.match(workflow, /runScan\(scan\.id/u);
+  const saveScanIndex = workflow.indexOf("await repository.saveScan(scan)");
+  const saveRunIndex = workflow.indexOf("await saveRedditMonitorRun(run)", saveScanIndex);
+  assert.ok(saveScanIndex >= 0 && saveRunIndex > saveScanIndex,
+    "the linked scan must exist before the monitor run stores its scan_id foreign key");
+  assert.doesNotMatch(workflow, /Promise\.all\(\[repository\.saveScan\(scan\), saveRedditMonitorRun\(run\)\]\)/u,
+    "scan and linked monitor-run writes must not race");
   assert.match(workflow, /processedRedditState\.filter/u,
     "every unseen monitoring match must receive an explicit relevance outcome");
   assert.match(workflow, /isRelevantMonitorTriage\(state\.triage\)/u);

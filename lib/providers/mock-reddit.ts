@@ -1,5 +1,4 @@
 import type {
-  RedditDiscoverOptions,
   RedditDiscoveryResponse,
   RedditEnrichmentRequest,
   RedditEnrichmentResponse,

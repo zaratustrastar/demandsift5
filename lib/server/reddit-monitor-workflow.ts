@@ -1,7 +1,8 @@
-import type { RedditSearchLane } from "@/lib/domain/types";
+import type { ConversationTriage, IntelligenceTag, RedditSearchLane } from "@/lib/domain/types";
+import { dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
 import { fetchRedditMonitorCandidates } from "@/lib/providers/reddit-monitor.server";
 import type { RedditDiscoveryResponse } from "@/lib/providers/contracts";
-import type { RedditMonitorRunRecord, ScanRecord, ScanStage } from "@/lib/server/contracts";
+import type { MarketIntelligenceRecord, RedditMonitorRunRecord, ScanRecord, ScanStage } from "@/lib/server/contracts";
 import { createId } from "@/lib/server/ids";
 import {
   applyRedditMonitorOutcomes,
@@ -61,6 +62,32 @@ function checkpointFromCandidates(
       retryAttempts: 0,
     },
   };
+}
+
+export function isRelevantMonitorTriage(triage: ConversationTriage): boolean {
+  return triage.relevant === true &&
+    triage.intent !== "irrelevant" &&
+    triage.intent !== "promotional";
+}
+
+function monitorTriageTags(triage: ConversationTriage): IntelligenceTag[] {
+  const tags = new Set<IntelligenceTag>(["market_insight"]);
+  if (triage.demandSignal === "pain") tags.add("problem_signal");
+  if (triage.demandSignal === "workaround") tags.add("workaround");
+  return [...tags];
+}
+
+function monitorTriageResearchScore(triage: ConversationTriage): number {
+  const fit = triage.productFit === "high"
+    ? 85
+    : triage.productFit === "medium"
+      ? 70
+      : triage.productFit === "low"
+        ? 35
+        : 50;
+  const demandBonus = triage.demandSignal === "none" ? 0 : 10;
+  const timingBonus = triage.timing === "current" || triage.timing === "near_term" ? 5 : 0;
+  return Math.min(100, fit + demandBonus + timingBonus);
 }
 
 function monitoringScan(input: {
@@ -146,13 +173,90 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
     if (completedScan.status !== "complete" || !completedScan.result) {
       throw new Error(completedScan.error || "Reddit monitoring analysis did not complete.");
     }
-    const relevantIds = completedScan.result.marketIntelligence.map((item) => item.externalId);
     const externalIdBySourceId = new Map(
       unseen.map((candidate) => [candidate.provenance.id, candidate.externalId]),
     );
     const opportunityIds = completedScan.result.opportunities
       .map((opportunity) => externalIdBySourceId.get(opportunity.sourceId))
       .filter((externalId): externalId is string => Boolean(externalId));
+
+    // Daily monitoring is a relevance feed first. Every unseen candidate is
+    // cheaply triaged; deep qualification remains selective and only decides
+    // lead/intelligence depth. A triage-relevant post must not be relabelled
+    // irrelevant merely because it was not selected for expensive enrichment.
+    const deepRelevantIds = new Set(
+      completedScan.result.marketIntelligence.map((item) => item.externalId),
+    );
+    const opportunityIdSet = new Set(opportunityIds);
+    const triageRelevantStates = completedScan.result.processedRedditState.filter((state) => {
+      if (!isRelevantMonitorTriage(state.triage)) return false;
+      if (!state.deepQualification) return true;
+      return deepRelevantIds.has(state.externalId) || opportunityIdSet.has(state.externalId);
+    });
+    const relevantIds = [...new Set([
+      ...deepRelevantIds,
+      ...opportunityIds,
+      ...triageRelevantStates.map((state) => state.externalId),
+    ])];
+
+    // Surface triage-relevant, non-enriched matches as relevant conversations
+    // with their real source link. They are not leads, have no reply, and make
+    // no deep-qualification claim.
+    const candidateByExternalId = new Map(
+      unseen.map((candidate) => [candidate.externalId, candidate]),
+    );
+    const triageOnlyIntelligence = triageRelevantStates.flatMap((state): MarketIntelligenceRecord[] => {
+      if (state.deepQualification || deepRelevantIds.has(state.externalId)) return [];
+      const candidate = candidateByExternalId.get(state.externalId);
+      if (!candidate) return [];
+      return [{
+        id: createId("intel"),
+        sourceId: candidate.provenance.id,
+        externalId: candidate.externalId,
+        title: candidate.title ?? "Relevant Reddit conversation",
+        summary: state.triage.reason,
+        subreddit: candidate.subreddit,
+        author: candidate.author ?? null,
+        tags: monitorTriageTags(state.triage),
+        demandSignals: state.triage.demandSignal === "none" ? [] : [state.triage.demandSignal],
+        competitor: null,
+        sourceCreatedAt: candidate.createdAt,
+        sourceIds: [candidate.provenance.id],
+        competitorScore: 0,
+        researchScore: monitorTriageResearchScore(state.triage),
+        replyScore: 0,
+      }];
+    });
+    if (triageOnlyIntelligence.length > 0) {
+      const existingSourceIds = new Set(completedScan.result.sources.map((source) => source.id));
+      const triageSources = triageOnlyIntelligence.flatMap((intelligence) => {
+        if (existingSourceIds.has(intelligence.sourceId)) return [];
+        const candidate = candidateByExternalId.get(intelligence.externalId);
+        if (!candidate) return [];
+        existingSourceIds.add(intelligence.sourceId);
+        return [{
+          id: candidate.provenance.id,
+          kind: "reddit" as const,
+          url: candidate.permalink ?? candidate.provenance.url ?? "",
+          title: candidate.title ?? "Relevant Reddit conversation",
+          excerpt: candidate.body.slice(0, 280),
+          capturedAt: candidate.provenance.observedAt,
+          synthetic: candidate.sourceMode === "mock",
+          provider: candidate.provider,
+          sourceMode: candidate.sourceMode,
+        }];
+      });
+      completedScan.result.marketIntelligence = dedupeMarketIntelligenceRecords([
+        ...completedScan.result.marketIntelligence,
+        ...triageOnlyIntelligence,
+      ]);
+      completedScan.result.sources = [...completedScan.result.sources, ...triageSources];
+      completedScan.result.diagnostics.marketIntelligenceSignals =
+        completedScan.result.marketIntelligence.length;
+      completedScan.updatedAt = new Date().toISOString();
+      await repository.saveScan(completedScan);
+    }
+
     await applyRedditMonitorOutcomes({
       workspaceId: run.workspaceId,
       runId: run.id,
@@ -163,7 +267,7 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
     run = {
       ...run,
       relevant: relevantIds.length,
-      opportunities: completedScan.result.opportunities.length,
+      opportunities: opportunityIds.length,
       updatedAt: new Date().toISOString(),
     };
     await completeRedditMonitorRun(run);

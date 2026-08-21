@@ -15,7 +15,23 @@ function alternateDraft(
     generation % 2 === 0
       ? "I’d start by writing down the must-have outcome and testing a small real workflow in each option. Setup effort and the quality of the day-to-day process usually reveal more than a long feature list."
       : "The most useful comparison is the one based on your actual bottleneck: pick one recurring task, define what a good result looks like, and see which option gets there with the least ongoing maintenance.";
-  return `${lead}\n\nFor transparency, I work with ${profile.name}. Its public site describes ${verifiedFact}. If that is directly relevant to the workflow you mentioned, it may be worth a look alongside the other options—but I’d use the same test for all of them.`;
+  // A context-mode business has no real site (profile.websiteUrl is ""),
+  // so the reply must not claim one exists.
+  const siteReference = profile.websiteUrl
+    ? `Its public site describes ${verifiedFact}.`
+    : `Here is what's relevant: ${verifiedFact}.`;
+  return `${lead}\n\nFor transparency, I work with ${profile.name}. ${siteReference} If that is directly relevant to the workflow you mentioned, it may be worth a look alongside the other options—but I’d use the same test for all of them.`;
+}
+
+/** Safe for both a real website URL and the empty string a context-mode
+ * business uses in place of one -- never throws. */
+function hostnameOrEmpty(websiteUrl: string): string {
+  if (!websiteUrl) return "";
+  try {
+    return new URL(websiteUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
 
 function businessFromProfile(
@@ -25,10 +41,10 @@ function businessFromProfile(
   const cited = <T,>(value: T) => ({ value, confidence: 0.8, provenanceIds: profile.sourceIds });
   const category = profile.productCategory ?? profile.features[0] ?? profile.name;
   return {
-    businessId: `reply_business_${contentFingerprint(profile.websiteUrl)}`,
+    businessId: `reply_business_${contentFingerprint(profile.websiteUrl || profile.name)}`,
     workspaceId,
     websiteUrl: profile.websiteUrl,
-    canonicalDomain: new URL(profile.websiteUrl).hostname.replace(/^www\./, ""),
+    canonicalDomain: hostnameOrEmpty(profile.websiteUrl),
     name: cited(profile.name),
     summary: cited(profile.summary),
     productCategory: cited(category),

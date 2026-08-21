@@ -144,6 +144,16 @@
   gap: 16px;
 }
 
+.namedCompetitors {
+  padding: 16px;
+  border: 1px solid var(--border, #e2e6e2);
+  border-radius: 12px;
+  background: var(--surface-subtle, #f7f9f7);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .urlList {
   display: flex;
   flex-direction: column;

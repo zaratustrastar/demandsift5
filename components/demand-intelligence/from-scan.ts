@@ -10,7 +10,7 @@ import type {
 
 type ApiSource = {
   id: string;
-  kind: "website" | "reddit";
+  kind: "website" | "reddit" | "user_supplied";
   url: string;
   title: string;
   excerpt: string;
@@ -194,6 +194,9 @@ export type ApiScanResponse = {
      */
     status: "queued" | "running" | "retrying" | "complete" | "failed";
     websiteUrl: string;
+    /** Absent on scans created before this field existed; treat as "website". */
+    inputMode?: "website" | "context";
+    contextText?: string | null;
     progress: Array<{
       id: string;
       label: string;
@@ -235,6 +238,7 @@ function redditProviderLabel(dataMode: ApiReport["dataMode"]): string {
 
 function sourceEvidenceLabel(source: ApiSource, dataMode: ApiReport["dataMode"]): string {
   if (source.kind === "website") return "Verified business website evidence";
+  if (source.kind === "user_supplied") return "Business context you provided";
   if (dataMode === "mock") return "Mock provider evidence";
   if (dataMode === "apify-test") return "Public Reddit evidence via Apify test source";
   return "Public conversation evidence";
@@ -394,19 +398,26 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
     },
     provenance: report.sources.map((source) => ({
       id: source.id,
-      kind: source.kind === "website" ? "website-page" : "reddit-conversation",
+      kind:
+        source.kind === "website"
+          ? "website-page"
+          : source.kind === "user_supplied"
+            ? "user-action"
+            : "reddit-conversation",
       title: source.title,
       provider:
         source.provider ??
         (source.kind === "website"
           ? "same-domain crawler"
-          : redditProviderLabel(source.sourceMode ?? report.dataMode)),
+          : source.kind === "user_supplied"
+            ? "your description"
+            : redditProviderLabel(source.sourceMode ?? report.dataMode)),
       url: source.url || null,
       retrievedAt: source.capturedAt,
       excerpt: source.excerpt,
       isMock: source.synthetic,
       verifiedWithinDemoFixture:
-        source.kind === "website" || (source.sourceMode ?? report.dataMode) === "live",
+        source.kind === "website" || source.kind === "user_supplied" || (source.sourceMode ?? report.dataMode) === "live",
     })),
     relevantConversations: (report.relevantConversations ?? []).map((conversation) => {
       const reply = conversation.replyId ? replyByOpportunity.get(conversation.id) : undefined;

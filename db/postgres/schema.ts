@@ -482,6 +482,8 @@ export const runtimeCheckouts = pgTable("runtime_checkouts", {
 export const runtimeMonitoringSchedules = pgTable("runtime_monitoring_schedules", {
   workspaceId: varchar("workspace_id", { length: 96 }).primaryKey().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
   seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  // "" for a context-mode business (see runtime_scans.website_url) -- kept
+  // NOT NULL, but no longer forced non-empty; see migration 0008.
   websiteUrl: text("website_url").notNull(),
   plan: varchar("plan", { length: 24 }).notNull(),
   cadenceSeconds: integer("cadence_seconds").notNull(),
@@ -493,7 +495,6 @@ export const runtimeMonitoringSchedules = pgTable("runtime_monitoring_schedules"
 }, (table) => [
   check("runtime_monitoring_schedules_plan_check", sql`${table.plan} in ('pass', 'core')`),
   check("runtime_monitoring_schedules_cadence_check", sql`${table.cadenceSeconds} > 0`),
-  check("runtime_monitoring_schedules_website_check", sql`length(trim(${table.websiteUrl})) > 0`),
   index("runtime_monitoring_schedules_due_idx").on(table.enabled, table.nextRunAt),
 ]);
 

@@ -42,12 +42,22 @@
 .heroLead { max-width: 570px; color: #58645c; font-size: 18px; line-height: 1.65; letter-spacing: -.01em; }
 .scanForm { margin-top: 32px; max-width: 625px; }
 .scanForm label { display: block; margin-bottom: 9px; color: #4e5a52; font-size: 12px; font-weight: 750; letter-spacing: .035em; text-transform: uppercase; }
+.modeTabs { display: flex; gap: 6px; margin-bottom: 14px; padding: 4px; border-radius: 12px; background: #eef1ee; width: fit-content; }
+.modeTab { border: 0; border-radius: 9px; padding: 9px 16px; font: inherit; font-size: 13px; font-weight: 700; color: #56635a; background: transparent; cursor: pointer; transition: background .15s, color .15s; }
+.modeTab:hover { color: var(--ink); }
+.modeTabActive { color: var(--ink); background: #fff; box-shadow: 0 1px 3px rgba(24,35,29,.12); }
 .inputRow { display: flex; align-items: center; gap: 10px; padding: 7px 7px 7px 16px; border: 1px solid #cbd5cc; border-radius: 14px; background: #fff; box-shadow: 0 13px 35px rgba(39, 65, 49, .09), 0 1px 2px rgba(39,65,49,.05); }
 .globe { color: #7c887f; font-size: 20px; }
 .inputRow input { min-width: 0; flex: 1; height: 43px; border: 0; outline: 0; color: var(--ink); font: inherit; font-size: 16px; background: transparent; }
 .inputRow input::placeholder { color: #9aa39c; }
 .inputRow button { height: 44px; border: 0; border-radius: 10px; padding: 0 19px; color: #fff; background: var(--ink); font: inherit; font-weight: 700; cursor: pointer; box-shadow: 0 5px 12px rgba(24,35,29,.16); white-space: nowrap; transition: transform .2s, background .2s; }
 .inputRow button:hover { transform: translateY(-1px); background: var(--green-dark); }
+.textareaCard { padding: 14px 16px; border: 1px solid #cbd5cc; border-radius: 14px; background: #fff; box-shadow: 0 13px 35px rgba(39, 65, 49, .09), 0 1px 2px rgba(39,65,49,.05); }
+.textareaCard textarea { width: 100%; min-height: 108px; border: 0; outline: 0; resize: vertical; color: var(--ink); font: inherit; font-size: 15px; line-height: 1.5; background: transparent; }
+.textareaCard textarea::placeholder { color: #9aa39c; }
+.textareaActions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.textareaActions button { height: 44px; border: 0; border-radius: 10px; padding: 0 19px; color: #fff; background: var(--ink); font: inherit; font-weight: 700; cursor: pointer; box-shadow: 0 5px 12px rgba(24,35,29,.16); white-space: nowrap; transition: transform .2s, background .2s; }
+.textareaActions button:hover { transform: translateY(-1px); background: var(--green-dark); }
 .formNote,
 .formError { margin: 10px 1px 0; font-size: 12px; color: #7a857d; }
 .formError { color: #a23f34; }

@@ -65,7 +65,7 @@ const EDITABLE_FIELDS = [
   },
   {
     key: "competitors" as const,
-    label: "Competitors / alternatives",
+    label: "Competitors & alternatives",
     hint: "Tools people compare you with or switch from.",
     max: 3,
   },
@@ -197,12 +197,16 @@ export function DiscoveryProfile({
     <main className={styles.screen}>
       <header className={styles.head}>
         <div>
-          <div className={styles.kicker}>Analyzed {websiteUrl.replace(/^https?:\/\//, "")}</div>
+          <div className={styles.kicker}>
+            {websiteUrl ? `Analyzed ${websiteUrl.replace(/^https?:\/\//, "")}` : "Analyzed your description"}
+          </div>
           <h1 className={styles.title}>What we&rsquo;ll look for</h1>
           <p className={styles.lead}>
             {data?.profile?.summary
               ? data.profile.summary
-              : "This is what we understood from your website. You can adjust it, or scan straight away."}
+              : websiteUrl
+                ? "This is what we understood from your website. You can adjust it, or scan straight away."
+                : "This is what we understood from your description. You can adjust it, or scan straight away."}
           </p>
         </div>
       </header>

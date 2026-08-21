@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProductDashboard,
   type RedditConnectionStatus,
@@ -138,19 +138,38 @@ function Brand() {
   );
 }
 
-function Landing({ onSubmit }: { onSubmit: (url: string) => void }) {
+export type LandingSubmission = { mode: "website"; websiteUrl: string } | { mode: "context"; contextText: string };
+
+const MIN_CONTEXT_TEXT_LENGTH = 20;
+
+function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => void }) {
+  // Website and "describe your market / idea" are two equal ways in, not a
+  // primary path and a fallback -- see the two-tab requirement this
+  // implements. Website stays the default tab.
+  const [mode, setMode] = useState<"website" | "context">("website");
   const [url, setUrl] = useState("");
+  const [contextText, setContextText] = useState("");
   const [error, setError] = useState("");
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    const candidate = url.trim();
-    if (!candidate || !candidate.includes(".")) {
-      setError("Enter a business website, like acme.com");
+    if (mode === "website") {
+      const candidate = url.trim();
+      if (!candidate || !candidate.includes(".")) {
+        setError("Enter a business website, like acme.com");
+        return;
+      }
+      setError("");
+      onSubmit({ mode: "website", websiteUrl: candidate });
+      return;
+    }
+    const candidate = contextText.trim();
+    if (candidate.length < MIN_CONTEXT_TEXT_LENGTH) {
+      setError("Tell us a bit more -- a sentence or two about your business, market or idea.");
       return;
     }
     setError("");
-    onSubmit(candidate);
+    onSubmit({ mode: "context", contextText: candidate });
   }
 
   return (
@@ -178,31 +197,83 @@ function Landing({ onSubmit }: { onSubmit: (url: string) => void }) {
             Find the threads where your next customers are <em>already asking.</em>
           </h1>
           <p className={styles.heroLead}>
-            We learn your business from its website, then surface the few public
-            conversations worth joining—with thoughtful replies ready to refine.
+            We learn your business from its website -- or from your own description if
+            it doesn&rsquo;t have one yet -- then surface the few public conversations worth
+            joining, with thoughtful replies ready to refine.
           </p>
 
           <form className={styles.scanForm} onSubmit={submit} noValidate>
-            <label htmlFor="website-url">Your business website</label>
-            <div className={styles.inputRow}>
-              <span className={styles.globe} aria-hidden="true">◎</span>
-              <input
-                id="website-url"
-                inputMode="url"
-                placeholder="yourcompany.com"
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                aria-describedby={error ? "url-error" : "scan-note"}
-              />
-              <button type="submit">
-                Run free scan <span aria-hidden="true">→</span>
+            <div className={styles.modeTabs} role="tablist" aria-label="How to start your scan">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === "website"}
+                className={mode === "website" ? `${styles.modeTab} ${styles.modeTabActive}` : styles.modeTab}
+                onClick={() => {
+                  setMode("website");
+                  setError("");
+                }}
+              >
+                Website
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mode === "context"}
+                className={mode === "context" ? `${styles.modeTab} ${styles.modeTabActive}` : styles.modeTab}
+                onClick={() => {
+                  setMode("context");
+                  setError("");
+                }}
+              >
+                Describe your market / idea
               </button>
             </div>
+
+            {mode === "website" ? (
+              <>
+                <label htmlFor="website-url">Your business website</label>
+                <div className={styles.inputRow}>
+                  <span className={styles.globe} aria-hidden="true">◎</span>
+                  <input
+                    id="website-url"
+                    inputMode="url"
+                    placeholder="yourcompany.com"
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    aria-describedby={error ? "url-error" : "scan-note"}
+                  />
+                  <button type="submit">
+                    Run free scan <span aria-hidden="true">→</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label htmlFor="market-context">What are you researching?</label>
+                <div className={styles.textareaCard}>
+                  <textarea
+                    id="market-context"
+                    placeholder="e.g. a scheduling tool for independent hairstylists who currently juggle texts and paper booking, competing loosely with Squarespace Appointments and plain old group chats"
+                    value={contextText}
+                    onChange={(event) => setContextText(event.target.value)}
+                    aria-describedby={error ? "url-error" : "scan-note"}
+                  />
+                  <div className={styles.textareaActions}>
+                    <button type="submit">
+                      Run free scan <span aria-hidden="true">→</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
             {error ? (
               <p className={styles.formError} id="url-error">{error}</p>
             ) : (
               <p className={styles.formNote} id="scan-note">
-                No card required · Public same-domain pages only · Usually several minutes
+                {mode === "website"
+                  ? "No card required · Public same-domain pages only · Usually several minutes"
+                  : "No card required · No website needed · Usually several minutes"}
               </p>
             )}
           </form>
@@ -313,11 +384,14 @@ function Landing({ onSubmit }: { onSubmit: (url: string) => void }) {
 
 function Scanning({
   url,
+  inputMode,
   progress,
 }: {
   url: string;
+  inputMode: "website" | "context";
   progress: ApiScanResponse["scan"]["progress"];
 }) {
+  const isContext = inputMode === "context";
   const domain = useMemo(() => safeDomain(url), [url]);
   const reported = new Map(progress.map((item) => [item.id, item]));
   const statuses = progressSteps.map((_, index) => {
@@ -333,8 +407,8 @@ function Scanning({
           <div className={styles.orbit}><i /><i /><i /></div>
           <span>↗</span>
         </div>
-        <div className={styles.scanKicker}>Analyzing {domain}</div>
-        <h1>Turning your website into a demand map</h1>
+        <div className={styles.scanKicker}>{isContext ? "Analyzing your description" : `Analyzing ${domain}`}</div>
+        <h1>{isContext ? "Turning your description into a demand map" : "Turning your website into a demand map"}</h1>
         <p>These stages update from the backend analysis pipeline.</p>
         <div className={styles.progressList}>
           {progressSteps.map((item, index) => (
@@ -351,7 +425,9 @@ function Scanning({
             </div>
           ))}
         </div>
-        <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+        {!isContext && (
+          <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+        )}
       </section>
     </main>
   );
@@ -374,12 +450,15 @@ function Scanning({
 function RefiningProfile({
   scanId,
   url,
+  inputMode,
   setView,
 }: {
   scanId: string;
   url: string;
+  inputMode: "website" | "context";
   setView: (view: View) => void;
 }) {
+  const isContext = inputMode === "context";
   const domain = useMemo(() => safeDomain(url), [url]);
 
   useEffect(() => {
@@ -428,10 +507,12 @@ function RefiningProfile({
           <div className={styles.orbit}><i /><i /><i /></div>
           <span>↗</span>
         </div>
-        <div className={styles.scanKicker}>Analyzing {domain}</div>
+        <div className={styles.scanKicker}>{isContext ? "Analyzing your description" : `Analyzing ${domain}`}</div>
         <h1>Putting together your business profile</h1>
-        <p>Reading a few more pages and double-checking what we found.</p>
-        <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+        <p>{isContext ? "Double-checking what we found in your description." : "Reading a few more pages and double-checking what we found."}</p>
+        {!isContext && (
+          <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+        )}
       </section>
     </main>
   );
@@ -440,6 +521,9 @@ function RefiningProfile({
 export function ThreadlineExperience() {
   const [view, setView] = useState<View>("landing");
   const [url, setUrl] = useState("");
+  /** "context" scans have no websiteUrl (it stays "") -- see ScanRecord.inputMode. */
+  const [inputMode, setInputMode] = useState<"website" | "context">("website");
+  const [contextText, setContextText] = useState("");
   const [scanResponse, setScanResponse] = useState<ApiScanResponse | null>(null);
   const [scanProgress, setScanProgress] = useState<ApiScanResponse["scan"]["progress"]>([]);
   /** Set once the website is analyzed and the profile is awaiting review. */
@@ -491,6 +575,8 @@ export function ThreadlineExperience() {
           const latest = (await response.json()) as ApiScanResponse;
           if (!response.ok || cancelled || !latest.scan?.id) return;
           setUrl(latest.scan.websiteUrl);
+          setInputMode(latest.scan.inputMode ?? "website");
+          setContextText(latest.scan.contextText ?? "");
           resumedScanRef.current = latest;
           setScanResponse(latest);
           setScanProgress(latest.scan.progress);
@@ -536,6 +622,8 @@ export function ThreadlineExperience() {
           if (cancelled) return;
 
           setUrl(latest.scan.websiteUrl);
+          setInputMode(latest.scan.inputMode ?? "website");
+          setContextText(latest.scan.contextText ?? "");
           setScanResponse(latest);
           setScanProgress(latest.scan.progress);
           setAccessLevel(effectiveAccessLevel(latest.access));
@@ -626,8 +714,25 @@ export function ThreadlineExperience() {
     };
   }, [view, accessLevel]);
 
-  function startScan(nextUrl: string) {
-    setUrl(nextUrl);
+  /** The body for POST /api/scans, matching whichever tab the user actually
+   * submitted -- see LandingSubmission. The two are otherwise interchangeable
+   * inputs to the same createScan/runScan pipeline (see scan-workflow.ts). */
+  const scanCreateBody = useCallback(
+    (extra: Record<string, unknown>): Record<string, unknown> =>
+      inputMode === "context" ? { contextText, ...extra } : { websiteUrl: url, ...extra },
+    [inputMode, url, contextText],
+  );
+
+  function startScan(submission: LandingSubmission) {
+    if (submission.mode === "context") {
+      setInputMode("context");
+      setContextText(submission.contextText);
+      setUrl("");
+    } else {
+      setInputMode("website");
+      setUrl(submission.websiteUrl);
+      setContextText("");
+    }
     setMonitoring(null);
     resumedScanRef.current = null;
     setScanResponse(null);
@@ -638,7 +743,8 @@ export function ThreadlineExperience() {
   }
 
   // Phase one: create the scan without starting it, then analyze the website
-  // only. Reddit retrieval waits until the user has reviewed the profile.
+  // (or the user's own description, in context mode) only. Reddit retrieval
+  // waits until the user has reviewed the profile.
   useEffect(() => {
     if (view !== "analyzing") return;
     let cancelled = false;
@@ -647,7 +753,7 @@ export function ThreadlineExperience() {
         const createdResponse = await fetch("/api/scans", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ websiteUrl: url, reviewFirst: true }),
+          body: JSON.stringify(scanCreateBody({ reviewFirst: true })),
         });
         const created = (await createdResponse.json()) as ApiScanResponse;
         if (!createdResponse.ok || !created.scan?.id) {
@@ -681,7 +787,7 @@ export function ThreadlineExperience() {
     return () => {
       cancelled = true;
     };
-  }, [view, url]);
+  }, [view, url, contextText, inputMode, scanCreateBody]);
 
   // Phase two: the user approved the profile, so start Reddit retrieval.
   async function beginRedditScan() {
@@ -717,11 +823,16 @@ export function ThreadlineExperience() {
           const payload = (await existing.json()) as ApiScanResponse;
           if (existing.ok && payload.scan?.id) created = payload;
         }
-        if (!created || created.scan.websiteUrl !== url || created.scan.status === "failed") {
+        const matchesCurrentInput = created
+          ? inputMode === "context"
+            ? created.scan.inputMode === "context" && created.scan.contextText === contextText
+            : created.scan.websiteUrl === url
+          : false;
+        if (!created || !matchesCurrentInput || created.scan.status === "failed") {
           const createdResponse = await fetch("/api/scans", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ websiteUrl: url, defer: true }),
+            body: JSON.stringify(scanCreateBody({ defer: true })),
           });
           created = (await createdResponse.json()) as ApiScanResponse;
           if (!createdResponse.ok || !created.scan?.id) {
@@ -811,7 +922,7 @@ export function ThreadlineExperience() {
       cancelled = true;
       window.clearTimeout(pollTimer);
     };
-  }, [view, url, reviewScanId]);
+  }, [view, url, contextText, inputMode, reviewScanId, scanCreateBody]);
 
   async function refreshScan(scanId: string) {
     const response = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });
@@ -1077,7 +1188,7 @@ export function ThreadlineExperience() {
 
   if (view === "landing") return <Landing onSubmit={startScan} />;
   if (view === "analyzing") {
-    return <Scanning url={url} progress={scanProgress} />;
+    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} />;
   }
   if (view === "competitors") {
     return (
@@ -1090,7 +1201,7 @@ export function ThreadlineExperience() {
     );
   }
   if (view === "refining") {
-    return <RefiningProfile scanId={reviewScanId} url={url} setView={setView} />;
+    return <RefiningProfile scanId={reviewScanId} url={url} inputMode={inputMode} setView={setView} />;
   }
   if (view === "profile") {
     return (
@@ -1103,7 +1214,7 @@ export function ThreadlineExperience() {
     );
   }
   if (view === "scanning" || view === "restoring") {
-    return <Scanning url={url} progress={scanProgress} />;
+    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} />;
   }
   if (view === "error") {
     return (

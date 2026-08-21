@@ -44,6 +44,22 @@ export interface AnalyzeBusinessRequest {
 }
 
 /**
+ * Input for building a `BusinessUnderstanding` from a user's own freeform
+ * description instead of crawled website pages -- the "Describe your market
+ * / idea" onboarding path. `sourceId` is the id of the `user_supplied`
+ * Provenance record the caller (scan-workflow.ts) already created for this
+ * text, so every cited field can point back to it exactly like a crawled
+ * page's sourceId would.
+ */
+export interface AnalyzeBusinessFromContextRequest {
+  workspaceId: EntityId;
+  businessId: EntityId;
+  contextText: string;
+  sourceId: EntityId;
+  models: ModelConfiguration;
+}
+
+/**
  * A much smaller, uncited business summary produced from homepage-only
  * evidence by a fast/cheap model. It exists purely to let the editable
  * setup screen render in a few seconds; it is never treated as good enough
@@ -189,6 +205,19 @@ export interface AiProvider {
   analyzeBusinessFast(
     request: AnalyzeBusinessRequest,
   ): Promise<AiProviderResult<FastBusinessProfile>>;
+  /**
+   * The context-mode counterpart to `analyzeBusiness`: builds the same
+   * `BusinessUnderstanding` shape from a user's freeform description rather
+   * than crawled pages. There is no "fast" tier for this path -- a single
+   * short text has no multi-page latency to hide behind, so this is always
+   * the complete analysis. Competitors the user explicitly names are tagged
+   * `verification: "user_claim"`; other plausible competitors the model
+   * suggests, only when reasonably confident, are tagged
+   * `"unverified_hypothesis"` -- see lib/domain/types.ts's CompetitorReference.
+   */
+  analyzeBusinessFromContext(
+    request: AnalyzeBusinessFromContextRequest,
+  ): Promise<AiProviderResult<BusinessUnderstanding>>;
   triageConversations(
     request: TriageConversationsRequest,
   ): Promise<AiProviderResult<TriagedConversation[]>>;

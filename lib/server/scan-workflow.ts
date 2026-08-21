@@ -260,6 +260,38 @@ function conservativeProfile(
   };
 }
 
+/** The context-mode counterpart to `conservativeProfile`: the same
+ * no-AI-configured heuristic fallback, over the user's own freeform text
+ * instead of crawled pages. Used only when OPENAI_API_KEY is unset. */
+function conservativeProfileFromContext(contextText: string, sourceId: string): ScanBusinessProfile {
+  const cleaned = contextText.replace(/\s+/g, " ").trim();
+  const summary = firstUsefulSentence(cleaned) || cleaned.slice(0, 200) || "Described in the context you provided.";
+  const problemSentences = cleaned
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => /\b(help|solve|simplif|save|avoid|reduce|enable|without)\w*\b/i.test(sentence))
+    .map(usefulFallbackSentence)
+    .filter((sentence): sentence is string => Boolean(sentence))
+    .slice(0, 4);
+  return {
+    name: "Your business",
+    websiteUrl: "",
+    summary,
+    productCategory: "Your business",
+    targetAudience: [],
+    problemsSolved: problemSentences,
+    jobsToBeDone: [],
+    likelyWorkarounds: [],
+    triggerEvents: [],
+    customerProblemLanguage: problemSentences,
+    features: [],
+    competitors: [],
+    irrelevantTopics: [],
+    brandTerms: [],
+    ambiguityRisks: [],
+    sourceIds: [sourceId],
+  };
+}
+
 function toBusinessUnderstanding(input: {
   profile: ScanBusinessProfile;
   workspaceId: string;
@@ -440,6 +472,34 @@ function pagesFromCrawl(crawl: WebsiteCrawlResult): {
   return { websiteSources, pages };
 }
 
+/** The context-mode counterpart to `pagesFromCrawl`: wraps the user's
+ * freeform text in the same Provenance shape a crawled page would get, so
+ * citation plumbing downstream (CitedValue.provenanceIds, the sources list
+ * in the final scan result) treats both sources identically. There is
+ * exactly one "page" -- the user's own text -- so this returns a single
+ * source rather than an array-shaped crawl result.
+ *
+ * The id is derived from the scan id, not randomly generated, for the same
+ * reason `pagesFromCrawl` derives website source ids from each page's
+ * contentHash rather than a random id: `runScan`'s full pipeline rebuilds
+ * this source on every run (even when it reuses a persisted business
+ * understanding -- see the `canReusePersistedAnalysis` branch), and that
+ * reuse only stays citation-valid if the id it already cited is
+ * reproducible from the same input every time.
+ */
+function contextSource(scanId: string, contextText: string): { source: Provenance; sourceId: string } {
+  const source: Provenance = {
+    id: `ctx_${scanId}`,
+    kind: "user_supplied",
+    url: "",
+    title: "Business & market context you described",
+    excerpt: contextText.slice(0, 280),
+    capturedAt: new Date().toISOString(),
+    synthetic: false,
+  };
+  return { source, sourceId: source.id };
+}
+
 /** Fast first-pass understanding: a homepage-only crawl plus, when AI is
  * configured, a small/cheap-model analysis -- built to finish in a couple of
  * seconds so the editable setup screen doesn't wait on the full 4-page,
@@ -485,6 +545,47 @@ async function runFastUnderstanding(scan: ScanRecord): Promise<{
     canonicalDomain: crawl.canonicalDomain,
   });
   return { business, profile, analysisMode: "local-fallback" };
+}
+
+/** The context-mode counterpart to `runFastUnderstanding`. There is no
+ * crawl to hide latency behind and no cheaper/fuller tier to split across --
+ * a single short text is already the complete input -- so this both builds
+ * and finalizes the profile in one call, and the caller in `runScan` marks
+ * the result `profileStage: "full"` immediately rather than kicking off a
+ * background refinement the way the website path does. */
+async function runContextUnderstanding(scan: ScanRecord): Promise<{
+  business: BusinessUnderstanding;
+  profile: ScanBusinessProfile;
+  analysisMode: ScanResult["analysisMode"];
+  contextSource: Provenance;
+}> {
+  const text = (scan.contextText ?? "").trim();
+  const { source, sourceId } = contextSource(scan.id, text);
+  const businessId = createId("biz");
+  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+
+  if (aiProvider) {
+    const models = openAiModelsFromEnv();
+    const analyzed = await aiProvider.analyzeBusinessFromContext({
+      workspaceId: scan.workspaceId,
+      businessId,
+      contextText: text,
+      sourceId,
+      models,
+    });
+    const business = analyzed.value;
+    const profile = profileFromBusiness(business);
+    return { business, profile, analysisMode: "openai", contextSource: source };
+  }
+
+  const profile = conservativeProfileFromContext(text, sourceId);
+  const business = toBusinessUnderstanding({
+    profile,
+    workspaceId: scan.workspaceId,
+    businessId,
+    canonicalDomain: "",
+  });
+  return { business, profile, analysisMode: "local-fallback", contextSource: source };
 }
 
 /** Best-effort continuation of the fast pass: re-crawls the full 4 pages and
@@ -817,12 +918,31 @@ function enrichmentSelectionTarget(required: number): number {
   return Math.min(enrichmentBudget(), required + headroom);
 }
 
-export async function createScan(workspaceId: string, websiteUrl: string): Promise<ScanRecord> {
+const MAX_CONTEXT_TEXT_LENGTH = 4_000;
+
+export type CreateScanInput =
+  | { websiteUrl: string }
+  | { contextText: string };
+
+/**
+ * Creates the scan record for either onboarding path.
+ *
+ * Website and "describe your market" are just two different sources for the
+ * same downstream pipeline -- see runScan's inputMode branching. A context
+ * scan's websiteUrl is always "", never a fabricated domain; every existing
+ * consumer of ScanRecord.websiteUrl already treats a falsy/unparsable value
+ * as "no identity" rather than throwing (normalizedBusinessHostname,
+ * sameWebsite), so this needs no schema change.
+ */
+export async function createScan(workspaceId: string, input: CreateScanInput): Promise<ScanRecord> {
   const now = new Date().toISOString();
+  const isContext = "contextText" in input;
   const scan: ScanRecord = {
     id: createId("scan"),
     workspaceId,
-    websiteUrl,
+    websiteUrl: isContext ? "" : input.websiteUrl,
+    inputMode: isContext ? "context" : "website",
+    contextText: isContext ? input.contextText.slice(0, MAX_CONTEXT_TEXT_LENGTH) : null,
     status: "queued",
     progress: cloneStages(),
     createdAt: now,
@@ -875,6 +995,32 @@ export async function runScan(
       // path. The full crawl + full analysis still happen -- right away in
       // the background, or synchronously the next time runScan() runs the
       // real pipeline -- before Reddit retrieval ever sees this profile.
+      if (scan.inputMode === "context") {
+        // No crawl to hide behind and no cheaper tier below the full
+        // analysis (see runContextUnderstanding's doc comment), so this
+        // goes straight to a "full" profile -- no background refinement to
+        // kick off, unlike the website path below.
+        const built = await runContextUnderstanding(scan);
+        await setStage(scan, "website", "complete", "Business context saved from your description.");
+        scan.discoveryProfile = {
+          profile: built.profile,
+          business: built.business,
+          analysisMode: built.analysisMode,
+          analyzedAt: new Date().toISOString(),
+          profileStage: "full",
+        };
+        await setStage(
+          scan,
+          "understanding",
+          "complete",
+          `Built a context pack for ${built.profile.name} from your description.`,
+        );
+        scan.status = "queued";
+        scan.updatedAt = new Date().toISOString();
+        await getStateRepository().saveScan(scan);
+        return scan;
+      }
+
       const fast = await runFastUnderstanding(scan);
       await setStage(scan, "website", "complete", "1 public page read from the submitted domain.");
       scan.discoveryProfile = {
@@ -904,14 +1050,26 @@ export async function runScan(
       return scan;
     }
 
-    const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
-    const { websiteSources, pages } = pagesFromCrawl(crawl);
-    await setStage(
-      scan,
-      "website",
-      "complete",
-      `${pages.length} public page${pages.length === 1 ? "" : "s"} read from the submitted domain.`,
-    );
+    const isContextScan = scan.inputMode === "context";
+    let websiteSources: Provenance[] = [];
+    let pages: Array<WebsiteCrawlResult["pages"][number] & { sourceId: string }> = [];
+    let contextText = "";
+    let crawl: WebsiteCrawlResult | null = null;
+    if (isContextScan) {
+      contextText = (scan.contextText ?? "").trim();
+      const { source } = contextSource(scan.id, contextText);
+      websiteSources = [source];
+      await setStage(scan, "website", "complete", "Business context saved from your description.");
+    } else {
+      crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
+      ({ websiteSources, pages } = pagesFromCrawl(crawl));
+      await setStage(
+        scan,
+        "website",
+        "complete",
+        `${pages.length} public page${pages.length === 1 ? "" : "s"} read from the submitted domain.`,
+      );
+    }
 
     const redditProvider = createRedditProviderFromEnv({
       ...process.env,
@@ -945,12 +1103,28 @@ export async function runScan(
       business = persistedAnalysis.business;
       profile = persistedAnalysis.profile;
       analysisMode = persistedAnalysis.analysisMode;
+    } else if (aiProvider && isContextScan) {
+      const analyzed = await aiProvider.analyzeBusinessFromContext({
+        workspaceId: scan.workspaceId,
+        businessId,
+        contextText,
+        sourceId: websiteSources[0].id,
+        models,
+      });
+      business = analyzed.value;
+      profile = profileFromBusiness(business);
+      usage.push(usageRecord(analyzed, "website-analysis"));
+      analysisMode = "openai";
     } else if (aiProvider) {
+      // crawl is always set here: this branch only runs when !isContextScan
+      // (that case is handled above), and the website branch above always
+      // assigns crawl before this point.
+      const websiteCrawl = crawl as WebsiteCrawlResult;
       const analyzed = await aiProvider.analyzeBusiness({
         workspaceId: scan.workspaceId,
         businessId,
-        websiteUrl: crawl.canonicalUrl,
-        canonicalDomain: crawl.canonicalDomain,
+        websiteUrl: websiteCrawl.canonicalUrl,
+        canonicalDomain: websiteCrawl.canonicalDomain,
         pages,
         models,
       });
@@ -958,13 +1132,32 @@ export async function runScan(
       profile = profileFromBusiness(business);
       usage.push(usageRecord(analyzed, "website-analysis"));
       analysisMode = "openai";
-    } else {
-      profile = conservativeProfile(crawl.canonicalUrl, pages);
+    } else if (isContextScan) {
+      profile = conservativeProfileFromContext(contextText, websiteSources[0].id);
       business = toBusinessUnderstanding({
         profile,
         workspaceId: scan.workspaceId,
         businessId,
-        canonicalDomain: crawl.canonicalDomain,
+        canonicalDomain: "",
+      });
+      usage.push({
+        provider: "local",
+        purpose: "website-analysis",
+        model: "conservative-parser",
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: 0,
+      });
+      analysisMode = "local-fallback";
+    } else {
+      // Same reasoning as the branch above: crawl is always set here.
+      const websiteCrawl = crawl as WebsiteCrawlResult;
+      profile = conservativeProfile(websiteCrawl.canonicalUrl, pages);
+      business = toBusinessUnderstanding({
+        profile,
+        workspaceId: scan.workspaceId,
+        businessId,
+        canonicalDomain: websiteCrawl.canonicalDomain,
       });
       usage.push({
         provider: "local",

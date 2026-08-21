@@ -32,7 +32,13 @@ export type ScanStage = {
 
 export type Provenance = {
   id: string;
-  kind: "website" | "reddit";
+  /**
+   * `user_supplied` is the freeform "describe your market" text a user
+   * typed in place of a website -- see ScanRecord.inputMode. It is cited
+   * exactly like a crawled website page (same CitedValue/provenanceIds
+   * plumbing), just with no URL behind it.
+   */
+  kind: "website" | "reddit" | "user_supplied";
   url: string;
   title: string;
   excerpt: string;
@@ -434,7 +440,31 @@ import type { RedditDiscoveryResponse } from "@/lib/providers/contracts";
 export type ScanRecord = {
   id: string;
   workspaceId: string;
+  /**
+   * Empty string for a `inputMode: "context"` scan -- never a fabricated
+   * domain. Every existing consumer of this field (hostname derivation,
+   * "same business" comparisons, entitlement lookups) already treats a
+   * falsy/unparsable URL as "no identity" rather than throwing, so this
+   * requires no schema change and no widened type.
+   */
   websiteUrl: string;
+  /**
+   * How this scan's BusinessUnderstanding was sourced. Absent on every scan
+   * created before this field existed, which is why call sites treat a
+   * missing value as "website" rather than requiring it. `context` scans
+   * skip the website crawl entirely and build BusinessUnderstanding from
+   * `contextText` instead -- see scan-workflow.ts's `runScan`. Everything
+   * downstream of BusinessUnderstanding (competitors, query planning, Reddit
+   * discovery, triage, ranking, insights, monitoring) is unchanged by this
+   * field; it only matters to the understanding step itself.
+   */
+  inputMode?: "website" | "context";
+  /**
+   * The user's freeform description, present only when inputMode is
+   * "context". Persisted verbatim (capped length; see the /api/scans route)
+   * so it can be re-cited if the business understanding is ever rebuilt.
+   */
+  contextText?: string | null;
   /**
    * "retrying" means the pipeline threw but a background job attempt is
    * still scheduled to try again -- it is NOT terminal, and must never be

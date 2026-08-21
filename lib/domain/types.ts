@@ -52,14 +52,26 @@ export interface ProductFeature {
 export interface CompetitorReference {
   name: string;
   relationship: "direct" | "alternative" | "category" | "unknown";
-  /** Never present a competitor as fact unless its supporting sources are set. */
-  verification: "website_claim" | "external_provider" | "unverified_hypothesis";
+  /**
+   * Never present a competitor as fact unless its supporting sources are set.
+   * `user_claim` is for a competitor the user explicitly named themselves --
+   * in a freeform "describe your market" context submission, for instance --
+   * as distinct from `website_claim` (found on a crawled page) and
+   * `unverified_hypothesis` (an AI-suggested guess with no explicit source).
+   */
+  verification: "website_claim" | "external_provider" | "unverified_hypothesis" | "user_claim";
 }
 
 /** Source-backed company context used by both retrieval and AI interpretation. */
 export interface BusinessUnderstanding {
   businessId: EntityId;
   workspaceId: EntityId;
+  /**
+   * Empty string, never a fabricated domain, when this business was built
+   * from a freeform "describe your market" submission instead of a crawled
+   * website -- see ScanRecord.inputMode. Code that treats an empty string as
+   * "no site" (rather than parsing it as a URL) handles both sources safely.
+   */
   websiteUrl: string;
   canonicalDomain: string;
   name: CitedValue<string>;

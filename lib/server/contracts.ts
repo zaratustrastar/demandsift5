@@ -272,7 +272,9 @@ export type UsageRecord = {
     | "insight-generation"
     | "reply-generation"
     | "classification"
-    | "embedding";
+    | "embedding"
+    | "visibility-question-generation"
+    | "visibility-answer-analysis";
   model: string;
   inputTokens: number;
   outputTokens: number;
@@ -613,6 +615,93 @@ export type RedditMonitorRunRecord = {
   relevant: number;
   opportunities: number;
   error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+
+/**
+ * AI Visibility Tracking (MVP) -- a sidecar to the Reddit discovery/
+ * monitoring pipelines, not part of them. It tracks how often this business
+ * appears in AI-generated answers to the same 3 buyer-intent questions
+ * across ChatGPT, Gemini and Perplexity, once at setup and then weekly.
+ *
+ * Deliberately isolated: nothing here is read by scan-workflow.ts's query
+ * planning, triage, qualification, insight generation, or reply pipeline,
+ * and nothing in those pipelines writes these records. The only things
+ * reused from the rest of the app are the business profile and competitor
+ * data used to build the 3 questions (read-only), the background job
+ * queue, and the AiProvider abstraction.
+ */
+export type AiVisibilityAiProvider = "chatgpt" | "gemini" | "perplexity";
+
+export type AiVisibilityCitation = {
+  url: string;
+  title: string | null;
+  domain: string;
+};
+
+/**
+ * One of the 9 raw answers in a visibility scan (3 questions x 3 engines).
+ * `brandMentioned`, `competitorsMentioned`, `redditCitations` and
+ * `otherDomains` are all computed with deterministic string/URL matching,
+ * never AI -- see lib/server/ai-visibility-analysis.ts. Only
+ * `brandRecommended` (and its `reasoning`) comes from a semantic AI
+ * judgment, since "is this actually being recommended" cannot be reduced to
+ * pattern matching the way a brand name, a competitor name or a reddit.com
+ * URL can be.
+ */
+export type AiVisibilityAnswer = {
+  provider: AiVisibilityAiProvider;
+  question: string;
+  answerText: string;
+  citations: AiVisibilityCitation[];
+  model: string | null;
+  actorRunId: string | null;
+  brandMentioned: boolean;
+  mentionPosition: "not_mentioned" | "early" | "mid" | "late";
+  brandRecommended: boolean;
+  recommendationReasoning: string | null;
+  competitorsMentioned: string[];
+  redditCitations: AiVisibilityCitation[];
+  otherDomains: string[];
+  fetchedAt: string;
+};
+
+/** Simple, MVP-only visibility metrics -- see lib/server/ai-visibility-analysis.ts. */
+export type AiVisibilityMetrics = {
+  totalAnswers: number;
+  totalMentions: number;
+  mentionRate: number;
+  totalRecommendations: number;
+  recommendationRate: number;
+  byProvider: Record<AiVisibilityAiProvider, { mentioned: number; recommended: number; total: number }>;
+  competitorMentionCounts: Record<string, number>;
+  redditCitationCount: number;
+  otherDomainCounts: Record<string, number>;
+};
+
+export type AiVisibilityScanRecord = {
+  id: string;
+  workspaceId: string;
+  seedScanId: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  questions: string[];
+  answers: AiVisibilityAnswer[];
+  metrics: AiVisibilityMetrics | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Per-workspace weekly (Monday) schedule for AI visibility tracking. */
+export type AiVisibilitySettingsRecord = {
+  workspaceId: string;
+  seedScanId: string;
+  enabled: boolean;
+  lastSuccessfulScanAt: string | null;
+  nextRunAt: string;
+  lastScanId: string | null;
   createdAt: string;
   updatedAt: string;
 };

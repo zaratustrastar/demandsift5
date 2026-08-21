@@ -20,6 +20,7 @@ import { sql } from "drizzle-orm";
 
 import type { OpportunityClassification } from "@/lib/domain/types";
 import type {
+  AiVisibilityAnswer,
   CheckoutRecord,
   ConversionRecord,
   EntitlementRecord,
@@ -550,6 +551,44 @@ export const runtimeRedditMonitorMatches = pgTable("runtime_reddit_monitor_match
   check("runtime_reddit_monitor_matches_terms_check", sql`jsonb_typeof(${table.matchedTerms}) = 'array'`),
   check("runtime_reddit_monitor_matches_outcome_check", sql`${table.outcome} in ('unreviewed', 'irrelevant', 'relevant', 'opportunity')`),
   index("runtime_reddit_monitor_matches_run_idx").on(table.lastRunId),
+]);
+
+/**
+ * AI Visibility Tracking (MVP) -- a sidecar, isolated from the Reddit
+ * discovery/monitoring tables above. Mirrors the runtime_reddit_monitors /
+ * runtime_reddit_monitor_runs split: one settings row per workspace (the
+ * weekly Monday schedule) and one row per scan (the 9 stored answers +
+ * computed metrics, kept as scan history for week-over-week comparison).
+ */
+export const runtimeAiVisibilitySchedules = pgTable("runtime_ai_visibility_schedules", {
+  workspaceId: varchar("workspace_id", { length: 96 }).primaryKey().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  enabled: boolean("enabled").default(true).notNull(),
+  lastSuccessfulScanAt: timestamp("last_successful_scan_at", { withTimezone: true }),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }).defaultNow().notNull(),
+  lastScanId: varchar("last_scan_id", { length: 96 }),
+  createdAt,
+  updatedAt,
+}, (table) => [
+  index("runtime_ai_visibility_schedules_due_idx").on(table.enabled, table.nextRunAt),
+]);
+
+export const runtimeAiVisibilityScans = pgTable("runtime_ai_visibility_scans", {
+  id: varchar("id", { length: 96 }).primaryKey(),
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  status: varchar("status", { length: 24 }).notNull(),
+  questions: jsonb("questions").$type<string[]>().default([]).notNull(),
+  answers: jsonb("answers").$type<AiVisibilityAnswer[]>().default([]).notNull(),
+  metrics: jsonb("metrics").$type<Record<string, unknown> | null>(),
+  error: text("error"),
+  createdAt,
+  updatedAt,
+}, (table) => [
+  check("runtime_ai_visibility_scans_status_check", sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+  check("runtime_ai_visibility_scans_questions_check", sql`jsonb_typeof(${table.questions}) = 'array'`),
+  check("runtime_ai_visibility_scans_answers_check", sql`jsonb_typeof(${table.answers}) = 'array'`),
+  index("runtime_ai_visibility_scans_workspace_created_idx").on(table.workspaceId, table.createdAt),
 ]);
 
 export const runtimeConversions = pgTable("runtime_conversions", {

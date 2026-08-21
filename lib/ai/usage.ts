@@ -9,7 +9,9 @@ export type AiOperation =
   | "opportunity_ranking"
   | "insight_generation"
   | "reply_generation"
-  | "embedding";
+  | "embedding"
+  | "visibility_question_generation"
+  | "visibility_answer_analysis";
 
 export interface TokenUsage {
   inputTokens: number;

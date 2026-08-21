@@ -7,6 +7,11 @@ import {
   getClaimedRedditMonitorJob,
   getRedditMonitorRun,
 } from "@/lib/server/reddit-monitor-repository";
+import { runAiVisibilityScan } from "@/lib/server/ai-visibility-workflow";
+import {
+  getAiVisibilityScan,
+  getClaimedAiVisibilityJob,
+} from "@/lib/server/ai-visibility-repository";
 import type { ScanRecord } from "@/lib/server/contracts";
 
 type RouteContext = { params: Promise<{ jobId: string }> | { jobId: string } };
@@ -180,6 +185,58 @@ async function claimedMonitorSnapshot(jobId: string, workerId: string, start: bo
   });
 }
 
+const activeVisibilityExecutions = new Map<string, Promise<void>>();
+
+function visibilityExecutionSnapshot(
+  jobId: string,
+  scan: NonNullable<Awaited<ReturnType<typeof getAiVisibilityScan>>>,
+) {
+  if (scan.status === "failed") {
+    return {
+      ok: false,
+      executorStatus: 502,
+      error: { code: "ai_visibility_scan_failed", message: scan.error || "AI visibility tracking failed." },
+    };
+  }
+  return {
+    ok: true,
+    jobId,
+    visibilityScanId: scan.id,
+    status: scan.status,
+    complete: scan.status === "succeeded",
+  };
+}
+
+function ensureVisibilityExecution(visibilityScanId: string): Promise<void> {
+  const existing = activeVisibilityExecutions.get(visibilityScanId);
+  if (existing) return existing;
+  const execution = runAiVisibilityScan(visibilityScanId).then(() => undefined).catch((error) => {
+    console.error("Background AI visibility scan execution failed.", error);
+  });
+  activeVisibilityExecutions.set(visibilityScanId, execution);
+  void execution.finally(() => {
+    if (activeVisibilityExecutions.get(visibilityScanId) === execution) activeVisibilityExecutions.delete(visibilityScanId);
+  });
+  return execution;
+}
+
+async function claimedVisibilitySnapshot(jobId: string, workerId: string, start: boolean) {
+  const job = await getClaimedAiVisibilityJob(jobId, workerId);
+  if (!job) return null;
+  const scan = await getAiVisibilityScan(job.visibilityScanId);
+  if (!scan || scan.workspaceId !== job.workspaceId) {
+    throw new ApiError("AI visibility scan was not found.", 404, "ai_visibility_scan_not_found");
+  }
+  if (start && scan.status !== "succeeded" && scan.status !== "failed") {
+    void ensureVisibilityExecution(scan.id);
+  }
+  const snapshot = visibilityExecutionSnapshot(job.id, scan);
+  return Response.json(snapshot, {
+    status: snapshot.ok && !snapshot.complete ? 202 : 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
 export async function POST(request: Request, context: RouteContext) {
   try {
     requireWorker(request);
@@ -190,6 +247,8 @@ export async function POST(request: Request, context: RouteContext) {
     const { jobId } = await context.params;
     const monitorResponse = await claimedMonitorSnapshot(jobId, body.workerId, true);
     if (monitorResponse) return monitorResponse;
+    const visibilityResponse = await claimedVisibilitySnapshot(jobId, body.workerId, true);
+    if (visibilityResponse) return visibilityResponse;
     const { job, scan } = await requireClaimedScan(jobId, body.workerId);
     if (scan.status === "complete" || scan.status === "failed") {
     return Response.json(executionSnapshot(job, scan), {
@@ -234,6 +293,8 @@ export async function GET(request: Request, context: RouteContext) {
     const { jobId } = await context.params;
     const monitorResponse = await claimedMonitorSnapshot(jobId, workerId, false);
     if (monitorResponse) return monitorResponse;
+    const visibilityResponse = await claimedVisibilitySnapshot(jobId, workerId, false);
+    if (visibilityResponse) return visibilityResponse;
     const { job, scan } = await requireClaimedScan(jobId, workerId);
     return Response.json(executionSnapshot(job, scan), {
       headers: { "cache-control": "no-store" },

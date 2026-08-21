@@ -23,6 +23,7 @@ import type {
   AiProvider,
   AiProviderResult,
   AnalyzeBusinessRequest,
+  AnalyzeVisibilityMentionsRequest,
   ClassifiedConversation,
   ClassifyConversationsRequest,
   DeepQualifiedConversation,
@@ -30,11 +31,14 @@ import type {
   FastBusinessProfile,
   GeneratedInsightSet,
   GeneratedReplyDraft,
+  GeneratedVisibilityQuestions,
   GenerateInsightsRequest,
   GenerateReplyRequest,
+  GenerateVisibilityQuestionsRequest,
   QualifyConversationsRequest,
   TriagedConversation,
   TriageConversationsRequest,
+  VisibilityMentionAnalysis,
 } from "@/lib/providers/contracts";
 
 type JsonObject = Record<string, unknown>;
@@ -271,6 +275,48 @@ const FAST_BUSINESS_SCHEMA: JsonSchema = {
     "customerProblemLanguage",
     "competitors",
   ],
+  additionalProperties: false,
+};
+
+// Exactly 3 questions -- see GenerateVisibilityQuestionsRequest. minItems/
+// maxItems both pinned to 3 so a malformed response fails parsing loudly
+// instead of silently tracking visibility against the wrong question count.
+const VISIBILITY_QUESTIONS_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    questions: {
+      type: "array",
+      items: stringSchema,
+      minItems: 3,
+      maxItems: 3,
+    },
+  },
+  required: ["questions"],
+  additionalProperties: false,
+};
+
+// Deliberately the only AI Visibility Tracking schema with an opinion field
+// (brandRecommended): every other field of an answer (mentions, citations,
+// domains) is decided by deterministic string/URL matching in
+// lib/server/ai-visibility-analysis.ts, never by the model.
+const VISIBILITY_MENTIONS_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    results: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          index: { type: "integer" },
+          brandRecommended: { type: "boolean" },
+          reasoning: stringSchema,
+        },
+        required: ["index", "brandRecommended", "reasoning"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["results"],
   additionalProperties: false,
 };
 
@@ -665,6 +711,40 @@ function parseFastBusiness(raw: unknown): FastBusinessProfile {
     customerProblemLanguage: stringsValue(object.customerProblemLanguage, "customerProblemLanguage"),
     competitors: stringsValue(object.competitors, "competitors"),
   };
+}
+
+function parseVisibilityQuestions(raw: unknown): GeneratedVisibilityQuestions {
+  const object = objectValue(raw, "visibility questions");
+  const questions = stringsValue(object.questions, "questions");
+  if (questions.length !== 3) {
+    throw new OpenAiProviderError(
+      `OpenAI returned ${questions.length} visibility questions instead of exactly 3.`,
+    );
+  }
+  return { questions };
+}
+
+function parseVisibilityMentions(raw: unknown, expectedIndices: ReadonlySet<number>): VisibilityMentionAnalysis[] {
+  const object = objectValue(raw, "visibility mentions response");
+  const seen = new Set<number>();
+  const results = arrayValue(object.results, "results").map((entry, position) => {
+    const label = `results[${position}]`;
+    const item = objectValue(entry, label);
+    const index = numberValue(item.index, `${label}.index`);
+    if (!expectedIndices.has(index)) {
+      throw new OpenAiProviderError(`OpenAI returned an unknown answer index ${index} in visibility mentions.`);
+    }
+    if (seen.has(index)) {
+      throw new OpenAiProviderError(`OpenAI returned duplicate answer index ${index} in visibility mentions.`);
+    }
+    seen.add(index);
+    return {
+      index,
+      brandRecommended: booleanValue(item.brandRecommended, `${label}.brandRecommended`),
+      reasoning: stringValue(item.reasoning, `${label}.reasoning`),
+    };
+  });
+  return results;
 }
 
 const TRIAGE_INTENTS = new Set<TriageIntent>([
@@ -1765,6 +1845,78 @@ export class OpenAiProvider implements AiProvider {
       estimatedCostUsd,
       providerRequestId,
     };
+  }
+
+  /**
+   * AI Visibility Tracking: exactly 3 buyer-intent questions from a small,
+   * read-only slice of the business profile (category, brand, top pain
+   * phrases, competitor names) -- never the full BusinessUnderstanding or
+   * CompetitorProfile records, and nothing this method returns is fed back
+   * into scan-workflow.ts's own query planning. Runs on the economy model:
+   * this is a short, low-stakes generation task, not a full analysis pass.
+   */
+  async generateVisibilityQuestions(
+    request: GenerateVisibilityQuestionsRequest,
+  ): Promise<AiProviderResult<GeneratedVisibilityQuestions>> {
+    return this.structured({
+      model: request.models.economyModel,
+      operation: "visibility_question_generation",
+      schemaName: "ai_visibility_questions",
+      schema: VISIBILITY_QUESTIONS_SCHEMA,
+      maxOutputTokens: 500,
+      reasoningEffort: "low",
+      context: { workspaceId: request.workspaceId, businessId: request.businessId },
+      system:
+        "Write exactly 3 short, natural buyer-intent questions a real prospective customer might type into ChatGPT, Gemini or Perplexity while researching this category -- not questions about the business itself. " +
+        "Question 1 must be a \"best [category] for [use case]\" style question. Question 2 must be a \"best alternatives to [a named competitor if one is supplied, otherwise the product category]\" style question. Question 3 must be a \"how to solve [the core customer problem]\" style question. " +
+        "Do not include the business's own brand name in any question unless it would be unnatural for a real buyer question to omit it (e.g. the question is inherently about switching away from that exact brand). Never invent a competitor or problem not present in the supplied context. Keep each question under 15 words, plain conversational English, no quotation marks, no Boolean operators.",
+      user: JSON.stringify({
+        productCategory: request.productCategory,
+        brandName: request.brandName,
+        customerProblemLanguage: request.customerProblemLanguage,
+        competitorNames: request.competitorNames,
+      }),
+      parse: (value) => parseVisibilityQuestions(value),
+    });
+  }
+
+  /**
+   * AI Visibility Tracking: the one semantic judgment call in the whole
+   * pipeline -- whether the brand is actually being recommended as a
+   * solution in each answer, batched into a single call for all supplied
+   * answers. Every other field (brand/competitor/Reddit mentions, cited
+   * domains) is decided deterministically before this is ever called; see
+   * lib/server/ai-visibility-analysis.ts.
+   */
+  async analyzeVisibilityMentions(
+    request: AnalyzeVisibilityMentionsRequest,
+  ): Promise<AiProviderResult<VisibilityMentionAnalysis[]>> {
+    if (request.answers.length === 0) {
+      return {
+        value: [],
+        model: request.models.economyModel,
+        operation: "visibility_answer_analysis",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        estimatedCostUsd: 0,
+      };
+    }
+    const expectedIndices = new Set(request.answers.map((answer) => answer.index));
+    return this.structured({
+      model: request.models.economyModel,
+      operation: "visibility_answer_analysis",
+      schemaName: "ai_visibility_mentions",
+      schema: VISIBILITY_MENTIONS_SCHEMA,
+      maxOutputTokens: Math.max(1_000, Math.min(6_000, request.answers.length * 300)),
+      reasoningEffort: "low",
+      context: { workspaceId: request.workspaceId, businessId: request.businessId },
+      system:
+        `Return exactly one result for every supplied answer index and no other indices. For each answer, decide whether "${request.brandName}" is genuinely being RECOMMENDED as a solution -- not just named, mentioned in passing, mentioned as one of many options with no endorsement, or mentioned negatively/critically. brandRecommended must be true only when the answer text actively suggests, endorses, or positions the brand as a good choice for the asker. A brand that is merely present in a list without any positive framing is not a recommendation. reasoning is one short sentence citing what in the text supports the decision.`,
+      user: JSON.stringify({
+        brandName: request.brandName,
+        answers: request.answers,
+      }),
+      parse: (value) => parseVisibilityMentions(value, expectedIndices),
+    });
   }
 }
 

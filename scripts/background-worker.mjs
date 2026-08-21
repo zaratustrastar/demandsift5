@@ -774,6 +774,150 @@ async function runRedditMonitorScheduler(sql, signal) {
   log("info", "reddit_monitor_scheduler_stopped");
 }
 
+/**
+ * AI Visibility Tracking (MVP) -- a sidecar to the Reddit monitor above,
+ * not built on it: separate tables (runtime_ai_visibility_schedules /
+ * runtime_ai_visibility_scans), separate job type (ai_visibility_scan),
+ * separate scheduler. On by default (unlike the legacy full-scan
+ * `monitoringSchedulerEnabled`, which is intentionally dormant) since the
+ * spec calls for it to actually run automatically every Monday.
+ */
+export function aiVisibilitySchedulerEnabled(environment = process.env) {
+  return String(environment.AI_VISIBILITY_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
+export function aiVisibilityConfiguration(environment = process.env) {
+  return {
+    schedulerPollMs: boundedNumber(
+      environment.AI_VISIBILITY_SCHEDULER_POLL_MS,
+      300_000,
+      30_000,
+      3_600_000,
+    ),
+  };
+}
+
+/**
+ * Reserves at most one AI visibility Actor run per opted-in workspace per
+ * poll, for every schedule whose next_run_at (a Monday, see nextMonday in
+ * lib/server/ai-visibility-repository.ts) has arrived. The job is inserted
+ * first, same ordering as scheduleMonitoringScans, so a dedupe conflict
+ * never leaves an orphan scan row.
+ */
+export async function scheduleAiVisibilityScans(
+  sql,
+  {
+    now = new Date(),
+    createScanId = () => `aivis_${randomUUID().replaceAll("-", "")}`,
+    maxAttempts = configuredMaxAttempts(),
+  } = {},
+) {
+  const nowMs = validTimestamp(now);
+  if (nowMs === null) throw new Error("The AI visibility scheduler timestamp is invalid.");
+  const scheduledAt = new Date(nowMs);
+
+  return sql.begin(async (transactionSql) => {
+    const schedules = await transactionSql`
+      SELECT schedule.workspace_id, schedule.seed_scan_id
+      FROM runtime_ai_visibility_schedules AS schedule
+      JOIN runtime_scans AS seed_scan
+        ON seed_scan.id = schedule.seed_scan_id
+       AND seed_scan.workspace_id = schedule.workspace_id
+       AND seed_scan.status = 'complete'
+      WHERE schedule.enabled = true
+        AND schedule.next_run_at <= ${scheduledAt}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM background_jobs AS pending_job
+          WHERE pending_job.type = 'ai_visibility_scan'
+            AND pending_job.payload ->> 'workspaceId' = schedule.workspace_id
+            AND pending_job.status IN ('queued', 'running', 'retrying')
+        )
+      ORDER BY schedule.next_run_at, schedule.workspace_id
+      LIMIT 100
+      FOR UPDATE OF schedule SKIP LOCKED
+    `;
+
+    const scheduled = [];
+    for (const row of schedules) {
+      const scanId = createScanId();
+      const dedupeKey = `ai-visibility-run:${scanId}`;
+      const record = {
+        id: scanId,
+        workspaceId: row.workspace_id,
+        seedScanId: row.seed_scan_id,
+        status: "queued",
+        questions: [],
+        answers: [],
+        metrics: null,
+        error: null,
+        createdAt: scheduledAt.toISOString(),
+        updatedAt: scheduledAt.toISOString(),
+      };
+      const jobs = await transactionSql`
+        INSERT INTO background_jobs (
+          type, status, payload, dedupe_key, attempts, max_attempts,
+          run_at, created_at, updated_at
+        ) VALUES (
+          'ai_visibility_scan',
+          'queued',
+          ${transactionSql.json({ visibilityScanId: scanId, workspaceId: row.workspace_id })},
+          ${dedupeKey},
+          0,
+          ${maxAttempts},
+          ${scheduledAt},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (jobs.length === 0) continue;
+      await transactionSql`
+        INSERT INTO runtime_ai_visibility_scans (
+          id, workspace_id, seed_scan_id, status, questions, answers, metrics,
+          error, created_at, updated_at
+        ) VALUES (
+          ${record.id},
+          ${record.workspaceId},
+          ${record.seedScanId},
+          'queued',
+          ${transactionSql.json(record.questions)},
+          ${transactionSql.json(record.answers)},
+          NULL,
+          NULL,
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+      `;
+      scheduled.push({ scanId: record.id, workspaceId: record.workspaceId, dedupeKey });
+    }
+    return { candidateCount: schedules.length, scheduled };
+  });
+}
+
+async function runAiVisibilityScheduler(sql, signal) {
+  const configuration = aiVisibilityConfiguration();
+  log("info", "ai_visibility_scheduler_started", { pollMs: configuration.schedulerPollMs });
+  while (!signal.aborted) {
+    try {
+      const result = await scheduleAiVisibilityScans(sql);
+      if (result.scheduled.length > 0) {
+        log("info", "ai_visibility_scheduler_poll_completed", {
+          candidates: result.candidateCount,
+          scheduled: result.scheduled.length,
+        });
+      }
+    } catch (error) {
+      log("error", "ai_visibility_scheduler_poll_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "ai_visibility_scheduler_stopped");
+}
+
 export function jobExecutionConfiguration(environment = process.env) {
   const timeoutSeconds = boundedNumber(
     environment.BACKGROUND_JOB_TIMEOUT_SECONDS,
@@ -842,7 +986,7 @@ export async function claimJob(sql, workerIdValue) {
         (status IN ('queued', 'retrying') AND run_at <= now())
         OR (status = 'running' AND locked_at <= ${staleBefore})
       )
-      AND type IN ('scan.run', 'reddit_monitor_scan')
+      AND type IN ('scan.run', 'reddit_monitor_scan', 'ai_visibility_scan')
       AND attempts < max_attempts
       ORDER BY run_at ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
@@ -1107,11 +1251,17 @@ async function runQueueWorker(databaseUrl, signal) {
   const redditMonitorScheduler = redditMonitorSchedulerEnabled()
     ? runRedditMonitorScheduler(sql, queueSignal)
     : Promise.resolve();
+  const aiVisibilityScheduler = aiVisibilitySchedulerEnabled()
+    ? runAiVisibilityScheduler(sql, queueSignal)
+    : Promise.resolve();
   if (!monitoringSchedulerEnabled()) {
     log("info", "monitor_scheduler_disabled", { reason: "single_on_demand_scan_mvp" });
   }
   if (!redditMonitorSchedulerEnabled()) {
     log("info", "reddit_monitor_scheduler_disabled");
+  }
+  if (!aiVisibilitySchedulerEnabled()) {
+    log("info", "ai_visibility_scheduler_disabled");
   }
   log("info", "queue_worker_started", { pollMs: boundedPollMs });
   try {
@@ -1152,7 +1302,7 @@ async function runQueueWorker(databaseUrl, signal) {
     }
   } finally {
     queueController.abort("queue worker stopping");
-    await Promise.all([scheduler, redditMonitorScheduler]);
+    await Promise.all([scheduler, redditMonitorScheduler, aiVisibilityScheduler]);
     await sql.end({ timeout: 5 });
     log("info", "queue_worker_stopped");
   }

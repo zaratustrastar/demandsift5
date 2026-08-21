@@ -37,6 +37,7 @@ import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intel
 import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
 import type { FastBusinessProfile } from "@/lib/providers/contracts";
+import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
 import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
 import type { WebsiteCrawlResult } from "@/lib/security/website-crawler";
 import type {
@@ -2068,6 +2069,14 @@ export async function runScan(
     scan.updatedAt = new Date().toISOString();
     await repository.saveScan(scan);
     await captureFunnelEvent(scan, "scan_completed");
+    if (scan.scanKind !== "monitoring") {
+      // AI Visibility Tracking is a sidecar (see ai-visibility-workflow.ts):
+      // best-effort only. Nothing about it may ever fail, delay, or retry
+      // the primary scan this business-setup completion belongs to.
+      void ensureAiVisibilityTrackingStarted(scan).catch((error) => {
+        console.error("Could not start AI visibility tracking.", error);
+      });
+    }
     return scan;
   } catch (error) {
     const message =

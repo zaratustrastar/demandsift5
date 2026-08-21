@@ -130,6 +130,56 @@ export interface EmbeddingRequest {
   businessId?: EntityId;
 }
 
+/**
+ * Input for generating the 3 fixed buyer-intent questions AI Visibility
+ * Tracking asks every engine. Deliberately narrow -- only the handful of
+ * BusinessUnderstanding fields and competitor names actually needed to
+ * write natural buyer questions, not the whole business/competitor record.
+ */
+export interface GenerateVisibilityQuestionsRequest {
+  productCategory: string;
+  brandName: string;
+  customerProblemLanguage: string[];
+  competitorNames: string[];
+  workspaceId: EntityId;
+  businessId: EntityId;
+  models: ModelConfiguration;
+}
+
+export interface GeneratedVisibilityQuestions {
+  /** Always exactly 3: category/use-case, alternatives, and problem-solving. */
+  questions: string[];
+}
+
+/** One raw AI-search answer to classify for AnalyzeVisibilityMentionsRequest. */
+export interface VisibilityAnswerToAnalyze {
+  index: number;
+  question: string;
+  answerText: string;
+}
+
+export interface AnalyzeVisibilityMentionsRequest {
+  brandName: string;
+  answers: VisibilityAnswerToAnalyze[];
+  models: ModelConfiguration;
+  workspaceId: EntityId;
+  businessId: EntityId;
+}
+
+/**
+ * The one genuinely semantic field AI Visibility Tracking needs: whether
+ * the brand is actually being recommended as a solution, as opposed to
+ * merely named, mentioned neutrally, or mentioned negatively. Everything
+ * else about an answer (whether the brand/competitors/Reddit are mentioned
+ * at all) is deterministic string/URL matching -- see
+ * lib/server/ai-visibility-analysis.ts.
+ */
+export interface VisibilityMentionAnalysis {
+  index: number;
+  brandRecommended: boolean;
+  reasoning: string;
+}
+
 export interface AiProvider {
   readonly name: string;
   analyzeBusiness(
@@ -157,6 +207,14 @@ export interface AiProvider {
   ): Promise<AiProviderResult<GeneratedReplyDraft>>;
   /** Available for future high-volume retrieval, not used by the MVP scan. */
   embed(request: EmbeddingRequest): Promise<AiProviderResult<number[][]>>;
+  /** AI Visibility Tracking: generate the 3 fixed buyer-intent questions. */
+  generateVisibilityQuestions(
+    request: GenerateVisibilityQuestionsRequest,
+  ): Promise<AiProviderResult<GeneratedVisibilityQuestions>>;
+  /** AI Visibility Tracking: batched semantic recommendation classification. */
+  analyzeVisibilityMentions(
+    request: AnalyzeVisibilityMentionsRequest,
+  ): Promise<AiProviderResult<VisibilityMentionAnalysis[]>>;
 }
 
 export interface RedditSearchQueries {

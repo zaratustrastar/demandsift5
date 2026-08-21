@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { REDDIT_MONITOR_LIMITS } from "@/lib/intelligence/reddit-monitor-limits";
+
 import { redditDemandDemoData } from "./demo-data";
 import type {
   BusinessProfile,
@@ -79,14 +81,18 @@ function RedditMonitoringPanel({
   onUpdate?: ProductDashboardProps["onUpdateMonitoring"];
 }) {
   const [terms, setTerms] = useState(() =>
-    monitoring?.watchTerms.filter((term) => term.active).map((term) => term.value).join("\n") ?? "",
+    monitoring?.watchTerms
+      .filter((term) => term.active)
+      .slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms)
+      .map((term) => term.value)
+      .join("\n") ?? "",
   );
   const [saving, setSaving] = useState(false);
   if (!monitoring) return null;
 
   const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => [...new Set(
     terms.split(/\r?\n|,/u).map((value) => value.replace(/\s+/gu, " ").trim()).filter(Boolean),
-  )].slice(0, 40).map((value) => {
+  )].slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms).map((value) => {
     const existing = monitoring.watchTerms.find(
       (term) => term.value.toLocaleLowerCase("en-US") === value.toLocaleLowerCase("en-US"),
     );
@@ -124,6 +130,9 @@ function RedditMonitoringPanel({
       </label>
       <label className={styles.monitoringTerms}>
         <span>Brand, competitor and keyword watch terms</span>
+        <small>
+          Up to {REDDIT_MONITOR_LIMITS.maxWatchTerms} terms and {REDDIT_MONITOR_LIMITS.maxResultsPerRun} raw results per daily run.
+        </small>
         <textarea
           value={terms}
           rows={Math.min(8, Math.max(4, terms.split("\n").length))}

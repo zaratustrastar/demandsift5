@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  CODE_SHA: 26ec793c4d8a68c4dd437e7a8bfcfb04fc89b26b
+  CODE_SHA: 93367a4617b34d0bc791a25ea78388d48cf5d9dc
   APP_URL: https://demandsift.143-244-154-139.sslip.io
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run lint
-      - run: node --test tests/reddit-daily-monitoring.test.mjs tests/reddit-monitoring-ui.test.mjs
+      - run: node --test tests/openai-intelligence-pipeline.test.mjs tests/job-retry-classification.test.mjs tests/reddit-daily-monitoring.test.mjs tests/reddit-monitoring-ui.test.mjs
 
   deploy:
     needs: verify

@@ -36,7 +36,9 @@ import {
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
 import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
+import type { FastBusinessProfile } from "@/lib/providers/contracts";
 import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
+import type { WebsiteCrawlResult } from "@/lib/security/website-crawler";
 import type {
   CompetitorWeaknessRecord,
   DemandInsightRecord,
@@ -337,6 +339,196 @@ function profileFromBusiness(business: BusinessUnderstanding): ScanBusinessProfi
       ...business.ambiguityRisks.provenanceIds,
     ])],
   };
+}
+
+/** Builds the same review-screen profile shape as `profileFromBusiness`, but
+ * from a fast, homepage-only, uncited analysis. Fields the fast pass never
+ * asks for (audiences, jobs, workarounds, triggers, features, exclusions,
+ * ambiguity risks) are left empty rather than guessed; the background
+ * refinement (see `refineDiscoveryProfile`) fills them in from the full
+ * multi-page analysis. */
+function scanProfileFromFastAnalysis(
+  fast: FastBusinessProfile,
+  canonicalUrl: string,
+  sourceIds: string[],
+): ScanBusinessProfile {
+  return {
+    name: fast.name,
+    websiteUrl: canonicalUrl,
+    summary: fast.summary,
+    productCategory: fast.productCategory,
+    targetAudience: [],
+    problemsSolved: fast.customerProblemLanguage,
+    jobsToBeDone: [],
+    likelyWorkarounds: [],
+    triggerEvents: [],
+    customerProblemLanguage: fast.customerProblemLanguage,
+    features: [],
+    competitors: fast.competitors,
+    irrelevantTopics: [],
+    brandTerms: [fast.name],
+    ambiguityRisks: [],
+    sourceIds,
+  };
+}
+
+/** The `BusinessUnderstanding` counterpart to `scanProfileFromFastAnalysis`,
+ * built directly (rather than via `toBusinessUnderstanding`) so productTerms
+ * can cite the fast pass's own productTerms instead of the derived
+ * name/productCategory/features formula that pass never fills in. Confidence
+ * is intentionally lower than a full analysis's 0.8: this is a one-page,
+ * quick-read hypothesis, not a verified multi-page finding. */
+function businessUnderstandingFromFastAnalysis(
+  fast: FastBusinessProfile,
+  input: { workspaceId: string; businessId: string; websiteUrl: string; canonicalDomain: string; sourceIds: string[] },
+): BusinessUnderstanding {
+  const cited = <T,>(value: T) => ({ value, confidence: 0.55, provenanceIds: input.sourceIds });
+  const productTerms = [fast.productCategory, ...fast.productTerms].filter(isUsefulSearchPhrase);
+  return {
+    businessId: input.businessId,
+    workspaceId: input.workspaceId,
+    websiteUrl: input.websiteUrl,
+    canonicalDomain: input.canonicalDomain,
+    name: cited(fast.name),
+    summary: cited(fast.summary),
+    productCategory: cited(fast.productCategory),
+    targetAudiences: cited([]),
+    problemsSolved: cited(fast.customerProblemLanguage),
+    jobsToBeDone: cited([]),
+    likelyWorkarounds: cited([]),
+    triggerEvents: cited([]),
+    features: cited([]),
+    competitors: cited(
+      fast.competitors.map((name) => ({
+        name,
+        relationship: "unknown" as const,
+        verification: "website_claim" as const,
+      })),
+    ),
+    irrelevantTopics: cited([]),
+    productTerms: cited(productTerms),
+    brandTerms: cited([fast.name]),
+    customerProblemLanguage: cited(fast.customerProblemLanguage),
+    ambiguityRisks: cited([]),
+    version: 3,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/** Provenance records + sourceId-tagged pages for a crawl result. Shared by
+ * the fast pass, the full pass inside `runScan`, and the background
+ * `refineDiscoveryProfile` continuation, so all three attribute evidence the
+ * same way. */
+function pagesFromCrawl(crawl: WebsiteCrawlResult): {
+  websiteSources: Provenance[];
+  pages: Array<WebsiteCrawlResult["pages"][number] & { sourceId: string }>;
+} {
+  const websiteSources: Provenance[] = crawl.pages.map((page) => ({
+    id: `web_${page.contentHash.slice(0, 20)}`,
+    kind: "website",
+    url: page.url,
+    title: page.title,
+    excerpt: (page.description ?? page.text).slice(0, 280),
+    capturedAt: page.retrievedAt,
+    synthetic: false,
+    provider: "same-domain-crawler",
+    sourceMode: "live",
+  }));
+  const pages = crawl.pages.map((page, index) => ({ ...page, sourceId: websiteSources[index].id }));
+  return { websiteSources, pages };
+}
+
+/** Fast first-pass understanding: a homepage-only crawl plus, when AI is
+ * configured, a small/cheap-model analysis -- built to finish in a couple of
+ * seconds so the editable setup screen doesn't wait on the full 4-page,
+ * `analysisModel` pipeline. Falls back to the same local heuristic parser
+ * the full pipeline uses when no AI provider is configured. */
+async function runFastUnderstanding(scan: ScanRecord): Promise<{
+  business: BusinessUnderstanding;
+  profile: ScanBusinessProfile;
+  analysisMode: ScanResult["analysisMode"];
+}> {
+  const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 1, timeoutMs: 6_000 });
+  const { pages } = pagesFromCrawl(crawl);
+  const homepage = pages[0];
+  const businessId = createId("biz");
+  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+
+  if (aiProvider) {
+    const models = openAiModelsFromEnv();
+    const analyzed = await aiProvider.analyzeBusinessFast({
+      workspaceId: scan.workspaceId,
+      businessId,
+      websiteUrl: crawl.canonicalUrl,
+      canonicalDomain: crawl.canonicalDomain,
+      pages: [homepage],
+      models,
+    });
+    const profile = scanProfileFromFastAnalysis(analyzed.value, crawl.canonicalUrl, [homepage.sourceId]);
+    const business = businessUnderstandingFromFastAnalysis(analyzed.value, {
+      workspaceId: scan.workspaceId,
+      businessId,
+      websiteUrl: crawl.canonicalUrl,
+      canonicalDomain: crawl.canonicalDomain,
+      sourceIds: [homepage.sourceId],
+    });
+    return { business, profile, analysisMode: "openai" };
+  }
+
+  const profile = conservativeProfile(crawl.canonicalUrl, pages);
+  const business = toBusinessUnderstanding({
+    profile,
+    workspaceId: scan.workspaceId,
+    businessId,
+    canonicalDomain: crawl.canonicalDomain,
+  });
+  return { business, profile, analysisMode: "local-fallback" };
+}
+
+/** Best-effort continuation of the fast pass: re-crawls the full 4 pages and
+ * runs the real `analysisModel` analysis, then upgrades `discoveryProfile`
+ * from "fast" to "full" in place. Runs detached from any HTTP request on
+ * this same long-running server process (see the `void` call site in
+ * `runScan`) -- if it throws, is slow, or the process restarts before it
+ * finishes, nothing is lost: `runScan`'s full pipeline path only ever
+ * trusts a "full" `discoveryProfile`, so it simply redoes this
+ * synchronously the next time the scan is started. Re-reads the scan
+ * immediately before writing so it never clobbers a scan that has since
+ * moved on (started, or already refined by another run). */
+async function refineDiscoveryProfile(scanId: string): Promise<void> {
+  const repository = getStateRepository();
+  const scan = await repository.getScan(scanId);
+  if (!scan || scan.status !== "queued" || scan.discoveryProfile?.profileStage !== "fast") return;
+
+  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+  if (!aiProvider) return;
+
+  const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
+  const { pages } = pagesFromCrawl(crawl);
+  const models = openAiModelsFromEnv();
+  const businessId = scan.discoveryProfile.business.businessId;
+  const analyzed = await aiProvider.analyzeBusiness({
+    workspaceId: scan.workspaceId,
+    businessId,
+    websiteUrl: crawl.canonicalUrl,
+    canonicalDomain: crawl.canonicalDomain,
+    pages,
+    models,
+  });
+  const business = analyzed.value;
+  const profile = profileFromBusiness(business);
+
+  const latest = await repository.getScan(scanId);
+  if (!latest || latest.status !== "queued" || latest.discoveryProfile?.profileStage !== "fast") return;
+  latest.discoveryProfile = {
+    profile,
+    business,
+    analysisMode: "openai",
+    analyzedAt: new Date().toISOString(),
+    profileStage: "full",
+  };
+  latest.updatedAt = new Date().toISOString();
+  await repository.saveScan(latest);
 }
 
 function usageRecord(
@@ -649,19 +841,45 @@ export async function runScan(
 
   try {
     await setStage(scan, "website", "active");
+
+    if (options.stopAfterUnderstanding) {
+      // `/analyze` only ever calls runScan with stopAfterUnderstanding when
+      // scan.discoveryProfile doesn't exist yet (it returns early itself
+      // otherwise), so there is nothing here to reuse: always take the fast
+      // path. The full crawl + full analysis still happen -- right away in
+      // the background, or synchronously the next time runScan() runs the
+      // real pipeline -- before Reddit retrieval ever sees this profile.
+      const fast = await runFastUnderstanding(scan);
+      await setStage(scan, "website", "complete", "1 public page read from the submitted domain.");
+      scan.discoveryProfile = {
+        profile: fast.profile,
+        business: fast.business,
+        analysisMode: fast.analysisMode,
+        analyzedAt: new Date().toISOString(),
+        profileStage: "fast",
+      };
+      await setStage(
+        scan,
+        "understanding",
+        "complete",
+        `Fast first look at ${fast.profile.name}. Refining in the background -- review what we should look for, then start the Reddit scan.`,
+      );
+      scan.status = "queued";
+      scan.updatedAt = new Date().toISOString();
+      await getStateRepository().saveScan(scan);
+
+      // Best-effort background upgrade to a full analysis; see
+      // refineDiscoveryProfile's doc comment for why a lost/failed run here
+      // is never a correctness problem.
+      void refineDiscoveryProfile(scan.id).catch((error) => {
+        console.error("scan-workflow: background profile refinement failed", error);
+      });
+
+      return scan;
+    }
+
     const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
-    const websiteSources: Provenance[] = crawl.pages.map((page) => ({
-      id: `web_${page.contentHash.slice(0, 20)}`,
-      kind: "website",
-      url: page.url,
-      title: page.title,
-      excerpt: (page.description ?? page.text).slice(0, 280),
-      capturedAt: page.retrievedAt,
-      synthetic: false,
-      provider: "same-domain-crawler",
-      sourceMode: "live",
-    }));
-    const pages = crawl.pages.map((page, index) => ({ ...page, sourceId: websiteSources[index].id }));
+    const { websiteSources, pages } = pagesFromCrawl(crawl);
     await setStage(
       scan,
       "website",
@@ -690,9 +908,14 @@ export async function runScan(
     let analysisMode: ScanResult["analysisMode"];
     // A previously analyzed profile is reused verbatim. Re-analyzing would
     // burn tokens and, worse, could produce different terms from the ones the
-    // user just reviewed and approved.
+    // user just reviewed and approved. A "fast" (homepage-only) profile is
+    // never reused here: it exists only to render the review screen quickly,
+    // and query planning below needs the full multi-page analysis, so this
+    // redoes it just like the no-persisted-analysis case.
     const persistedAnalysis = scan.discoveryProfile;
-    if (persistedAnalysis) {
+    const canReusePersistedAnalysis =
+      Boolean(persistedAnalysis) && persistedAnalysis?.profileStage !== "fast";
+    if (canReusePersistedAnalysis && persistedAnalysis) {
       business = persistedAnalysis.business;
       profile = persistedAnalysis.profile;
       analysisMode = persistedAnalysis.analysisMode;
@@ -727,33 +950,24 @@ export async function runScan(
       });
       analysisMode = "local-fallback";
     }
-    if (!persistedAnalysis) {
+    if (!canReusePersistedAnalysis) {
       // Persisted before Reddit retrieval so the user can review and edit the
-      // discovery terms while the scan waits.
+      // discovery terms while the scan waits. This also upgrades a "fast"
+      // profile left by the earlier review step to "full".
       scan.discoveryProfile = {
         profile,
         business,
         analysisMode,
         analyzedAt: new Date().toISOString(),
+        profileStage: "full",
       };
       scan.updatedAt = new Date().toISOString();
       await getStateRepository().saveScan(scan);
     }
 
-    if (options.stopAfterUnderstanding) {
-      // Analysis-only pass. The scan returns to `queued` so the user can review
-      // and edit the discovery terms, then start Reddit retrieval when ready.
-      await setStage(
-        scan,
-        "understanding",
-        "complete",
-        `Built a source-backed context pack for ${profile.name}. Review what we should look for, then start the Reddit scan.`,
-      );
-      scan.status = "queued";
-      scan.updatedAt = new Date().toISOString();
-      await getStateRepository().saveScan(scan);
-      return scan;
-    }
+    // Note: options.stopAfterUnderstanding is handled entirely by the fast
+    // path near the top of this function, which always returns before
+    // reaching here -- see the comment there for why.
 
     // User edits are applied after crawling and before query planning: the
     // user decides what to look for, DemandSift still compiles the searches.

@@ -2,6 +2,7 @@ import type { EntityId, IsoDateTime } from "@/lib/domain/types";
 
 export type AiOperation =
   | "website_analysis"
+  | "website_analysis_fast"
   | "conversation_triage"
   | "deep_qualification"
   | "conversation_classification"

@@ -242,6 +242,7 @@ export type UsageRecord = {
   provider: "openai" | "local";
   purpose:
     | "website-analysis"
+    | "website-analysis-fast"
     | "triage"
     | "deep-qualification"
     | "insight-generation"
@@ -450,6 +451,15 @@ export type ScanRecord = {
     business: BusinessUnderstanding;
     analysisMode: ScanResult["analysisMode"];
     analyzedAt: string;
+    /**
+     * "fast" is a homepage-only preview built to render the editable setup
+     * screen in seconds; it is never sufficient input for Reddit query
+     * planning. Absent (older records) or "full" both mean a complete,
+     * multi-page analysis -- see lib/server/scan-workflow.ts's
+     * `runFastUnderstanding` / `refineDiscoveryProfile` / the
+     * `canReusePersistedAnalysis` check in `runScan`.
+     */
+    profileStage?: "fast" | "full";
   } | null;
   /**
    * Checkpoint of a successful Reddit discovery call, persisted the same way

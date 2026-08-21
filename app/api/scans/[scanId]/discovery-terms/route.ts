@@ -77,6 +77,12 @@ export async function GET(request: Request, context: RouteContext) {
           scan.status !== "complete",
         discoveryOverrides: scan.discoveryOverrides ?? null,
         profile: analysis?.profile ?? null,
+        // "fast" means this is still the homepage-only preview; a fuller
+        // analysis is (or was) refining in the background. Absent/"full"
+        // both mean the complete analysis. The review screen uses this to
+        // silently refresh an untouched profile once refinement lands,
+        // without clobbering anything the user has already edited.
+        profileStage: analysis?.profileStage ?? (analysis ? "full" : null),
         // Derived terms are shown so the user edits from what was found rather
         // than from a blank form.
         derived: business

@@ -38,7 +38,11 @@ test("analysis is persisted before retrieval and reused afterwards", () => {
   assert.match(workflow, /scan\.discoveryProfile = \{/);
   assert.match(workflow, /const persistedAnalysis = scan\.discoveryProfile;/);
   // Re-deriving would hand the user different terms from the ones approved.
-  assert.match(workflow, /if \(persistedAnalysis\) \{/);
+  // A "fast" (homepage-only) profile is the one exception: it is deliberately
+  // never reused for query planning, only redone in full -- see
+  // canReusePersistedAnalysis.
+  assert.match(workflow, /const canReusePersistedAnalysis =/);
+  assert.match(workflow, /if \(canReusePersistedAnalysis && persistedAnalysis\) \{/);
   const persistPoint = workflow.indexOf("scan.discoveryProfile = {");
   const discovery = workflow.indexOf('setStage(scan, "discovery", "active")');
   assert.ok(persistPoint < discovery, "the profile must exist before Reddit retrieval");

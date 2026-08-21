@@ -30,6 +30,13 @@ export type DiscoveryProfileResponse = {
   profile: { name?: string; summary?: string; productCategory?: string } | null;
   derived: DiscoveryDerived | null;
   discoveryOverrides: Partial<DiscoveryDerived> | null;
+  /**
+   * "fast" is a homepage-only preview shown while the full analysis keeps
+   * running in the background; null/"full" both mean the complete
+   * analysis. See the polling effect below, which upgrades an untouched
+   * "fast" screen in place once refinement lands.
+   */
+  profileStage?: "fast" | "full" | null;
 };
 
 /**
@@ -143,6 +150,55 @@ export function DiscoveryProfile({
       ({ key }) => (terms[key] ?? []).join("\u0000") !== (baselineTerms[key] ?? []).join("\u0000"),
     );
   }, [baselineTerms, terms]);
+
+  // Fast-pass profiles exist only to render this screen quickly; a fuller
+  // analysis keeps running in the background. While the user hasn't touched
+  // anything, poll for that upgrade and swap it in silently -- otherwise
+  // pressing "Scan Reddit" unedited, or editing just one field, could
+  // permanently save the fast pass's thinner terms as a user override (the
+  // PUT below always sends all three fields together). Giving up after a
+  // while, or if this never lands, is never a correctness problem: the full
+  // analysis still runs synchronously when the real scan starts regardless
+  // (see scan-workflow.ts's `canReusePersistedAnalysis` check) -- this only
+  // affects whether the user sees the better terms a little sooner.
+  useEffect(() => {
+    if (data?.profileStage !== "fast" || edited) return;
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 24; // ~2.5s * 24 ~= 60s
+    const timer = setInterval(async () => {
+      attempts += 1;
+      if (attempts > MAX_ATTEMPTS) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const response = await fetch(
+          `/api/scans/${encodeURIComponent(scanId)}/discovery-terms`,
+          { cache: "no-store" },
+        );
+        if (!response.ok || cancelled) return;
+        const payload = (await response.json()) as DiscoveryProfileResponse;
+        if (cancelled || payload.profileStage !== "full") return;
+        clearInterval(timer);
+        setData(payload);
+        const base = payload.derived;
+        const capped: Record<EditableKey, string[]> = {
+          productTerms: (base?.productTerms ?? []).slice(0, MAX_TERMS.productTerms),
+          customerProblems: (base?.customerProblems ?? []).slice(0, MAX_TERMS.customerProblems),
+          competitors: (base?.competitors ?? []).slice(0, MAX_TERMS.competitors),
+        };
+        setTerms(capped);
+        setBaselineTerms(capped);
+      } catch {
+        // Best-effort; see the comment above this effect.
+      }
+    }, 2_500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [scanId, data?.profileStage, edited]);
 
   function removeTerm(key: EditableKey, term: string) {
     setTerms((current) =>

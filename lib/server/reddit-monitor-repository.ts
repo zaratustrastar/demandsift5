@@ -8,6 +8,7 @@ import {
   runtimeRedditMonitors,
 } from "@/db/postgres/schema";
 import type { RedditDiscoveryCandidate } from "@/lib/domain/types";
+import { REDDIT_MONITOR_LIMITS } from "@/lib/intelligence/reddit-monitor-limits";
 import type {
   RedditMonitorRunRecord,
   RedditMonitorSettingsRecord,
@@ -71,7 +72,7 @@ export function normalizedWatchTermRecords(terms: readonly RedditWatchTerm[]): R
       kind: item.kind === "brand" || item.kind === "competitor" ? item.kind : "keyword",
       active: item.active !== false,
     });
-    if (result.length >= 40) break;
+    if (result.length >= REDDIT_MONITOR_LIMITS.maxWatchTerms) break;
   }
   return result;
 }

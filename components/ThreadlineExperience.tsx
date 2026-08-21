@@ -464,7 +464,9 @@ function RefiningProfile({
   useEffect(() => {
     let cancelled = false;
     let attempts = 0;
-    const MAX_ATTEMPTS = 36; // ~2.5s * 36 ~= 90s
+    const MAX_ATTEMPTS = 56; // ~2.5s * 56 ~= 140s -- headroom for a 4-page
+    // crawl plus a real analysisModel call under production latency, now that
+    // refineDiscoveryProfile also retries once on a transient failure.
 
     const check = async () => {
       attempts += 1;

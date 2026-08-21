@@ -606,19 +606,40 @@ async function refineDiscoveryProfile(scanId: string): Promise<void> {
   const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
   if (!aiProvider) return;
 
-  const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
-  const { pages } = pagesFromCrawl(crawl);
   const models = openAiModelsFromEnv();
   const businessId = scan.discoveryProfile.business.businessId;
-  const analyzed = await aiProvider.analyzeBusiness({
-    workspaceId: scan.workspaceId,
-    businessId,
-    websiteUrl: crawl.canonicalUrl,
-    canonicalDomain: crawl.canonicalDomain,
-    pages,
-    models,
-  });
-  const business = analyzed.value;
+
+  // One retry for a transient crawl/AI hiccup: without this, any single
+  // failure here (network blip, a momentary AI gateway error) leaves the
+  // scan stuck showing the fast/economy-model preview in the review UI
+  // indefinitely -- runScan's own full pipeline still redoes this
+  // synchronously before ever searching Reddit, but the reviewer would see
+  // (and could be misled by) stale, lower-fidelity wording the whole time.
+  const REFINE_ATTEMPTS = 2;
+  let business: BusinessUnderstanding | undefined;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < REFINE_ATTEMPTS; attempt += 1) {
+    try {
+      const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
+      const { pages } = pagesFromCrawl(crawl);
+      const analyzed = await aiProvider.analyzeBusiness({
+        workspaceId: scan.workspaceId,
+        businessId,
+        websiteUrl: crawl.canonicalUrl,
+        canonicalDomain: crawl.canonicalDomain,
+        pages,
+        models,
+      });
+      business = analyzed.value;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt < REFINE_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+    }
+  }
+  if (!business) throw lastError ?? new Error("Background profile refinement failed.");
   const profile = profileFromBusiness(business);
 
   const latest = await repository.getScan(scanId);

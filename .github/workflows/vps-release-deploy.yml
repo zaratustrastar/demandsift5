@@ -237,3 +237,4 @@ jobs:
 # trigger: disable thread enrichment run by default, relax publish gate to match (2026-08-20T19:29:44Z)
 # trigger: fast homepage-only first-pass business profile, full analysis refines in background (2026-08-21T01:25:07Z)
 # trigger: optional competitor website analysis sidecar, homepage-only fast pass appended to Reddit query planning (2026-08-21T02:24:49Z)
+# trigger: restructure setup flow -- competitors step before review, hide preliminary profile behind a refining wait screen (2026-08-21T03:13:32Z)

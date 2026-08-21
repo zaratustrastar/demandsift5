@@ -57,22 +57,26 @@ export interface ProductDashboardProps {
 
 type IconName =
   | "arrow"
+  | "arrowLeft"
   | "check"
   | "copy"
   | "edit"
   | "external"
   | "logo"
-  | "refresh";
+  | "refresh"
+  | "star";
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const glyphs: Record<IconName, string> = {
     arrow: "\u2192",
+    arrowLeft: "\u2190",
     check: "\u2713",
     copy: "\u29c9",
     edit: "\u270e",
     external: "\u2197",
     logo: "\u2713",
     refresh: "\u21bb",
+    star: "\u2605",
   };
 
   return (
@@ -790,6 +794,243 @@ function ReplyComposer({
   );
 }
 
+/**
+ * Built entirely from the same classification fields the ranking and reply
+ * pipeline already produce (buyerIntent, conversationType, communityRisk,
+ * competitorComplaint, potentialCustomerIntent) -- no new signal data is
+ * introduced, these are just formatted as a compact chip row instead of the
+ * full sentences shown elsewhere on the card.
+ */
+function reliabilitySignalTags(opportunity: RedditOpportunity): string[] {
+  const tags: string[] = [];
+  if (opportunity.potentialCustomerIntent) {
+    tags.push(potentialIntentLabel(opportunity.potentialCustomerIntent));
+  }
+  tags.push(`${intelligenceLabel(opportunity.classification.buyerIntent)} intent`);
+  tags.push(intelligenceLabel(opportunity.conversationType));
+  if (opportunity.classification.competitorComplaint) {
+    tags.push("Competitor complaint");
+  }
+  tags.push(`${intelligenceLabel(opportunity.classification.communityRisk)} community risk`);
+  return [...new Set(tags)].slice(0, 5);
+}
+
+/**
+ * The single card shown by OpportunityCarousel. Same underlying fields as
+ * OpportunityCard (relevanceScore, matchReasons, permalink, reply) -- this
+ * is a presentation variant for the single-card carousel, not a new data
+ * shape.
+ */
+function CarouselOpportunityCard({
+  opportunity,
+  isMostReliable,
+  isRevealed,
+  onToggleReply,
+}: {
+  opportunity: RedditOpportunity;
+  isMostReliable: boolean;
+  isRevealed: boolean;
+  onToggleReply: () => void;
+}) {
+  const reliabilityScore = Math.round(opportunity.classification.relevanceScore);
+  const tags = reliabilitySignalTags(opportunity);
+  const whyItMatters = opportunity.matchReasons[0] ?? opportunity.classification.customerProblem;
+
+  return (
+    <article className={styles.opportunityCard}>
+      <div className={styles.carouselTopline}>
+        {isMostReliable ? (
+          <span className={styles.mostReliableBadge}>
+            <Icon name="star" size={12} /> Most reliable
+          </span>
+        ) : (
+          <span aria-hidden="true" />
+        )}
+        <span className={styles.reliabilityBadge}>
+          <strong>{reliabilityScore}%</strong>
+          <em>AI reliability</em>
+        </span>
+      </div>
+
+      <div className={styles.sourceIdentity}>
+        <span className={styles.redditMark}>u/</span>
+        <div>
+          <strong>{opportunity.authorLabel.replace(/^u\//i, "")}</strong>
+          <span>
+            {opportunity.subreddit} &middot;{" "}
+            {relativeTime(opportunity.sourceCreatedAt ?? opportunity.capturedAt)} &middot; Public{" "}
+            {opportunity.conversationType}
+          </span>
+        </div>
+      </div>
+
+      <h3>{opportunity.title}</h3>
+
+      <div className={styles.mockExcerpt}>
+        <span>Why it matters</span>
+        <p>{whyItMatters}</p>
+      </div>
+
+      {tags.length > 0 && (
+        <div className={styles.opportunityMeta}>
+          {tags.map((tag) => (
+            <span key={tag}>{tag}</span>
+          ))}
+        </div>
+      )}
+
+      <div className={styles.carouselActions}>
+        <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
+          <Icon name="refresh" size={14} />
+          {isRevealed ? "Hide reply" : "Generate reply"}
+        </button>
+        {opportunity.permalink && !opportunity.isMock && (
+          <a
+            className={styles.secondaryButton}
+            href={opportunity.permalink}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View Reddit conversation <Icon name="external" size={14} />
+          </a>
+        )}
+      </div>
+    </article>
+  );
+}
+
+/**
+ * A Tinder-style, single-card horizontal browser over the same
+ * relevance-ranked opportunities list OpportunityCard used to render as a
+ * stack. Ordering, reply generation and Reddit links are untouched -- only
+ * one conversation is ever on screen at a time, and the user can move
+ * freely in either direction with the arrow buttons, the dots, or the
+ * left/right arrow keys.
+ */
+function OpportunityCarousel({
+  opportunities,
+  drafts,
+  editingReplyId,
+  copiedReplyId,
+  publishedOpportunityIds,
+  onDraftChange,
+  onToggleEdit,
+  onRegenerate,
+  onCopy,
+  onPublish,
+  redditConnection,
+  onFunnelEvent,
+}: {
+  opportunities: RedditOpportunity[];
+  drafts: Record<string, string>;
+  editingReplyId: string | null;
+  copiedReplyId: string | null;
+  publishedOpportunityIds: string[];
+  onDraftChange: (opportunityId: string, value: string) => void;
+  onToggleEdit: (opportunityId: string) => void;
+  onRegenerate: (opportunity: RedditOpportunity) => void;
+  onCopy: (opportunityId: string) => void;
+  onPublish: (opportunity: RedditOpportunity) => void;
+  redditConnection: RedditConnectionStatus;
+  onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
+}) {
+  const [index, setIndex] = useState(0);
+  const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
+  const total = opportunities.length;
+
+  // Derived rather than stored: if the underlying list ever changes size
+  // (e.g. a fresh scan result swaps in a shorter list) the position clamps
+  // back into range on the next render without a setState-in-effect, and
+  // without touching the list or its order.
+  const safeIndex = total === 0 ? 0 : Math.min(index, total - 1);
+  const opportunity = opportunities[safeIndex];
+  if (!opportunity) return null;
+
+  const goTo = (nextIndex: number) => setIndex(((nextIndex % total) + total) % total);
+  const toggleReply = (opportunityId: string) => {
+    setRevealedReplyIds((current) => {
+      const next = new Set(current);
+      if (next.has(opportunityId)) next.delete(opportunityId);
+      else next.add(opportunityId);
+      return next;
+    });
+  };
+  const isRevealed = revealedReplyIds.has(opportunity.id);
+
+  return (
+    <div
+      className={styles.carousel}
+      role="group"
+      aria-roledescription="carousel"
+      aria-label="Relevant Reddit conversations, ordered by AI reliability, highest first"
+    >
+      <CarouselOpportunityCard
+        opportunity={opportunity}
+        isMostReliable={safeIndex === 0}
+        isRevealed={isRevealed}
+        onToggleReply={() => toggleReply(opportunity.id)}
+      />
+
+      {isRevealed && (
+        <TrackedSection event="suggested_reply_viewed" onView={onFunnelEvent}>
+          <ReplyComposer
+            opportunity={opportunity}
+            value={drafts[opportunity.id] ?? opportunity.reply.draft}
+            isEditing={editingReplyId === opportunity.id}
+            isCopied={copiedReplyId === opportunity.id}
+            isPublished={publishedOpportunityIds.includes(opportunity.id)}
+            onChange={(value) => onDraftChange(opportunity.id, value)}
+            onEdit={() => onToggleEdit(opportunity.id)}
+            onRegenerate={() => onRegenerate(opportunity)}
+            onCopy={() => onCopy(opportunity.id)}
+            onPublish={() => onPublish(opportunity)}
+            redditConnection={redditConnection}
+          />
+        </TrackedSection>
+      )}
+
+      <div className={styles.carouselNav}>
+        <button
+          type="button"
+          className={styles.carouselArrow}
+          onClick={() => goTo(safeIndex - 1)}
+          aria-label="Previous conversation"
+        >
+          <Icon name="arrowLeft" size={20} />
+        </button>
+        <span className={styles.carouselPosition}>
+          {safeIndex + 1} of {total}
+        </span>
+        <button
+          type="button"
+          className={styles.carouselArrow}
+          onClick={() => goTo(safeIndex + 1)}
+          aria-label="Next conversation"
+        >
+          <Icon name="arrow" size={20} />
+        </button>
+      </div>
+
+      <div className={styles.carouselDots}>
+        {opportunities.map((item, dotIndex) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`${styles.carouselDot} ${dotIndex === safeIndex ? styles.carouselDotActive : ""}`}
+            aria-label={`Go to conversation ${dotIndex + 1} of ${total}`}
+            aria-current={dotIndex === safeIndex ? "true" : undefined}
+            onClick={() => goTo(dotIndex)}
+          />
+        ))}
+      </div>
+
+      <p className={styles.carouselCaption}>
+        Ordered by AI reliability, highest first. Later conversations may be less reliable.
+      </p>
+    </div>
+  );
+}
+
 export function ProductDashboard({
   data: fixtureData = redditDemandDemoData,
   scanResult,
@@ -834,11 +1075,6 @@ export function ProductDashboard({
       ),
     [data.opportunities],
   );
-  const topReplyIds = useMemo(
-    () => new Set(rankedOpportunities.slice(0, 3).map((opportunity) => opportunity.id)),
-    [rankedOpportunities],
-  );
-
   const [editingReplyId, setEditingReplyId] = useState<string | null>(null);
   const [copiedReplyId, setCopiedReplyId] = useState<string | null>(null);
   const [publishedIds, setPublishedIds] = useState<string[]>([]);
@@ -932,56 +1168,34 @@ export function ProductDashboard({
         <BusinessProfilePanel profile={data.business} />
 
         <section className={styles.dashboardSection}>
-          <div className={styles.sectionHeadingRow}>
-            <div>
-              <span className={styles.eyebrow}>Reddit conversations</span>
-              <h2>Relevant Reddit posts and comments</h2>
-            </div>
-            {rankedOpportunities.length > 0 && (
-              <span className={styles.qualityNote}>
-                {rankedOpportunities.length} found &middot; top {Math.min(3, rankedOpportunities.length)} ready to reply
-              </span>
-            )}
-          </div>
-
           {!hasAnyRelevantContent ? (
             <section className={`${styles.card} ${styles.emptyResults}`}>
               <h2>No relevant Reddit posts or comments were found in this scan.</h2>
               <p>Nothing cleared qualification this run; nothing was substituted to fill the space.</p>
             </section>
           ) : (
-            <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
-              <div className={styles.opportunityStack}>
-                {rankedOpportunities.map((opportunity) => (
-                  <div key={opportunity.id}>
-                    <OpportunityCard opportunity={opportunity} />
-                    {topReplyIds.has(opportunity.id) && (
-                      <TrackedSection event="suggested_reply_viewed" onView={onFunnelEvent}>
-                        <ReplyComposer
-                          opportunity={opportunity}
-                          value={drafts[opportunity.id] ?? opportunity.reply.draft}
-                          isEditing={editingReplyId === opportunity.id}
-                          isCopied={copiedReplyId === opportunity.id}
-                          isPublished={publishedOpportunityIds.includes(opportunity.id)}
-                          onChange={(value) =>
-                            setDrafts((current) => ({ ...current, [opportunity.id]: value }))
-                          }
-                          onEdit={() =>
-                            setEditingReplyId((current) =>
-                              current === opportunity.id ? null : opportunity.id,
-                            )
-                          }
-                          onRegenerate={() => void regenerateReply(opportunity)}
-                          onCopy={() => void copyReply(opportunity.id)}
-                          onPublish={() => void publishReply(opportunity)}
-                          redditConnection={redditConnection}
-                        />
-                      </TrackedSection>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </TrackedSection>
+            rankedOpportunities.length > 0 && (
+              <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
+                <OpportunityCarousel
+                  opportunities={rankedOpportunities}
+                  drafts={drafts}
+                  editingReplyId={editingReplyId}
+                  copiedReplyId={copiedReplyId}
+                  publishedOpportunityIds={publishedOpportunityIds}
+                  onDraftChange={(opportunityId, value) =>
+                    setDrafts((current) => ({ ...current, [opportunityId]: value }))
+                  }
+                  onToggleEdit={(opportunityId) =>
+                    setEditingReplyId((current) => (current === opportunityId ? null : opportunityId))
+                  }
+                  onRegenerate={(opportunity) => void regenerateReply(opportunity)}
+                  onCopy={(opportunityId) => void copyReply(opportunityId)}
+                  onPublish={(opportunity) => void publishReply(opportunity)}
+                  redditConnection={redditConnection}
+                  onFunnelEvent={onFunnelEvent}
+                />
+              </TrackedSection>
+            )
           )}
         </section>
 

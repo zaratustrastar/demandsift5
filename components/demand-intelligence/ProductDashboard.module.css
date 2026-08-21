@@ -928,6 +928,161 @@
   line-height: 1.5;
 }
 
+/* Single-card horizontal carousel: one Reddit conversation at a time,
+   ordered by AI reliability (rankedOpportunities is unchanged), with large
+   arrow buttons and dot pagination below the card instead of a stacked
+   list. */
+.carousel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  outline: none;
+}
+
+.carousel > .opportunityCard {
+  width: 100%;
+}
+
+.carouselTopline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.mostReliableBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  color: var(--green-dark);
+  background: var(--green-soft);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.mostReliableBadge .glyph {
+  color: #c99a1f;
+}
+
+.reliabilityBadge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 6px 12px;
+  background: var(--green-soft);
+  border-radius: 12px;
+  line-height: 1.25;
+}
+
+.reliabilityBadge strong {
+  color: var(--green-dark);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.reliabilityBadge em {
+  color: #4c7c67;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+}
+
+.carouselActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #edf0ee;
+}
+
+.carouselActions .primaryButton {
+  flex: 1 1 auto;
+}
+
+.carouselActions a {
+  flex: 1 1 auto;
+  text-decoration: none;
+}
+
+.carouselNav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+}
+
+.carouselArrow {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.carouselArrow:hover {
+  border-color: #bfc9c2;
+  background: #f5f7f5;
+  transform: translateY(-1px);
+}
+
+.carouselPosition {
+  min-width: 64px;
+  text-align: center;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.carouselDots {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+  max-width: 320px;
+}
+
+.carouselDot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  background: #dbe2dd;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 140ms ease, transform 140ms ease;
+}
+
+.carouselDot:hover {
+  background: #bfc9c2;
+}
+
+.carouselDotActive,
+.carouselDotActive:hover {
+  background: var(--green);
+  transform: scale(1.15);
+}
+
+.carouselCaption {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  text-align: center;
+}
+
 .twoColumnGrid {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(330px, 0.75fr);

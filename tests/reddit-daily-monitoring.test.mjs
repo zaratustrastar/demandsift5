@@ -247,6 +247,13 @@ test("monitor storage enforces cross-run dedupe and advances watermark only on s
     .includes("lastSuccessfulMonitorAt"), false);
   assert.match(workflow, /checkpointFromCandidates\(unseen/u);
   assert.match(workflow, /runScan\(scan\.id/u);
+  assert.match(workflow, /processedRedditState\.filter/u,
+    "every unseen monitoring match must receive an explicit relevance outcome");
+  assert.match(workflow, /isRelevantMonitorTriage\(state\.triage\)/u);
+  assert.match(workflow, /triageOnlyIntelligence/u,
+    "relevant non-leads must remain visible without forcing deep enrichment");
+  assert.doesNotMatch(workflow, /const relevantIds = completedScan\.result\.marketIntelligence/u,
+    "daily relevance cannot be restricted to deep-qualified market intelligence");
   assert.equal(discovery.includes("reddit-monitor.server"), false,
     "daily monitoring must not be spliced into the existing discovery implementation");
 });

@@ -240,3 +240,4 @@ jobs:
 # trigger: restructure setup flow -- competitors step before review, hide preliminary profile behind a refining wait screen (2026-08-21T03:13:32Z)
 # trigger: replace Reddit conversations list with a single-card horizontal carousel (2026-08-21T03:34:22Z)
 # trigger: MVP AI visibility tracking -- weekly ChatGPT/Gemini/Perplexity scans via Apify, deterministic + AI mention analysis (2026-08-21T16:17:22Z)
+# trigger: context-mode onboarding -- describe your market/idea without a website, shared pipeline (2026-08-21T17:16:04Z)

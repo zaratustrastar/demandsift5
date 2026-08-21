@@ -4,22 +4,25 @@ import type { CompetitorProfile } from "./contracts";
 import { createId } from "./ids";
 
 /**
- * Sidecar competitor-homepage analysis: a small addition alongside the
- * primary business pipeline, not a modification of it.
+ * Sidecar competitor analysis: a small addition alongside the primary
+ * business pipeline, not a modification of it.
  *
- * A competitor's homepage is understood through exactly the same
- * homepage-only, cheap/fast pass as the primary business's own fast profile
- * (see runFastUnderstanding in scan-workflow.ts): the same SSRF/DNS-pinned
- * crawlWebsite() with maxPages: 1, and the same aiProvider.analyzeBusinessFast
- * schema/model. Reusing that pipeline rather than inventing a second one
- * keeps this genuinely a sidecar -- there is exactly one "fast website
- * understanding" code path, just called on a different URL.
+ * By explicit request, a competitor's site is understood through the same
+ * multi-page, full aiProvider.analyzeBusiness model the primary business's
+ * own profile eventually gets (see runScan/refineDiscoveryProfile in
+ * scan-workflow.ts) -- not the instant, homepage-only, cheap/fast pass this
+ * used to share with the primary business's preview. Competitor analysis
+ * already only runs once, synchronously, when the user presses Continue
+ * with typed URLs (see CompetitorsSetup.tsx), so there was no separate
+ * "instant preview" UX being protected here; the fast tier was only ever
+ * saving a few seconds at the cost of the same terser, compressed-sounding
+ * keyphrases/pain phrases the primary business's fast preview had.
  *
  * The result is intentionally a different shape (CompetitorProfile, not
- * BusinessUnderstanding/ScanBusinessProfile): a competitor's homepage
- * describes the competitor, never the user's own business, and callers must
- * never fold these fields into discoveryProfile or treat them as verified
- * facts about the business being scanned.
+ * BusinessUnderstanding/ScanBusinessProfile): a competitor's site describes
+ * the competitor, never the user's own business, and callers must never
+ * fold these fields into discoveryProfile or treat them as verified facts
+ * about the business being scanned.
  */
 
 export const MAX_COMPETITOR_URLS = 3;
@@ -53,7 +56,7 @@ async function analyzeOneCompetitor(
 ): Promise<CompetitorProfile> {
   let crawl: Awaited<ReturnType<typeof crawlWebsite>>;
   try {
-    crawl = await crawlWebsite(url, { maxPages: 1, timeoutMs: 6_000 });
+    crawl = await crawlWebsite(url, { maxPages: 4 });
   } catch (error) {
     return competitorAnalysisFailure(
       url,
@@ -66,8 +69,8 @@ async function analyzeOneCompetitor(
   const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
 
   if (!aiProvider) {
-    // Same conservative-fallback policy as the primary business's own fast
-    // pass: no AI configured is not a failure, just a thinner result.
+    // Same conservative-fallback policy as the primary business's own
+    // analysis: no AI configured is not a failure, just a thinner result.
     return {
       url,
       domain: crawl.canonicalDomain,
@@ -83,23 +86,27 @@ async function analyzeOneCompetitor(
 
   try {
     const models = openAiModelsFromEnv();
-    const analyzed = await aiProvider.analyzeBusinessFast({
+    const pages = crawl.pages.map((page) => ({
+      ...page,
+      sourceId: `web_${page.contentHash.slice(0, 20)}`,
+    }));
+    const analyzed = await aiProvider.analyzeBusiness({
       workspaceId,
       businessId: createId("competitor"),
       websiteUrl: crawl.canonicalUrl,
       canonicalDomain: crawl.canonicalDomain,
-      pages: [{ ...homepage, sourceId: `web_${homepage.contentHash.slice(0, 20)}` }],
+      pages,
       models,
     });
-    const fast = analyzed.value;
+    const business = analyzed.value;
     return {
       url,
       domain: crawl.canonicalDomain,
-      name: fast.name,
-      summary: fast.summary,
-      productCategory: fast.productCategory,
-      keyphrases: fast.productTerms,
-      painPhrases: fast.customerProblemLanguage,
+      name: business.name.value,
+      summary: business.summary.value,
+      productCategory: business.productCategory.value,
+      keyphrases: business.productTerms.value,
+      painPhrases: business.customerProblemLanguage.value,
       status: "ready",
       analyzedAt,
     };

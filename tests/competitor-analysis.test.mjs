@@ -24,13 +24,15 @@ const contracts = await read("../lib/server/contracts.ts");
 const termsRoute = await read("../app/api/scans/[scanId]/discovery-terms/route.ts");
 const profileUi = await read("../components/DiscoveryProfile.tsx");
 
-test("competitor homepages go through the same SSRF-protected crawler, homepage only", () => {
-  assert.match(analysis, /crawlWebsite\(url, \{ maxPages: 1/);
+test("competitor sites go through the same SSRF-protected crawler, same multi-page budget as the primary business", () => {
+  assert.match(analysis, /crawlWebsite\(url, \{ maxPages: 4/);
   assert.equal(/\bfetch\(/.test(analysis), false, "competitor-analysis.ts must not fetch directly");
 });
 
-test("competitor homepages reuse the existing fast-pass AI schema, not a new one", () => {
-  assert.match(analysis, /aiProvider\.analyzeBusinessFast\(/);
+test("competitor sites reuse the existing full-analysis AI schema, not a new one -- by explicit request, the same quality as the primary business's own profile, not the cheap preview tier", () => {
+  assert.match(analysis, /aiProvider\.analyzeBusiness\(/);
+  assert.equal(/aiProvider\.analyzeBusinessFast\(/.test(analysis), false,
+    "competitor analysis must use the full model, not the fast/preview tier");
   assert.equal(
     /FAST_BUSINESS_SCHEMA|BUSINESS_SCHEMA/.test(analysis),
     false,

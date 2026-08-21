@@ -77,13 +77,36 @@ test("all five understanding concepts reach the review screen", () => {
   }
 });
 
-test("the client flow is analyze then review then scan", () => {
-  assert.match(experience, /type View =[\s\S]*"analyzing"[\s\S]*"profile"/);
+test("the client flow is analyze then competitors then refining then review then scan", () => {
+  // competitors and refining are both new, optional steps inserted between
+  // the analyze call and the review screen -- the fast/preliminary profile
+  // is never shown on its own, only after "refining" confirms it's the full
+  // one.
+  assert.match(experience, /type View =[\s\S]*"analyzing"[\s\S]*"competitors"[\s\S]*"refining"[\s\S]*"profile"/);
   assert.match(experience, /reviewFirst: true/);
   assert.match(experience, /\/analyze`/);
-  const analyze = experience.indexOf("/analyze`");
-  const profileView = experience.indexOf('setView("profile")');
-  assert.ok(analyze < profileView, "review must follow analysis");
+
+  // Scope to the main component so the RefiningProfile helper (defined
+  // earlier in the file and also calling setView("profile")) can't produce
+  // a false-positive textual match.
+  const main = experience.slice(experience.indexOf("export function ThreadlineExperience()"));
+  const analyze = main.indexOf("/analyze`");
+  const setCompetitors = main.indexOf('setView("competitors")');
+  assert.ok(analyze > -1 && setCompetitors > -1, "expected both the analyze call and the competitors transition");
+  assert.ok(analyze < setCompetitors, "the competitors step must follow analysis, not precede it");
+
+  // And the render branches themselves must appear in flow order.
+  const competitorsBranch = main.indexOf('view === "competitors"');
+  const refiningBranch = main.indexOf('view === "refining"');
+  const profileBranch = main.indexOf('view === "profile"');
+  assert.ok(
+    competitorsBranch > -1 && refiningBranch > -1 && profileBranch > -1,
+    "expected competitors, refining, and profile render branches",
+  );
+  assert.ok(
+    competitorsBranch < refiningBranch && refiningBranch < profileBranch,
+    "render branches must appear in flow order: competitors, then refining, then profile",
+  );
 });
 
 test("editing is optional and Boolean syntax is never shown", () => {

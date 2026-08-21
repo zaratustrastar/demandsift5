@@ -31,6 +31,7 @@ const openaiProvider = await read("../lib/providers/openai.server.ts");
 const serverContracts = await read("../lib/server/contracts.ts");
 const termsRoute = await read("../app/api/scans/[scanId]/discovery-terms/route.ts");
 const profileUi = await read("../components/DiscoveryProfile.tsx");
+const experience = await read("../components/ThreadlineExperience.tsx");
 
 test("the fast pass crawls through the same SSRF-protected crawler, homepage only", () => {
   assert.match(workflow, /async function runFastUnderstanding/);
@@ -94,7 +95,20 @@ test("analyzeBusinessFast is on the provider contract and uses the economy model
 test("the review screen and its API expose profileStage without disturbing existing fields", () => {
   assert.match(termsRoute, /profileStage: analysis\?\.profileStage \?\? \(analysis \? "full" : null\)/);
   assert.match(profileUi, /profileStage\?: "fast" \| "full" \| null;/);
-  assert.match(profileUi, /if \(data\?\.profileStage !== "fast" \|\| edited\) return;/);
+  // The review screen (DiscoveryProfile.tsx) itself no longer polls for or
+  // swaps in the fast profile -- that responsibility moved upstream to the
+  // dedicated "refining" wait screen (RefiningProfile, in
+  // ThreadlineExperience.tsx), which never transitions to the review screen
+  // until profileStage is "full". The fast/preliminary profile is never
+  // rendered to the user at all now, so DiscoveryProfile.tsx has no need to
+  // guard against overwriting a user's in-progress edits with it.
+  assert.match(experience, /function RefiningProfile/);
+  assert.match(experience, /payload\.profileStage === "full"/);
+  assert.equal(
+    /profileStage/.test(profileUi.slice(profileUi.indexOf("useEffect(() => {"), profileUi.indexOf("const edited"))),
+    false,
+    "DiscoveryProfile's data-loading effect must not itself branch on profileStage anymore",
+  );
 });
 
 test("the fast-profile schema never leaks Boolean search syntax either", () => {

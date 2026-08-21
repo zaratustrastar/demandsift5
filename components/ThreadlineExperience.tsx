@@ -10,11 +10,24 @@ import {
   type ApiScanResponse,
 } from "./demand-intelligence/from-scan";
 import { DiscoveryProfile } from "./DiscoveryProfile";
+import { CompetitorsSetup } from "./CompetitorsSetup";
 import styles from "./ThreadlineExperience.module.css";
 
-// "profile" is the review step: the site has been analyzed, the user sees what
-// we plan to look for, and Reddit retrieval has not started yet.
-type View = "landing" | "analyzing" | "profile" | "scanning" | "restoring" | "report" | "error";
+// "competitors" is a dedicated, optional step (Back/Skip/Continue) between
+// the fast analysis and the review screen. "refining" is a brief wait screen
+// after it: the fast, homepage-only profile is never shown to the user --
+// this waits for the fuller background analysis so "profile" always shows
+// the complete picture. See RefiningProfile's doc comment.
+type View =
+  | "landing"
+  | "analyzing"
+  | "competitors"
+  | "refining"
+  | "profile"
+  | "scanning"
+  | "restoring"
+  | "report"
+  | "error";
 type AccessLevel = "free" | "pass" | "core";
 
 const SCAN_POLL_INTERVAL_MS = 3_000;
@@ -343,6 +356,86 @@ function Scanning({
   );
 }
 
+/**
+ * Waits for the background full business analysis (see scan-workflow.ts's
+ * refineDiscoveryProfile) before showing the review screen, so the user
+ * only ever sees the complete, multi-page profile -- never the thinner
+ * fast-pass preview that made the earlier /analyze call return quickly.
+ *
+ * The competitors step the user just came from already gave that
+ * background work a head start, so this is usually brief. Polling gives up
+ * after ~90s and shows whatever is ready either way: the full analysis
+ * still runs synchronously the moment the real scan starts regardless (see
+ * scan-workflow.ts's canReusePersistedAnalysis check), so this screen only
+ * ever affects how soon the user sees the better profile, never whether
+ * discovery ends up using it.
+ */
+function RefiningProfile({
+  scanId,
+  url,
+  setView,
+}: {
+  scanId: string;
+  url: string;
+  setView: (view: View) => void;
+}) {
+  const domain = useMemo(() => safeDomain(url), [url]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 36; // ~2.5s * 36 ~= 90s
+
+    const check = async () => {
+      attempts += 1;
+      try {
+        const response = await fetch(
+          `/api/scans/${encodeURIComponent(scanId)}/discovery-terms`,
+          { cache: "no-store" },
+        );
+        if (response.ok && !cancelled) {
+          const payload = (await response.json()) as { profileStage?: "fast" | "full" | null };
+          if (!cancelled && payload.profileStage === "full") {
+            clearInterval(timer);
+            setView("profile");
+            return;
+          }
+        }
+      } catch {
+        // Best-effort; a persistent failure just falls through to the
+        // MAX_ATTEMPTS timeout below.
+      }
+      if (attempts >= MAX_ATTEMPTS && !cancelled) {
+        clearInterval(timer);
+        setView("profile");
+      }
+    };
+
+    const timer = setInterval(check, 2_500);
+    void check();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [scanId, setView]);
+
+  return (
+    <main className={styles.scanScreen}>
+      <header className={styles.scanHeader}><Brand /><span>Finishing your analysis</span></header>
+      <section className={styles.scanPanel}>
+        <div className={styles.scanVisual} aria-hidden="true">
+          <div className={styles.orbit}><i /><i /><i /></div>
+          <span>↗</span>
+        </div>
+        <div className={styles.scanKicker}>Analyzing {domain}</div>
+        <h1>Putting together your business profile</h1>
+        <p>Reading a few more pages and double-checking what we found.</p>
+        <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+      </section>
+    </main>
+  );
+}
+
 export function ThreadlineExperience() {
   const [view, setView] = useState<View>("landing");
   const [url, setUrl] = useState("");
@@ -556,7 +649,7 @@ export function ThreadlineExperience() {
         if (cancelled) return;
         setScanProgress(analyzed.scan.progress);
         setReviewScanId(created.scan.id);
-        setView("profile");
+        setView("competitors");
       } catch (analysisError) {
         if (cancelled) return;
         setErrorMessage(
@@ -937,6 +1030,19 @@ export function ThreadlineExperience() {
   if (view === "landing") return <Landing onSubmit={startScan} />;
   if (view === "analyzing") {
     return <Scanning url={url} progress={scanProgress} />;
+  }
+  if (view === "competitors") {
+    return (
+      <CompetitorsSetup
+        scanId={reviewScanId}
+        websiteUrl={url}
+        onContinue={() => setView("refining")}
+        onBack={() => setView("landing")}
+      />
+    );
+  }
+  if (view === "refining") {
+    return <RefiningProfile scanId={reviewScanId} url={url} setView={setView} />;
   }
   if (view === "profile") {
     return (

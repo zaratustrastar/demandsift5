@@ -2,6 +2,11 @@ import { apiErrorResponse, ApiError, readJson } from "@/lib/server/http";
 import { OpenAiProviderError } from "@/lib/providers/openai.server";
 import { getStateRepository, type StateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
+import { runRedditMonitorScan } from "@/lib/server/reddit-monitor-workflow";
+import {
+  getClaimedRedditMonitorJob,
+  getRedditMonitorRun,
+} from "@/lib/server/reddit-monitor-repository";
 import type { ScanRecord } from "@/lib/server/contracts";
 
 type RouteContext = { params: Promise<{ jobId: string }> | { jobId: string } };
@@ -76,6 +81,7 @@ function terminalScanFailure(scan: ScanRecord) {
 }
 
 const activeScanExecutions = new Map<string, Promise<void>>();
+const activeMonitorExecutions = new Map<string, Promise<void>>();
 
 async function executeClaimedScan(
   scanId: string,
@@ -126,6 +132,54 @@ function executionSnapshot(job: ClaimedJob, scan: ScanRecord) {
   };
 }
 
+function monitorExecutionSnapshot(jobId: string, run: NonNullable<Awaited<ReturnType<typeof getRedditMonitorRun>>>) {
+  if (run.status === "failed") {
+    return {
+      ok: false,
+      executorStatus: 502,
+      error: { code: "reddit_monitor_failed", message: run.error || "Reddit monitoring failed." },
+    };
+  }
+  return {
+    ok: true,
+    jobId,
+    monitorRunId: run.id,
+    scanId: run.scanId,
+    status: run.status,
+    complete: run.status === "succeeded",
+  };
+}
+
+function ensureMonitorExecution(runId: string): Promise<void> {
+  const existing = activeMonitorExecutions.get(runId);
+  if (existing) return existing;
+  const execution = runRedditMonitorScan(runId).then(() => undefined).catch((error) => {
+    console.error("Background Reddit monitor execution failed.", error);
+  });
+  activeMonitorExecutions.set(runId, execution);
+  void execution.finally(() => {
+    if (activeMonitorExecutions.get(runId) === execution) activeMonitorExecutions.delete(runId);
+  });
+  return execution;
+}
+
+async function claimedMonitorSnapshot(jobId: string, workerId: string, start: boolean) {
+  const job = await getClaimedRedditMonitorJob(jobId, workerId);
+  if (!job) return null;
+  const run = await getRedditMonitorRun(job.monitorRunId);
+  if (!run || run.workspaceId !== job.workspaceId) {
+    throw new ApiError("Reddit monitor run was not found.", 404, "monitor_run_not_found");
+  }
+  if (start && run.status !== "succeeded" && run.status !== "failed") {
+    void ensureMonitorExecution(run.id);
+  }
+  const snapshot = monitorExecutionSnapshot(job.id, run);
+  return Response.json(snapshot, {
+    status: snapshot.ok && !snapshot.complete ? 202 : 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
 export async function POST(request: Request, context: RouteContext) {
   try {
     requireWorker(request);
@@ -134,6 +188,8 @@ export async function POST(request: Request, context: RouteContext) {
       throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
     const { jobId } = await context.params;
+    const monitorResponse = await claimedMonitorSnapshot(jobId, body.workerId, true);
+    if (monitorResponse) return monitorResponse;
     const { job, scan } = await requireClaimedScan(jobId, body.workerId);
     if (scan.status === "complete" || scan.status === "failed") {
     return Response.json(executionSnapshot(job, scan), {
@@ -176,6 +232,8 @@ export async function GET(request: Request, context: RouteContext) {
       throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
     const { jobId } = await context.params;
+    const monitorResponse = await claimedMonitorSnapshot(jobId, workerId, false);
+    if (monitorResponse) return monitorResponse;
     const { job, scan } = await requireClaimedScan(jobId, workerId);
     return Response.json(executionSnapshot(job, scan), {
       headers: { "cache-control": "no-store" },

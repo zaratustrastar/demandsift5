@@ -510,6 +510,9 @@ export type ScanRecord = {
    * on the review screen, then read (never re-analyzed) once the scan runs.
    */
   competitorProfiles?: CompetitorProfile[] | null;
+  /** Distinguishes a user-started market scan from a daily watch-term result. */
+  scanKind?: "discovery" | "monitoring";
+  monitorRunId?: string | null;
 };
 
 export type EntitlementRecord = {
@@ -570,5 +573,46 @@ export type MonitoringScheduleRecord = {
   nextRunAt: string;
   lastRunAt: string | null;
   enabled: boolean;
+  updatedAt: string;
+};
+
+export type RedditWatchTermKind = "brand" | "competitor" | "keyword";
+
+export type RedditWatchTerm = {
+  value: string;
+  kind: RedditWatchTermKind;
+  active: boolean;
+};
+
+export type RedditMonitorSettingsRecord = {
+  workspaceId: string;
+  seedScanId: string;
+  websiteUrl: string;
+  enabled: boolean;
+  watchTerms: RedditWatchTerm[];
+  lastSuccessfulMonitorAt: string | null;
+  nextRunAt: string;
+  lastRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RedditMonitorRunRecord = {
+  id: string;
+  workspaceId: string;
+  seedScanId: string;
+  scanId: string | null;
+  status: "queued" | "running" | "succeeded" | "failed";
+  windowStartedAt: string;
+  windowEndedAt: string;
+  actorRunId: string | null;
+  watchTerms: string[];
+  fetched: number;
+  normalized: number;
+  unseen: number;
+  relevant: number;
+  opportunities: number;
+  error: string | null;
+  createdAt: string;
   updatedAt: string;
 };

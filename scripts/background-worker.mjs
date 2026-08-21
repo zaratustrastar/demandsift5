@@ -75,6 +75,38 @@ export function monitoringSchedulerEnabled(environment = process.env) {
   return String(environment.MONITORING_SCHEDULER_ENABLED ?? "").trim().toLowerCase() === "true";
 }
 
+/** Daily watch-term monitoring is independent from the legacy full-scan scheduler. */
+export function redditMonitorSchedulerEnabled(environment = process.env) {
+  return String(environment.REDDIT_MONITOR_SCHEDULER_ENABLED ?? "true")
+    .trim()
+    .toLowerCase() !== "false";
+}
+
+export function redditMonitorConfiguration(environment = process.env) {
+  return {
+    schedulerPollMs: boundedNumber(
+      environment.REDDIT_MONITOR_SCHEDULER_POLL_MS,
+      60_000,
+      1_000,
+      900_000,
+    ),
+    firstLookbackHours: boundedNumber(
+      environment.REDDIT_MONITOR_FIRST_LOOKBACK_HOURS,
+      24,
+      1,
+      168,
+    ),
+  };
+}
+
+export function redditMonitorDedupeKey(workspaceId, now) {
+  const milliseconds = validTimestamp(now);
+  if (!workspaceId || milliseconds === null) {
+    throw new Error("A workspace and valid timestamp are required for Reddit monitoring.");
+  }
+  return `reddit-monitor:${workspaceId}:${new Date(milliseconds).toISOString().slice(0, 10)}`;
+}
+
 export function monitoringConfiguration(environment = process.env) {
   const passIntervalHours = boundedNumber(
     environment.MONITOR_PASS_INTERVAL_HOURS,
@@ -560,6 +592,132 @@ export async function scheduleMonitoringScans(
   });
 }
 
+/**
+ * Reserves at most one monitoring Actor run per opted-in business per UTC day.
+ * `last_successful_monitor_at` is deliberately read but never changed here;
+ * only the successful web executor advances the watermark.
+ */
+export async function scheduleRedditMonitorScans(
+  sql,
+  {
+    now = new Date(),
+    configuration = redditMonitorConfiguration(),
+    createRunId = () => `monrun_${randomUUID().replaceAll("-", "")}`,
+  } = {},
+) {
+  const nowMs = validTimestamp(now);
+  if (nowMs === null) throw new Error("The Reddit monitoring scheduler timestamp is invalid.");
+  const scheduledAt = new Date(nowMs);
+  return sql.begin(async (transactionSql) => {
+    const monitors = await transactionSql`
+      SELECT monitor.workspace_id,
+             monitor.seed_scan_id,
+             monitor.last_successful_monitor_at,
+             monitor.watch_terms
+      FROM runtime_reddit_monitors AS monitor
+      JOIN runtime_scans AS seed_scan
+        ON seed_scan.id = monitor.seed_scan_id
+       AND seed_scan.workspace_id = monitor.workspace_id
+       AND seed_scan.status = 'complete'
+      WHERE monitor.enabled = true
+        AND monitor.next_run_at <= ${scheduledAt}
+        AND jsonb_array_length(monitor.watch_terms) > 0
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(monitor.watch_terms) AS term
+          WHERE COALESCE((term ->> 'active')::boolean, true) = true
+            AND length(trim(term ->> 'value')) >= 2
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM background_jobs AS pending_job
+          WHERE pending_job.type = 'reddit_monitor_scan'
+            AND pending_job.payload ->> 'workspaceId' = monitor.workspace_id
+            AND pending_job.status IN ('queued', 'running', 'retrying')
+        )
+      ORDER BY monitor.next_run_at, monitor.workspace_id
+      LIMIT 100
+      FOR UPDATE OF monitor SKIP LOCKED
+    `;
+    const scheduled = [];
+    for (const monitor of monitors) {
+      const activeTerms = Array.isArray(monitor.watch_terms)
+        ? monitor.watch_terms
+          .filter((term) => term && term.active !== false && typeof term.value === "string")
+          .map((term) => term.value.trim())
+          .filter(Boolean)
+        : [];
+      if (activeTerms.length === 0) continue;
+      const runId = createRunId();
+      const windowStartedAt = monitor.last_successful_monitor_at
+        ? new Date(monitor.last_successful_monitor_at)
+        : new Date(nowMs - configuration.firstLookbackHours * 60 * 60 * 1_000);
+      const dedupeKey = redditMonitorDedupeKey(monitor.workspace_id, scheduledAt);
+      const record = {
+        id: runId,
+        workspaceId: monitor.workspace_id,
+        seedScanId: monitor.seed_scan_id,
+        scanId: null,
+        status: "queued",
+        windowStartedAt: windowStartedAt.toISOString(),
+        windowEndedAt: scheduledAt.toISOString(),
+        actorRunId: null,
+        watchTerms: activeTerms,
+        fetched: 0,
+        normalized: 0,
+        unseen: 0,
+        relevant: 0,
+        opportunities: 0,
+        error: null,
+        createdAt: scheduledAt.toISOString(),
+        updatedAt: scheduledAt.toISOString(),
+      };
+      const jobs = await transactionSql`
+        INSERT INTO background_jobs (
+          type, status, payload, dedupe_key, attempts, max_attempts,
+          run_at, created_at, updated_at
+        ) VALUES (
+          'reddit_monitor_scan',
+          'queued',
+          ${transactionSql.json({ monitorRunId: runId, workspaceId: monitor.workspace_id })},
+          ${dedupeKey},
+          0,
+          1,
+          ${scheduledAt},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (jobs.length === 0) continue;
+      await transactionSql`
+        INSERT INTO runtime_reddit_monitor_runs (
+          id, workspace_id, seed_scan_id, status, window_started_at,
+          window_ended_at, record, created_at, updated_at
+        ) VALUES (
+          ${runId},
+          ${monitor.workspace_id},
+          ${monitor.seed_scan_id},
+          'queued',
+          ${windowStartedAt},
+          ${scheduledAt},
+          ${transactionSql.json(record)},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+      `;
+      scheduled.push({
+        runId,
+        workspaceId: monitor.workspace_id,
+        watchTermCount: activeTerms.length,
+        dedupeKey,
+      });
+    }
+    return { candidateCount: monitors.length, scheduled };
+  });
+}
+
 async function runMonitoringScheduler(sql, signal) {
   const configuration = monitoringConfiguration();
   log("info", "monitor_scheduler_started", {
@@ -586,6 +744,32 @@ async function runMonitoringScheduler(sql, signal) {
     await waitForNextPoll(signal, configuration.schedulerPollMs);
   }
   log("info", "monitor_scheduler_stopped");
+}
+
+async function runRedditMonitorScheduler(sql, signal) {
+  const configuration = redditMonitorConfiguration();
+  log("info", "reddit_monitor_scheduler_started", { pollMs: configuration.schedulerPollMs });
+  while (!signal.aborted) {
+    try {
+      const result = await scheduleRedditMonitorScans(sql, { configuration });
+      if (result.scheduled.length > 0) {
+        log("info", "reddit_monitor_scheduler_poll_completed", {
+          candidates: result.candidateCount,
+          scheduled: result.scheduled.length,
+          runs: result.scheduled.map((entry) => ({
+            runId: entry.runId,
+            watchTermCount: entry.watchTermCount,
+          })),
+        });
+      }
+    } catch (error) {
+      log("error", "reddit_monitor_scheduler_poll_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "reddit_monitor_scheduler_stopped");
 }
 
 export function jobExecutionConfiguration(environment = process.env) {
@@ -656,7 +840,7 @@ export async function claimJob(sql, workerIdValue) {
         (status IN ('queued', 'retrying') AND run_at <= now())
         OR (status = 'running' AND locked_at <= ${staleBefore})
       )
-      AND type = 'scan.run'
+      AND type IN ('scan.run', 'reddit_monitor_scan')
       AND attempts < max_attempts
       ORDER BY run_at ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
@@ -918,8 +1102,14 @@ async function runQueueWorker(databaseUrl, signal) {
   const scheduler = monitoringSchedulerEnabled()
     ? runMonitoringScheduler(sql, queueSignal)
     : Promise.resolve();
+  const redditMonitorScheduler = redditMonitorSchedulerEnabled()
+    ? runRedditMonitorScheduler(sql, queueSignal)
+    : Promise.resolve();
   if (!monitoringSchedulerEnabled()) {
     log("info", "monitor_scheduler_disabled", { reason: "single_on_demand_scan_mvp" });
+  }
+  if (!redditMonitorSchedulerEnabled()) {
+    log("info", "reddit_monitor_scheduler_disabled");
   }
   log("info", "queue_worker_started", { pollMs: boundedPollMs });
   try {
@@ -960,7 +1150,7 @@ async function runQueueWorker(databaseUrl, signal) {
     }
   } finally {
     queueController.abort("queue worker stopping");
-    await scheduler;
+    await Promise.all([scheduler, redditMonitorScheduler]);
     await sql.end({ timeout: 5 });
     log("info", "queue_worker_stopped");
   }

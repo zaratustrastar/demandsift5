@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProductDashboard,
   type RedditConnectionStatus,
+  type RedditMonitoringStatus,
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
@@ -449,6 +450,7 @@ export function ThreadlineExperience() {
   const resumedScanRef = useRef<ApiScanResponse | null>(null);
   const [redditConnection, setRedditConnection] =
     useState<RedditConnectionStatus>(disconnectedReddit);
+  const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
   const dashboardData = useMemo(
     () => (scanResponse ? scanResponseToDashboard(scanResponse) : null),
     [scanResponse],
@@ -590,12 +592,21 @@ export function ThreadlineExperience() {
     let cancelled = false;
     async function loadRedditConnection() {
       try {
-        const response = await fetch("/api/reddit/status", { cache: "no-store" });
+        const [response, monitoringResponse] = await Promise.all([
+          fetch("/api/reddit/status", { cache: "no-store" }),
+          fetch("/api/monitoring/settings", { cache: "no-store" }),
+        ]);
         const payload = (await response.json()) as {
           reddit?: RedditConnectionStatus;
         };
+        const monitoringPayload = (await monitoringResponse.json()) as {
+          monitoring?: RedditMonitoringStatus;
+        };
         if (response.ok && payload.reddit && !cancelled) {
           setRedditConnection(payload.reddit);
+        }
+        if (monitoringResponse.ok && monitoringPayload.monitoring && !cancelled) {
+          setMonitoring(monitoringPayload.monitoring);
         }
       } catch {
         if (!cancelled) setRedditConnection(disconnectedReddit);
@@ -609,6 +620,7 @@ export function ThreadlineExperience() {
 
   function startScan(nextUrl: string) {
     setUrl(nextUrl);
+    setMonitoring(null);
     resumedScanRef.current = null;
     setScanResponse(null);
     setScanProgress([]);
@@ -909,6 +921,34 @@ export function ThreadlineExperience() {
     }
   }
 
+  async function updateMonitoring(
+    enabled: boolean,
+    watchTerms: RedditMonitoringStatus["watchTerms"],
+  ): Promise<boolean> {
+    try {
+      const response = await fetch("/api/monitoring/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled, watchTerms }),
+      });
+      const payload = (await response.json()) as {
+        monitoring?: RedditMonitoringStatus;
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.monitoring) {
+        throw new Error(payload.error?.message ?? "Daily Reddit monitoring could not be updated.");
+      }
+      setMonitoring(payload.monitoring);
+      setStatusMessage(enabled
+        ? "Daily Reddit monitoring is on. All active terms will be checked together."
+        : "Daily Reddit monitoring is off.");
+      return true;
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Daily Reddit monitoring could not be updated.");
+      return false;
+    }
+  }
+
   async function regenerateReply(opportunityId: string): Promise<string | null> {
     const opportunity = dashboardData?.opportunities.find((item) => item.id === opportunityId);
     if (!opportunity) return null;
@@ -1092,6 +1132,8 @@ export function ThreadlineExperience() {
         redditConnection={redditConnection}
         onConnectReddit={connectReddit}
         onDisconnectReddit={disconnectReddit}
+        monitoring={monitoring}
+        onUpdateMonitoring={updateMonitoring}
         onFunnelEvent={recordFunnelEvent}
       />
     </div>

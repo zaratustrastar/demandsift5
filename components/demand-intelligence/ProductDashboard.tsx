@@ -32,6 +32,17 @@ export type RedditConnectionStatus = {
   requiresPaidAccess: boolean;
 };
 
+export type RedditMonitoringStatus = {
+  enabled: boolean;
+  watchTerms: Array<{
+    value: string;
+    kind: "brand" | "competitor" | "keyword";
+    active: boolean;
+  }>;
+  lastSuccessfulMonitorAt: string | null;
+  nextRunAt: string;
+};
+
 export interface ProductDashboardProps {
   data?: RedditDemandDemoData;
   /** A complete, source-backed result from the real analysis flow. */
@@ -52,7 +63,86 @@ export interface ProductDashboardProps {
   redditConnection?: RedditConnectionStatus;
   onConnectReddit?: () => void;
   onDisconnectReddit?: () => Promise<void> | void;
+  monitoring?: RedditMonitoringStatus | null;
+  onUpdateMonitoring?: (
+    enabled: boolean,
+    watchTerms: RedditMonitoringStatus["watchTerms"],
+  ) => Promise<boolean>;
   onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
+}
+
+function RedditMonitoringPanel({
+  monitoring,
+  onUpdate,
+}: {
+  monitoring: RedditMonitoringStatus | null;
+  onUpdate?: ProductDashboardProps["onUpdateMonitoring"];
+}) {
+  const [terms, setTerms] = useState(() =>
+    monitoring?.watchTerms.filter((term) => term.active).map((term) => term.value).join("\n") ?? "",
+  );
+  const [saving, setSaving] = useState(false);
+  if (!monitoring) return null;
+
+  const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => [...new Set(
+    terms.split(/\r?\n|,/u).map((value) => value.replace(/\s+/gu, " ").trim()).filter(Boolean),
+  )].slice(0, 40).map((value) => {
+    const existing = monitoring.watchTerms.find(
+      (term) => term.value.toLocaleLowerCase("en-US") === value.toLocaleLowerCase("en-US"),
+    );
+    return { value, kind: existing?.kind ?? "keyword", active: true };
+  });
+
+  const save = async (enabled: boolean) => {
+    if (!onUpdate) return;
+    setSaving(true);
+    try {
+      await onUpdate(enabled, parsedTerms());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={`${styles.card} ${styles.monitoringCard}`}>
+      <div>
+        <span className={styles.eyebrow}>Daily Reddit monitoring</span>
+        <h2>Watch new posts and comments once per day</h2>
+        <p>
+          All active terms are sent together in one daily search. New matches still have to pass
+          the same relevance and qualification checks as this report.
+        </p>
+      </div>
+      <label className={styles.monitoringToggle}>
+        <input
+          type="checkbox"
+          checked={monitoring.enabled}
+          disabled={saving}
+          onChange={(event) => void save(event.currentTarget.checked)}
+        />
+        <span>{monitoring.enabled ? "Monitoring on" : "Monitoring off"}</span>
+      </label>
+      <label className={styles.monitoringTerms}>
+        <span>Brand, competitor and keyword watch terms</span>
+        <textarea
+          value={terms}
+          rows={Math.min(8, Math.max(4, terms.split("\n").length))}
+          disabled={saving}
+          onChange={(event) => setTerms(event.currentTarget.value)}
+        />
+      </label>
+      <div className={styles.monitoringFooter}>
+        <small>
+          {monitoring.lastSuccessfulMonitorAt
+            ? `Last successful check ${relativeTime(monitoring.lastSuccessfulMonitorAt)}`
+            : "No daily check has completed yet."}
+        </small>
+        <button className={styles.primaryButton} type="button" disabled={saving} onClick={() => void save(monitoring.enabled)}>
+          {saving ? "Saving…" : "Save watch terms"}
+        </button>
+      </div>
+    </section>
+  );
 }
 
 type IconName =
@@ -1045,6 +1135,8 @@ export function ProductDashboard({
     canConnect: false,
     requiresPaidAccess: true,
   },
+  monitoring = null,
+  onUpdateMonitoring,
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
@@ -1166,6 +1258,14 @@ export function ProductDashboard({
         )}
 
         <BusinessProfilePanel profile={data.business} />
+
+        <RedditMonitoringPanel
+          key={monitoring
+            ? `${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
+            : "monitoring-unavailable"}
+          monitoring={monitoring}
+          onUpdate={onUpdateMonitoring}
+        />
 
         <section className={styles.dashboardSection}>
           {!hasAnyRelevantContent ? (

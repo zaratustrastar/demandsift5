@@ -1,0 +1,56 @@
+name: One-shot monitoring acceptance diagnostic
+
+on:
+  push:
+    branches:
+      - codex/monitoring-live-diagnostic-20260821
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 8
+    steps:
+      - name: Inspect exact acceptance scan without secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scan_id='scan_327ce0c3ce28416899842de87262fed6'
+          echo "=== release and containers ==="
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' |
+            grep -E 'NAMES|demandsift2-(web|worker|database|caddy)'
+          echo "=== scan state ==="
+          docker exec demandsift2-database-1 psql -U demandsift -d demandsift -P pager=off -v scan_id="$scan_id" <<'SQL'
+          SELECT id, status, created_at, updated_at,
+                 record->>'errorCode' AS error_code,
+                 left(coalesce(record->>'error',''), 240) AS error
+          FROM runtime_scans
+          WHERE id = :'scan_id';
+
+          SELECT stage->>'id' AS stage,
+                 stage->>'status' AS status,
+                 left(coalesce(stage->>'detail',''), 180) AS detail
+          FROM runtime_scans AS scan
+          CROSS JOIN LATERAL jsonb_array_elements(scan.record->'progress') AS stage
+          WHERE scan.id = :'scan_id';
+
+          SELECT
+            record #>> '{result,diagnostics,profileGeneration}' AS profile_generation,
+            record #>> '{result,diagnostics,retrieval,fetchedCandidates}' AS fetched,
+            record #>> '{result,diagnostics,retrieval,credibleCandidates}' AS credible,
+            record #>> '{result,diagnostics,retrieval,triageSelected}' AS triage_selected,
+            record #>> '{result,diagnostics,retrieval,enrichedConversations}' AS enriched
+          FROM runtime_scans
+          WHERE id = :'scan_id';
+          SQL
+          echo "=== sanitized recent application events ==="
+          {
+            docker logs --since 2h demandsift2-web-1 2>&1
+            docker logs --since 2h demandsift2-worker-1 2>&1
+          } |
+            grep -E "$scan_id|job_(claimed|failed|succeeded)|scan_already_running|OpenAI|Reddit retrieval|fatal|error" |
+            sed -E 's/(Bearer|token|api[_-]?key|password)[=: ]+[^ ,}]+/\1=[REDACTED]/Ig' |
+            tail -n 260 || true

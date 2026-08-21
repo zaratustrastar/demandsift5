@@ -111,10 +111,11 @@ jobs:
     needs:
       - candidate-deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       APP_URL: https://demandsift.143-244-154-139.sslip.io
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      ACCEPTANCE_COOKIE: ${{ runner.temp }}/demandsift-acceptance-cookie
     steps:
       - name: Confirm deployed candidate is still current
         shell: bash
@@ -132,12 +133,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-          cookie_jar="$(mktemp)"
+          cookie_jar="$ACCEPTANCE_COOKIE"
           created_json="$(mktemp)"
           latest_json="$(mktemp)"
           report_json="$(mktemp)"
           diagnostics_json="$(mktemp)"
-          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$report_json" "$diagnostics_json"' EXIT
+          rm -f "$cookie_jar"
+          trap 'rm -f "$created_json" "$latest_json" "$report_json" "$diagnostics_json"' EXIT
 
           curl --fail-with-body --silent --show-error \
             --cookie-jar "$cookie_jar" \
@@ -298,3 +300,120 @@ jobs:
 
           echo "acceptance_result=timeout" >&2
           exit 1
+
+      - name: Prove one opted-in daily monitoring cycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          settings_json="$(mktemp)"
+          enable_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          disable_json="$(mktemp)"
+          payload_json="$(mktemp)"
+          trap 'rm -f "$settings_json" "$enable_json" "$latest_json" "$disable_json" "$payload_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie "$ACCEPTANCE_COOKIE" \
+            "$APP_URL/api/monitoring/settings" > "$settings_json"
+
+          python3 - "$settings_json" "$payload_json" <<'PY'
+          import json, sys
+          source = json.load(open(sys.argv[1]))
+          monitoring = source.get("monitoring") or {}
+          terms = [term for term in (monitoring.get("watchTerms") or []) if term.get("active", True)]
+          if not terms:
+              raise SystemExit("Monitoring acceptance failed: no default active watch terms.")
+          json.dump({"enabled": True, "watchTerms": terms}, open(sys.argv[2], "w"))
+          print("monitor_default_active_terms=" + str(len(terms)))
+          PY
+
+          curl --fail-with-body --silent --show-error \
+            --cookie "$ACCEPTANCE_COOKIE" \
+            -H 'content-type: application/json' \
+            -X PUT \
+            --data-binary "@$payload_json" \
+            "$APP_URL/api/monitoring/settings" > "$enable_json"
+
+          python3 - "$enable_json" <<'PY'
+          import json, sys
+          monitoring = (json.load(open(sys.argv[1])).get("monitoring") or {})
+          if monitoring.get("enabled") is not True:
+              raise SystemExit("Monitoring acceptance failed: opt-in was not persisted.")
+          print("monitor_opt_in=passed")
+          PY
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$ACCEPTANCE_COOKIE" \
+              "$APP_URL/api/monitoring/settings" > "$latest_json"
+
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          run = json.load(open(sys.argv[1])).get("latestRun") or {}
+          print(run.get("status") or "waiting")
+          PY
+          )"
+            echo "monitor_poll=$attempt status=$status"
+            if [ "$status" = "succeeded" ]; then
+              python3 - "$latest_json" <<'PY'
+          import datetime, json, sys
+          payload = json.load(open(sys.argv[1]))
+          monitoring = payload.get("monitoring") or {}
+          run = payload.get("latestRun") or {}
+          active = [term for term in (monitoring.get("watchTerms") or []) if term.get("active", True)]
+          watched = run.get("watchTerms") or []
+          start = datetime.datetime.fromisoformat(str(run.get("windowStartedAt") or "").replace("Z", "+00:00"))
+          end = datetime.datetime.fromisoformat(str(run.get("windowEndedAt") or "").replace("Z", "+00:00"))
+          watermark = datetime.datetime.fromisoformat(str(monitoring.get("lastSuccessfulMonitorAt") or "").replace("Z", "+00:00"))
+          if not run.get("actorRunId"):
+              raise SystemExit("Monitoring acceptance failed: successful run has no Actor run ID.")
+          if len(watched) != len(active):
+              raise SystemExit("Monitoring acceptance failed: one run did not contain all active terms.")
+          if end <= start or watermark != end:
+              raise SystemExit("Monitoring acceptance failed: exact window/watermark invariant was not preserved.")
+          print("monitor_acceptance=passed")
+          print("monitor_one_actor_run=true")
+          print("monitor_watch_terms=" + str(len(watched)))
+          print("monitor_fetched=" + str(int(run.get("fetched") or 0)))
+          print("monitor_normalized=" + str(int(run.get("normalized") or 0)))
+          print("monitor_unseen=" + str(int(run.get("unseen") or 0)))
+          print("monitor_relevant=" + str(int(run.get("relevant") or 0)))
+          print("monitor_opportunities=" + str(int(run.get("opportunities") or 0)))
+          PY
+              break
+            fi
+            if [ "$status" = "failed" ]; then
+              echo "Monitoring acceptance failed: the daily run reached a terminal failure." >&2
+              exit 1
+            fi
+            if [ "$attempt" -eq 180 ]; then
+              echo "Monitoring acceptance failed: daily run timed out." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          python3 - "$latest_json" "$payload_json" <<'PY'
+          import json, sys
+          monitoring = json.load(open(sys.argv[1])).get("monitoring") or {}
+          json.dump({"enabled": False, "watchTerms": monitoring.get("watchTerms") or []}, open(sys.argv[2], "w"))
+          PY
+          curl --fail-with-body --silent --show-error \
+            --cookie "$ACCEPTANCE_COOKIE" \
+            -H 'content-type: application/json' \
+            -X PUT \
+            --data-binary "@$payload_json" \
+            "$APP_URL/api/monitoring/settings" > "$disable_json"
+          python3 - "$disable_json" <<'PY'
+          import json, sys
+          monitoring = (json.load(open(sys.argv[1])).get("monitoring") or {})
+          if monitoring.get("enabled") is not False:
+              raise SystemExit("Monitoring acceptance failed: opt-out was not persisted.")
+          print("monitor_opt_out=passed")
+          PY
+
+      - name: Remove acceptance session
+        if: always()
+        shell: bash
+        run: rm -f "$ACCEPTANCE_COOKIE"

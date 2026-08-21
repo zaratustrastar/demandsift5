@@ -592,27 +592,35 @@ export function ThreadlineExperience() {
     let cancelled = false;
     async function loadRedditConnection() {
       try {
-        const [response, monitoringResponse] = await Promise.all([
-          fetch("/api/reddit/status", { cache: "no-store" }),
-          fetch("/api/monitoring/settings", { cache: "no-store" }),
-        ]);
+        const response = await fetch("/api/reddit/status", { cache: "no-store" });
         const payload = (await response.json()) as {
           reddit?: RedditConnectionStatus;
         };
-        const monitoringPayload = (await monitoringResponse.json()) as {
-          monitoring?: RedditMonitoringStatus;
-        };
         if (response.ok && payload.reddit && !cancelled) {
           setRedditConnection(payload.reddit);
-        }
-        if (monitoringResponse.ok && monitoringPayload.monitoring && !cancelled) {
-          setMonitoring(monitoringPayload.monitoring);
         }
       } catch {
         if (!cancelled) setRedditConnection(disconnectedReddit);
       }
     }
+
+    async function loadRedditMonitoring() {
+      try {
+        const response = await fetch("/api/monitoring/settings", { cache: "no-store" });
+        const payload = (await response.json()) as {
+          monitoring?: RedditMonitoringStatus;
+        };
+        if (response.ok && payload.monitoring && !cancelled) {
+          setMonitoring(payload.monitoring);
+        }
+      } catch {
+        // Monitoring is independent from Reddit OAuth. A transient settings
+        // error must not change the separately loaded connection state.
+      }
+    }
+
     void loadRedditConnection();
+    void loadRedditMonitoring();
     return () => {
       cancelled = true;
     };

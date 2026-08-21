@@ -44,7 +44,7 @@ async function compileMonitorProvider() {
     } });`,
   );
   source = source.replace(
-    /import \{ REDDIT_MONITOR_LIMITS \} from "@\\/lib\\/intelligence\\/reddit-monitor-limits";/u,
+    'import { REDDIT_MONITOR_LIMITS } from "@/lib/intelligence/reddit-monitor-limits";',
     "const REDDIT_MONITOR_LIMITS = { maxWatchTerms: 5, maxResultsPerRun: 50, maxPostsPerTerm: 5, maxCommentsPerTerm: 5 };",
   );
   const javascript = ts.transpileModule(source, {

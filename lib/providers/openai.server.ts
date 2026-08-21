@@ -75,7 +75,7 @@ export type OpenAiProviderDiagnosticEvent =
       retryMaxTokens: number;
     }
   | {
-      kind: "model_capacity_fallback" | "model_network_timeout_fallback";
+      kind: "model_capacity_fallback" | "model_network_timeout_fallback" | "model_structured_output_fallback";
       operation: AiOperation;
       model: string;
       fallbackModel: string;
@@ -1287,92 +1287,116 @@ export class OpenAiProvider implements AiProvider {
     parse: (value: unknown) => T;
   }): Promise<AiProviderResult<T>> {
     if (this.apiStyle === "chat") {
-      let maxTokens = options.maxOutputTokens;
-      let activeModel = options.model;
+      const modelCandidates = [...new Set([
+        options.model,
+        ...(this.modelFallbacks[options.model] ?? []),
+      ])];
       const attemptUsages: TokenUsage[] = [];
       let estimatedCostUsd = 0;
+      let lastStructuredError: OpenAiProviderError | undefined;
 
-      for (let attempt = 0; attempt < STRUCTURED_CHAT_MAX_ATTEMPTS; attempt += 1) {
-        const result = await this.post("/chat/completions", {
-          model: activeModel,
-          messages: [
-            {
-              role: "system",
-              content: structuredChatSystemPrompt({
-                system: options.system,
-                schemaName: options.schemaName,
-                schema: options.schema,
-                recoveryAttempt: attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1,
-              }),
-            },
-            { role: "user", content: options.user },
-          ],
-          max_tokens: maxTokens,
-        }, options.operation);
-        activeModel = result.model ?? activeModel;
-        const payload = objectValue(result.payload, "Chat Completions API payload") as ChatCompletionsPayload;
-        const usage = chatUsage(payload);
-        const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
-        attemptUsages.push(usage);
-        estimatedCostUsd += await this.recordUsage(
-          activeModel,
-          options.operation,
-          usage,
-          options.context,
-          providerRequestId,
-        );
+      for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
+        let activeModel = modelCandidates[modelIndex];
+        let maxTokens = options.maxOutputTokens;
+        lastStructuredError = undefined;
 
-        const chatResult = chatText(payload, result.requestId);
-        if (chatResult.state === "complete") {
-          try {
-            const value = options.parse(parseStructuredText(chatResult.text, result.requestId));
-            return {
-              value,
-              model: activeModel,
-              operation: options.operation,
-              usage: combineTokenUsage(attemptUsages),
-              estimatedCostUsd,
-              providerRequestId,
-            };
-          } catch (error) {
-            if (!isRetryableStructuredOutputError(error) || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) throw error;
-            await this.onDiagnostic?.({
-              kind: isMalformedStructuredJson(error)
-                ? "structured_chat_malformed_retry"
-                : "structured_chat_invalid_retry",
-              operation: options.operation,
-              model: activeModel,
-              finishReason: normalizedFinishReason(payload.choices?.[0]?.finish_reason),
-              outputTokens: usage.outputTokens,
-              requestedMaxTokens: maxTokens,
-              retryMaxTokens: maxTokens,
-            });
-            continue;
+        for (let attempt = 0; attempt < STRUCTURED_CHAT_MAX_ATTEMPTS; attempt += 1) {
+          const result = await this.post("/chat/completions", {
+            model: activeModel,
+            messages: [
+              {
+                role: "system",
+                content: structuredChatSystemPrompt({
+                  system: options.system,
+                  schemaName: options.schemaName,
+                  schema: options.schema,
+                  recoveryAttempt: attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1,
+                }),
+              },
+              { role: "user", content: options.user },
+            ],
+            max_tokens: maxTokens,
+          }, options.operation);
+          activeModel = result.model ?? activeModel;
+          const payload = objectValue(result.payload, "Chat Completions API payload") as ChatCompletionsPayload;
+          const usage = chatUsage(payload);
+          const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
+          attemptUsages.push(usage);
+          estimatedCostUsd += await this.recordUsage(
+            activeModel,
+            options.operation,
+            usage,
+            options.context,
+            providerRequestId,
+          );
+
+          const chatResult = chatText(payload, result.requestId);
+          if (chatResult.state === "complete") {
+            try {
+              const value = options.parse(parseStructuredText(chatResult.text, result.requestId));
+              return {
+                value,
+                model: activeModel,
+                operation: options.operation,
+                usage: combineTokenUsage(attemptUsages),
+                estimatedCostUsd,
+                providerRequestId,
+              };
+            } catch (error) {
+              if (!isRetryableStructuredOutputError(error)) throw error;
+              lastStructuredError = error;
+              if (attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) break;
+              await this.onDiagnostic?.({
+                kind: isMalformedStructuredJson(error)
+                  ? "structured_chat_malformed_retry"
+                  : "structured_chat_invalid_retry",
+                operation: options.operation,
+                model: activeModel,
+                finishReason: normalizedFinishReason(payload.choices?.[0]?.finish_reason),
+                outputTokens: usage.outputTokens,
+                requestedMaxTokens: maxTokens,
+                retryMaxTokens: maxTokens,
+              });
+              continue;
+            }
           }
-        }
 
-        if (!chatResult.retryable || attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) {
-          throw new OpenAiProviderError(
+          lastStructuredError = new OpenAiProviderError(
             `OpenAI returned no structured chat response text (finish_reason=${chatResult.finishReason}, content_type=${chatResult.contentType}, output_tokens=${chatResult.outputTokens}).`,
             undefined,
             result.requestId,
           );
+          if (!chatResult.retryable) throw lastStructuredError;
+          if (attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) break;
+          const retryMaxTokens = chatResult.finishReason === "length"
+            ? Math.min(STRUCTURED_CHAT_MAX_OUTPUT_TOKENS, Math.max(maxTokens + 1_000, maxTokens * 2))
+            : maxTokens;
+          await this.onDiagnostic?.({
+            kind: "structured_chat_empty_retry",
+            operation: options.operation,
+            model: activeModel,
+            finishReason: chatResult.finishReason,
+            outputTokens: usage.outputTokens,
+            requestedMaxTokens: maxTokens,
+            retryMaxTokens,
+          });
+          maxTokens = retryMaxTokens;
         }
-        const retryMaxTokens = chatResult.finishReason === "length"
-          ? Math.min(STRUCTURED_CHAT_MAX_OUTPUT_TOKENS, Math.max(maxTokens + 1_000, maxTokens * 2))
-          : maxTokens;
+
+        const fallbackModel = modelCandidates[modelIndex + 1];
+        if (!fallbackModel || fallbackModel === activeModel) {
+          throw lastStructuredError
+            ?? new OpenAiProviderError("OpenAI structured chat retry did not return a result.");
+        }
         await this.onDiagnostic?.({
-          kind: "structured_chat_empty_retry",
+          kind: "model_structured_output_fallback",
           operation: options.operation,
           model: activeModel,
-          finishReason: chatResult.finishReason,
-          outputTokens: usage.outputTokens,
-          requestedMaxTokens: maxTokens,
-          retryMaxTokens,
+          fallbackModel,
         });
-        maxTokens = retryMaxTokens;
       }
-      throw new OpenAiProviderError("OpenAI structured chat retry did not return a result.");
+      throw lastStructuredError
+        ?? new OpenAiProviderError("OpenAI structured chat retry did not return a result.");
     }
 
     const result = await this.post("/responses", {

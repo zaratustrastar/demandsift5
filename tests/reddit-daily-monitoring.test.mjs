@@ -25,7 +25,7 @@ async function compileMonitorProvider() {
   // module cannot resolve. The discovery parser itself has its own regression
   // suite; this small injected equivalent keeps this test focused on one-run
   // orchestration and matched-term unioning.
-  const source = rawSource.replace(
+  let source = rawSource.replace(
     /import \{ harshmaurCandidate \} from "@\/lib\/providers\/reddit-harshmaur\.server";/u,
     `const harshmaurCandidate = (value, options) => ({ candidate: {
       provider: "apify-harshmaur-reddit", sourceMode: "live",
@@ -43,6 +43,10 @@ async function compileMonitorProvider() {
         metadata: { searchTerm: value.searchTerm } }
     } });`,
   );
+  source = source.replace(
+    /import \{ REDDIT_MONITOR_LIMITS \} from "@\\/lib\\/intelligence\\/reddit-monitor-limits";/u,
+    "const REDDIT_MONITOR_LIMITS = { maxWatchTerms: 5, maxResultsPerRun: 50, maxPostsPerTerm: 5, maxCommentsPerTerm: 5 };",
+  );
   const javascript = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
     fileName: "reddit-monitor.server.ts",
@@ -56,12 +60,17 @@ const TO = new Date("2026-08-21T09:15:30.000Z");
 
 test("monitoring sends all active terms in one exact-window Actor input", () => {
   const input = monitorProvider.buildRedditMonitorActorInput({
-    watchTerms: ["DemandSift", "GummySearch", "buyer intent", "DemandSift"],
+    watchTerms: [
+      "DemandSift", "GummySearch", "buyer intent", "DemandSift",
+      "Reddit monitoring", "competitor complaint", "sixth term",
+    ],
     from: FROM,
     to: TO,
     environment: {},
   });
-  assert.deepEqual(input.searchTerms, ["DemandSift", "GummySearch", "buyer intent"]);
+  assert.deepEqual(input.searchTerms, [
+    "DemandSift", "GummySearch", "buyer intent", "Reddit monitoring", "competitor complaint",
+  ]);
   assert.equal(input.searchPosts, true);
   assert.equal(input.searchComments, true);
   assert.equal(input.searchCommunities, false);
@@ -73,6 +82,12 @@ test("monitoring sends all active terms in one exact-window Actor input", () => 
   assert.equal(input.commentedBefore, TO.toISOString());
   assert.equal(input.sentimentAnalysis, false);
   assert.equal(input.crawlCommentsPerPost, false);
+  assert.equal(input.maxPostsCount, 5);
+  assert.equal(input.maxCommentsCount, 5);
+  assert.ok(
+    input.searchTerms.length * (input.maxPostsCount + input.maxCommentsCount) <= 50,
+    "one Actor run must be capped at 50 raw results",
+  );
 });
 
 test("one monitoring fetch starts one Actor run and preserves every matching term", async () => {
@@ -123,6 +138,10 @@ test("one monitoring fetch starts one Actor run and preserves every matching ter
   assert.equal(calls.filter((call) => call.init.method === "POST").length, 1);
   const actorInput = JSON.parse(calls.find((call) => call.init.method === "POST").init.body);
   assert.deepEqual(actorInput.searchTerms, ["DemandSift", "buyer intent"]);
+  assert.equal(actorInput.maxPostsCount, 5);
+  assert.equal(actorInput.maxCommentsCount, 5);
+  const datasetCall = calls.find((call) => call.init.method !== "POST");
+  assert.equal(new URL(datasetCall.url).searchParams.get("limit"), "50");
   assert.equal(result.actorRunId, "actor_run_one");
   assert.equal(result.fetched, 2);
   assert.equal(result.candidates.length, 1);
@@ -155,6 +174,10 @@ test("scheduler creates one daily job and one run containing every active term",
     watch_terms: [
       { value: "DemandSift", kind: "brand", active: true },
       { value: "GummySearch", kind: "competitor", active: true },
+      { value: "third", kind: "keyword", active: true },
+      { value: "fourth", kind: "keyword", active: true },
+      { value: "fifth", kind: "keyword", active: true },
+      { value: "sixth", kind: "keyword", active: true },
       { value: "disabled term", kind: "keyword", active: false },
     ],
   }]);
@@ -165,13 +188,13 @@ test("scheduler creates one daily job and one run containing every active term",
   });
 
   assert.equal(result.scheduled.length, 1);
-  assert.equal(result.scheduled[0].watchTermCount, 2);
+  assert.equal(result.scheduled[0].watchTermCount, 5);
   assert.equal(fake.calls.filter((call) => call.query.startsWith("INSERT INTO background_jobs")).length, 1);
   assert.equal(fake.calls.filter((call) => call.query.startsWith("INSERT INTO runtime_reddit_monitor_runs")).length, 1);
   const runRecord = fake.calls
     .find((call) => call.query.startsWith("INSERT INTO runtime_reddit_monitor_runs"))
     .values.find((value) => value?.id === "monrun_one");
-  assert.deepEqual(runRecord.watchTerms, ["DemandSift", "GummySearch"]);
+  assert.deepEqual(runRecord.watchTerms, ["DemandSift", "GummySearch", "third", "fourth", "fifth"]);
   assert.equal(runRecord.windowStartedAt, "2026-08-20T09:15:30.000Z");
   assert.equal(runRecord.windowEndedAt, TO.toISOString());
   assert.equal(

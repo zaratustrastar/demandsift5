@@ -223,11 +223,28 @@ build_candidate() {
   echo "candidate_images_tested=true"
 }
 
+running_image_reference() {
+  local container=$1 image_id image_name
+  image_id=$(/usr/bin/docker inspect --format '{{.Image}}' "$container")
+  if /usr/bin/docker image inspect "$image_id" >/dev/null 2>&1; then
+    printf '%s\n' "$image_id"
+    return
+  fi
+
+  # A legacy cleanup may have removed the image record while the container is
+  # still running. Compose's named image is captured in the container config
+  # and remains safe to tag before candidate aliases are activated.
+  image_name=$(/usr/bin/docker inspect --format '{{.Config.Image}}' "$container")
+  /usr/bin/docker image inspect "$image_name" >/dev/null 2>&1 \
+    || fail "running container $container has no taggable image reference"
+  printf '%s\n' "$image_name"
+}
+
 tag_running_for_rollback() {
   local web_image worker_image migrate_image
-  web_image=$(/usr/bin/docker inspect --format '{{.Image}}' demandsift2-web-1)
-  worker_image=$(/usr/bin/docker inspect --format '{{.Image}}' demandsift2-worker-1)
-  migrate_image=$(/usr/bin/docker inspect --format '{{.Image}}' demandsift2-migrate-1)
+  web_image=$(running_image_reference demandsift2-web-1)
+  worker_image=$(running_image_reference demandsift2-worker-1)
+  migrate_image=$(running_image_reference demandsift2-migrate-1)
   /usr/bin/docker image tag "$web_image" demandsift2-web:rollback
   /usr/bin/docker image tag "$worker_image" demandsift2-worker:rollback
   /usr/bin/docker image tag "$migrate_image" demandsift2-migrate:rollback

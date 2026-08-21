@@ -45,6 +45,16 @@ test("release wrapper serializes builds and deployments on the VPS", async () =>
   assert.match(source, /another release operation is already running/);
 });
 
+test("release wrapper preserves rollback tags when a running image ID was pruned", async () => {
+  const source = await readFile(wrapperUrl, "utf8");
+
+  assert.match(source, /running_image_reference\(\)/);
+  assert.match(source, /docker image inspect "\$image_id"/);
+  assert.match(source, /docker inspect --format '\{\{\.Config\.Image\}\}' "\$container"/);
+  assert.match(source, /has no taggable image reference/);
+  assert.doesNotMatch(source, /docker commit/);
+});
+
 test("CI queues releases and reclaims only runner-owned caches before Docker work", async () => {
   const source = await readFile(workflowUrl, "utf8");
 

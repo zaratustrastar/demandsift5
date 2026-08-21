@@ -1,0 +1,216 @@
+name: Apply balanced Reddit recall repair
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-balanced-reddit-recall-20260816.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+
+      - name: Apply balanced high-recall search repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          provider = Path('lib/providers/reddit.server.ts')
+          text = provider.read_text()
+
+          replacements = [
+          ('''    push(
+              "direct_buying_intent",
+              `looking for ${category}`,
+              categorySeed,
+            );
+            push(
+              "category_recommendation",
+              `${category} recommendations`,
+              categorySeed,
+            );''', '''    // Search Reddit in the nouns people actually type. Intent words such as
+            // "looking for" and "recommendations" reduce recall and duplicate the
+            // same underlying category query; intent is classified after retrieval.
+            push(
+              "direct_buying_intent",
+              category,
+              categorySeed,
+            );
+            push(
+              "category_recommendation",
+              `best ${category}`,
+              categorySeed,
+            );'''),
+          ('''  for (const seed of [...problems, ...jobs].slice(0, 8)) {
+            const manifestation = manifestationExpression(seed);
+            if (!manifestation) continue;
+
+            push(
+              "direct_buying_intent",
+              `need help ${manifestation}`,
+              seed,
+            );
+          }''', '''  // Problems and jobs already express what a real Reddit user is trying to
+          // accomplish. Do not spend a second search on a synthetic "need help"
+          // prefix for the same phrase; use those slots to cover distinct pains.
+          for (const seed of [...problems, ...jobs].slice(0, 10)) {
+            const manifestation = manifestationExpression(seed);
+            if (!manifestation) continue;
+            push("problem_pain", manifestation, seed);
+          }'''),
+          ('''  const quotas: Array<[DemandLane, number]> = [
+            ["direct_buying_intent", 2],
+            ["problem_pain", 2],
+            ["competitor_switching", 1],
+            ["category_recommendation", 1],
+            ["brand_competitor_mentions", 1],
+            ["workaround", 1],
+            ["timing", 1],
+          ];''', '''  const quotas: Array<[DemandLane, number]> = [
+            // Recall first: one category query plus four distinct concrete pains.
+            // Competitor/workaround/timing lanes retain dedicated representation
+            // when website evidence supplies them. Remaining slots are filled from
+            // the next unused evidence-backed query below.
+            ["direct_buying_intent", 1],
+            ["problem_pain", 4],
+            ["competitor_switching", 1],
+            ["category_recommendation", 1],
+            ["workaround", 1],
+            ["timing", 1],
+            ["brand_competitor_mentions", 1],
+          ];'''),
+          ('''      maxItems,
+              maxPostCount: maxItems,
+              // This bounds direct comment result pages while skipComments prevents
+              // unrelated thread traversal from consuming the global discovery budget.
+              maxComments: 10,''', '''      maxItems,
+              // `maxItems` is global across every search in an Actor run. Bound each
+              // search as well so the first broad query cannot consume the whole
+              // dataset before later demand lanes execute. This preserves the existing
+              // global cost ceiling while distributing it across the search plan.
+              maxPostCount: Math.max(2, Math.min(6, Math.floor(maxItems / Math.max(searches.length, 1)))),
+              // With skipComments enabled this does not crawl every matched post; it
+              // bounds direct comment-search output in the same spirit as posts.
+              maxComments: Math.max(2, Math.min(6, Math.floor(maxItems / Math.max(searches.length, 1)))),'''),
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit('Expected provider snippet not found:\n' + old[:250])
+              text = text.replace(old, new, 1)
+          provider.write_text(text)
+
+          tests = Path('tests/apify-reddit-provider.test.mjs')
+          t = tests.read_text()
+          old_counts = '''  assert.deepEqual(counts, {
+            direct_buying_intent: 2,
+            problem_pain: 2,
+            competitor_switching: 1,
+            category_recommendation: 1,
+            brand_competitor_mentions: 1,
+            workaround: 1,
+            timing: 1,
+          });'''
+          new_counts = '''  assert.deepEqual(counts, {
+            direct_buying_intent: 1,
+            problem_pain: 4,
+            competitor_switching: 1,
+            category_recommendation: 1,
+            brand_competitor_mentions: 0,
+            workaround: 1,
+            timing: 1,
+          });'''
+          if old_counts not in t:
+              raise SystemExit('Expected count assertion not found')
+          t = t.replace(old_counts, new_counts, 1)
+          old_basecamp = '''      entry.lane === "direct_buying_intent" &&
+              entry.query === "looking for project management software"),'''
+          new_basecamp = '''      entry.lane === "direct_buying_intent" &&
+              entry.query === "project management software"),'''
+          if old_basecamp not in t:
+              raise SystemExit('Expected Basecamp direct-query assertion not found')
+          t = t.replace(old_basecamp, new_basecamp, 1)
+
+          insertion = '''\n\ntest("TV parental-control plan spends slots on distinct Reddit-native problems", () => {
+            const plan = redditModule.buildApifyRedditSearchPlan({
+              queries: {
+                productTerms: ["TVCP", "Android TV parental control app"],
+                brandTerms: ["TVCP"],
+                productCategories: ["Android TV parental control app"],
+                customerProblems: [
+                  "too much TV time",
+                  "kids watching TV late",
+                  "block YouTube on TV",
+                  "set TV screen time",
+                  "lock TV from phone",
+                  "kids changing TV settings",
+                ],
+                jobsToBeDone: ["restrict apps on TV", "limit one more episode"],
+                workarounds: [],
+                triggerEvents: ["A child starts opening unwanted TV apps"],
+                buyerIntent: ["recommendations", "alternative"],
+                competitors: [],
+                excludedTerms: [],
+                ambiguityRisks: ["Android phones"],
+              },
+              limit: 25,
+            });
+
+            assert.equal(plan.length, 9);
+            assert.equal(plan[0].query, "android tv parental control app");
+            assert.ok(plan.every((entry) => !/^need help /i.test(entry.query)), JSON.stringify(plan));
+            const pain = plan.filter((entry) => entry.lane === "problem_pain").map((entry) => entry.query);
+            assert.ok(pain.includes("much tv time"), JSON.stringify(plan));
+            assert.ok(pain.some((query) => /block youtube tv/.test(query)), JSON.stringify(plan));
+            assert.ok(pain.some((query) => /screen time/.test(query)), JSON.stringify(plan));
+            assert.ok(new Set(plan.map((entry) => entry.query.toLowerCase())).size === plan.length);
+          });\n'''
+          marker = '\ntest("rejects observed broad-query noise while retaining concrete Basecamp demand", async () => {'
+          if marker not in t:
+              raise SystemExit('Insertion marker not found')
+          t = t.replace(marker, insertion + marker, 1)
+          tests.write_text(t)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused Reddit provider tests
+        run: node --test tests/apify-reddit-provider.test.mjs
+
+      - name: Run full validation
+        run: |
+          npm test
+          npm run build
+          npm run lint
+
+      - name: Commit repair only after tests pass
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Balance Reddit search recall across demand lanes'
+          git push origin HEAD:feature/reddit-intelligence-pipeline

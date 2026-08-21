@@ -1,0 +1,208 @@
+name: Validate and deploy monitoring candidate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CODE_SHA: 93367a4617b34d0bc791a25ea78388d48cf5d9dc
+  APP_URL: https://demandsift.143-244-154-139.sslip.io
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CODE_SHA }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - run: node --test tests/openai-intelligence-pipeline.test.mjs tests/job-retry-classification.test.mjs tests/reddit-daily-monitoring.test.mjs tests/reddit-monitoring-ui.test.mjs
+
+  deploy:
+    needs: verify
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    steps:
+      - name: Reclaim runner caches
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$HOME/.npm/_cacache" "$HOME/.cache"
+          find "$HOME/actions-runner/_diag" -type f -mtime +2 -delete 2>/dev/null || true
+          find "$HOME/actions-runner/_work/_temp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf -- {} + 2>/dev/null || true
+          df -h /
+      - name: Confirm source SHA
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$CODE_SHA"
+      - name: Build and deploy tested candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n /usr/local/sbin/demandsift-release build "$CODE_SHA"
+          sudo -n /usr/local/sbin/demandsift-release deploy
+          sudo -n /usr/local/sbin/demandsift-release inspect
+
+  accept:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Prove discovery and daily monitoring end to end
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie="$(mktemp)"
+          created="$(mktemp)"
+          status_file="$(mktemp)"
+          report="$(mktemp)"
+          settings="$(mktemp)"
+          payload="$(mktemp)"
+          monitor="$(mktemp)"
+
+          cleanup() {
+            set +e
+            if [ -s "$cookie" ]; then
+              curl --silent --cookie "$cookie" "$APP_URL/api/monitoring/settings" > "$settings"
+              python3 - "$settings" "$payload" <<'PY'
+          import json, sys
+          try:
+              monitoring = json.load(open(sys.argv[1])).get("monitoring") or {}
+              json.dump({"enabled": False, "watchTerms": monitoring.get("watchTerms") or []}, open(sys.argv[2], "w"))
+          except Exception:
+              json.dump({"enabled": False}, open(sys.argv[2], "w"))
+          PY
+              curl --silent --cookie "$cookie" -H 'content-type: application/json' -X PUT --data-binary "@$payload" "$APP_URL/api/monitoring/settings" >/dev/null
+            fi
+            rm -f "$cookie" "$created" "$status_file" "$report" "$settings" "$payload" "$monitor"
+          }
+          trap cleanup EXIT
+
+          curl --fail-with-body --silent --show-error --cookie-jar "$cookie"             -H 'content-type: application/json' -X POST             --data '{"websiteUrl":"https://basecamp.com","defer":true}'             "$APP_URL/api/scans" > "$created"
+
+          scan_id="$(python3 - "$created" <<'PY'
+          import json, sys
+          print((json.load(open(sys.argv[1])).get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "acceptance_scan_id=$scan_id"
+
+          discovery_complete=false
+          for attempt in $(seq 1 330); do
+            curl --fail-with-body --silent --show-error --cookie "$cookie"               "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$status_file"
+            status="$(python3 - "$status_file" <<'PY'
+          import json, sys
+          print((json.load(open(sys.argv[1])).get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "discovery_poll=$attempt status=$status"
+            if [ "$status" = complete ]; then
+              discovery_complete=true
+              break
+            fi
+            if [ "$status" = failed ]; then
+              python3 - "$status_file" <<'PY'
+          import json, sys
+          scan=(json.load(open(sys.argv[1])).get("scan") or {})
+          print("scan_error=" + str(scan.get("error") or ""))
+          print("progress=" + json.dumps([{"id":x.get("id"),"status":x.get("status")} for x in scan.get("progress") or []], separators=(",",":")))
+          PY
+              exit 1
+            fi
+            sleep 10
+          done
+          test "$discovery_complete" = true
+
+          curl --fail-with-body --silent --show-error --cookie "$cookie"             "$APP_URL/api/scans/$scan_id" > "$report"
+          python3 - "$report" <<'PY'
+          import json, sys
+          data=json.load(open(sys.argv[1]))
+          scan=data.get("scan") or {}
+          report=data.get("report") or {}
+          opportunities=len(report.get("opportunities") or [])
+          replies=len(report.get("replies") or [])
+          if scan.get("status") != "complete": raise SystemExit("presented scan is not complete")
+          if not report.get("profile"): raise SystemExit("missing grounded business profile")
+          print("discovery_profile_acceptance=passed")
+          print("visible_opportunities=" + str(opportunities))
+          print("visible_replies=" + str(replies))
+          print("lead_counts_are_observational=true")
+          PY
+
+          curl --fail-with-body --silent --show-error --cookie "$cookie"             "$APP_URL/api/monitoring/settings" > "$settings"
+          python3 - "$settings" "$payload" <<'PY'
+          import json, sys
+          monitoring=json.load(open(sys.argv[1])).get("monitoring") or {}
+          terms=[x for x in monitoring.get("watchTerms") or [] if x.get("active", True)]
+          if not terms: raise SystemExit("no default active watch terms")
+          if len(terms) > 5: raise SystemExit("watch-term limit exceeded")
+          json.dump({"enabled": True, "watchTerms": terms}, open(sys.argv[2], "w"))
+          print("monitor_active_terms=" + str(len(terms)))
+          PY
+          curl --fail-with-body --silent --show-error --cookie "$cookie"             -H 'content-type: application/json' -X PUT --data-binary "@$payload"             "$APP_URL/api/monitoring/settings" > "$monitor"
+
+          monitor_complete=false
+          for attempt in $(seq 1 300); do
+            curl --fail-with-body --silent --show-error --cookie "$cookie"               "$APP_URL/api/monitoring/settings" > "$monitor"
+            monitor_status="$(python3 - "$monitor" <<'PY'
+          import json, sys
+          print((json.load(open(sys.argv[1])).get("latestRun") or {}).get("status") or "waiting")
+          PY
+          )"
+            echo "monitor_poll=$attempt status=$monitor_status"
+            if [ "$monitor_status" = succeeded ]; then
+              monitor_complete=true
+              break
+            fi
+            if [ "$monitor_status" = failed ]; then
+              python3 - "$monitor" <<'PY'
+          import json, sys
+          run=(json.load(open(sys.argv[1])).get("latestRun") or {})
+          print("monitor_error=" + str(run.get("error") or ""))
+          print("monitor_actor_run_id=" + str(run.get("actorRunId") or ""))
+          PY
+              exit 1
+            fi
+            sleep 5
+          done
+          test "$monitor_complete" = true
+
+          python3 - "$monitor" <<'PY'
+          import datetime, json, sys
+          data=json.load(open(sys.argv[1]))
+          monitoring=data.get("monitoring") or {}
+          run=data.get("latestRun") or {}
+          active=[x for x in monitoring.get("watchTerms") or [] if x.get("active", True)]
+          watched=run.get("watchTerms") or []
+          start=datetime.datetime.fromisoformat(str(run.get("windowStartedAt") or "").replace("Z","+00:00"))
+          end=datetime.datetime.fromisoformat(str(run.get("windowEndedAt") or "").replace("Z","+00:00"))
+          watermark=datetime.datetime.fromisoformat(str(monitoring.get("lastSuccessfulMonitorAt") or "").replace("Z","+00:00"))
+          if not run.get("actorRunId"): raise SystemExit("successful monitor has no Actor run ID")
+          if len(active) != len(watched): raise SystemExit("one Actor run did not contain all active terms")
+          if len(watched) > 5: raise SystemExit("monitor used more than five watch terms")
+          if int(run.get("fetched") or 0) > 50: raise SystemExit("monitor fetched more than fifty records")
+          if end <= start or watermark != end: raise SystemExit("monitor window/watermark invariant failed")
+          print("monitor_acceptance=passed")
+          print("monitor_one_actor_run=true")
+          print("monitor_watch_terms=" + str(len(watched)))
+          print("monitor_fetched=" + str(int(run.get("fetched") or 0)))
+          print("monitor_normalized=" + str(int(run.get("normalized") or 0)))
+          print("monitor_unseen=" + str(int(run.get("unseen") or 0)))
+          print("monitor_relevant=" + str(int(run.get("relevant") or 0)))
+          print("monitor_opportunities=" + str(int(run.get("opportunities") or 0)))
+          PY

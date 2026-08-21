@@ -1,13 +1,16 @@
 export {
   BusinessProfilePanel,
-  CompetitorWeaknessCard,
-  DemandInsightCard,
-  LockedResultsPanel,
   MockProviderNotice,
   OpportunityCard,
+  RelevantConversationCard,
+  ScanEvidencePanel,
   ProductDashboard,
 } from "./ProductDashboard";
-export type { ProductDashboardProps, RedditConnectionStatus } from "./ProductDashboard";
+export type {
+  ProductDashboardProps,
+  RedditConnectionStatus,
+  RedditMonitoringStatus,
+} from "./ProductDashboard";
 export {
   countLockedResults,
   demoBusinessProfile,

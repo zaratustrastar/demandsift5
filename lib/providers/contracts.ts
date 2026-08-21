@@ -2,12 +2,17 @@ import type { AiOperation, TokenUsage } from "@/lib/ai/usage";
 import type {
   BusinessUnderstanding,
   CompetitorSignal,
+  ConversationTriage,
+  DeepQualification,
   DemandInsight,
+  EnrichedRedditConversation,
   EntityId,
   ModelConfiguration,
   OpportunityClassification,
   QualifiedOpportunity,
   RedditConversation,
+  RedditDiscoveryCandidate,
+  RedditSearchLane,
 } from "@/lib/domain/types";
 
 export interface WebsiteEvidencePage {
@@ -38,6 +43,50 @@ export interface AnalyzeBusinessRequest {
   models: ModelConfiguration;
 }
 
+/**
+ * A much smaller, uncited business summary produced from homepage-only
+ * evidence by a fast/cheap model. It exists purely to let the editable
+ * setup screen render in a few seconds; it is never treated as good enough
+ * to plan Reddit discovery queries from -- the full `analyzeBusiness` pass
+ * always runs before retrieval, either in the background while the user
+ * reviews this, or synchronously if they start the scan before that
+ * finishes. See lib/server/scan-workflow.ts's `profileStage` handling.
+ */
+export interface FastBusinessProfile {
+  name: string;
+  summary: string;
+  productCategory: string;
+  productTerms: string[];
+  customerProblemLanguage: string[];
+  competitors: string[];
+}
+
+export interface TriageConversationsRequest {
+  business: BusinessUnderstanding;
+  candidates: RedditDiscoveryCandidate[];
+  models: ModelConfiguration;
+  coverageRetries?: number;
+}
+
+export interface TriagedConversation {
+  externalId: string;
+  triage: ConversationTriage;
+}
+
+export interface QualifyConversationsRequest {
+  business: BusinessUnderstanding;
+  conversations: EnrichedRedditConversation[];
+  models: ModelConfiguration;
+  coverageRetries?: number;
+}
+
+export interface DeepQualifiedConversation {
+  externalId: string;
+  conversation: EnrichedRedditConversation;
+  qualification: DeepQualification;
+}
+
+/** Legacy request retained for older callers; the active scan uses triage/qualify. */
 export interface ClassifyConversationsRequest {
   business: BusinessUnderstanding;
   conversations: RedditConversation[];
@@ -52,6 +101,7 @@ export interface ClassifiedConversation {
 export interface GenerateInsightsRequest {
   business: BusinessUnderstanding;
   opportunities: QualifiedOpportunity[];
+  evidenceConversations?: DeepQualifiedConversation[];
   models: ModelConfiguration;
 }
 
@@ -85,6 +135,17 @@ export interface AiProvider {
   analyzeBusiness(
     request: AnalyzeBusinessRequest,
   ): Promise<AiProviderResult<BusinessUnderstanding>>;
+  /** Fast first-pass analysis from homepage-only evidence. See `FastBusinessProfile`. */
+  analyzeBusinessFast(
+    request: AnalyzeBusinessRequest,
+  ): Promise<AiProviderResult<FastBusinessProfile>>;
+  triageConversations(
+    request: TriageConversationsRequest,
+  ): Promise<AiProviderResult<TriagedConversation[]>>;
+  qualifyConversations(
+    request: QualifyConversationsRequest,
+  ): Promise<AiProviderResult<DeepQualifiedConversation[]>>;
+  /** Deprecated compatibility method. */
   classifyConversations(
     request: ClassifyConversationsRequest,
   ): Promise<AiProviderResult<ClassifiedConversation[]>>;
@@ -94,17 +155,26 @@ export interface AiProvider {
   generateReply(
     request: GenerateReplyRequest,
   ): Promise<AiProviderResult<GeneratedReplyDraft>>;
+  /** Available for future high-volume retrieval, not used by the MVP scan. */
   embed(request: EmbeddingRequest): Promise<AiProviderResult<number[][]>>;
 }
 
 export interface RedditSearchQueries {
   productTerms: string[];
+  brandTerms?: string[];
   /** Short generic categories buyers use, such as "project management software". */
   productCategories?: string[];
   customerProblems: string[];
+  /** Source-grounded functional jobs that can seed demand-language searches. */
+  jobsToBeDone?: string[];
+  /** Source-grounded workaround hypotheses such as email, spreadsheets or manual steps. */
+  workarounds?: string[];
+  /** Source-grounded events that may create present-tense buying urgency. */
+  triggerEvents?: string[];
   buyerIntent: string[];
   competitors: string[];
   excludedTerms: string[];
+  ambiguityRisks?: string[];
 }
 
 export interface RedditSearchRequest {
@@ -115,6 +185,93 @@ export interface RedditSearchRequest {
   since?: string;
 }
 
+/**
+ * Concept evidence a candidate must show for a plan entry to match.
+ *
+ * Token counting cannot distinguish a market from its neighbour: "android tv
+ * parental control app" overlaps an Android *phone* thread on most of its
+ * tokens, and the one token that separates the two markets carries no more
+ * weight than the rest. Concepts express the requirement directly - market
+ * evidence AND problem evidence - and each concept accepts synonyms, so a
+ * thread saying "television" or "screen time" still matches.
+ */
+export interface RedditSearchConcepts {
+  /** Market/category variants. At least one must appear in the candidate. */
+  market: string[];
+  /** Problem or use-case variants. At least one must appear. */
+  problem: string[];
+  /** Buying-intent variants. Never required; contributes to score only. */
+  intent?: string[];
+}
+
+export interface RedditSearchPlanEntry {
+  lane: RedditSearchLane;
+  query: string;
+  seed?: string;
+  concepts?: RedditSearchConcepts;
+}
+
+export type ProviderRejectionReason =
+  | "invalid_record"
+  | "invalid_url"
+  | "query_mismatch"
+  | "bot_author"
+  | "deleted"
+  | "nsfw"
+  | "missing_timestamp"
+  | "outside_window";
+
+export interface RedditDiscoveryDiagnostics {
+  queryCount: number;
+  fetchedCandidates: number;
+  normalizedCandidates: number;
+  verifiedRecentCandidates: number;
+  rejectedByReason: Record<ProviderRejectionReason, number>;
+  laneQueryCounts: Partial<Record<RedditSearchLane, number>>;
+  /**
+   * True when discovery lost coverage it could not recover even after
+   * retries -- e.g. one or more query batches exhausted every retry, or a
+   * timed-out run retained zero usable records. `candidates` may still be
+   * non-empty (other batches can succeed); this flag is what lets a caller
+   * distinguish "genuinely searched and found nothing" from "the search
+   * itself was incomplete", which a bare empty `candidates` array cannot.
+   */
+  degraded?: boolean;
+  /** How many of the planned queries never returned usable results, after retries. */
+  queriesFailed?: number;
+  /** How many of the planned queries succeeded (possibly after a retry). */
+  queriesSucceeded?: number;
+  /** Total retry attempts spent across all query batches. */
+  retryAttempts?: number;
+}
+
+export interface RedditDiscoveryResponse {
+  candidates: RedditDiscoveryCandidate[];
+  searchPlan: RedditSearchPlanEntry[];
+  nextCursor?: string;
+  sourceMode: RedditConversation["sourceMode"];
+  diagnostics: RedditDiscoveryDiagnostics;
+}
+
+export interface RedditEnrichmentRequest {
+  candidates: RedditDiscoveryCandidate[];
+  maxComments?: number;
+}
+
+export interface RedditEnrichmentResponse {
+  conversations: EnrichedRedditConversation[];
+  sourceMode: RedditConversation["sourceMode"];
+  diagnostics: {
+    requested: number;
+    enriched: number;
+    failed: number;
+    fallbackUsed: number;
+    /** Sanitized provider/mapping reason; never contains credentials or raw Reddit content. */
+    failureReason?: string;
+  };
+}
+
+/** Legacy response retained for compatibility with older provider callers. */
 export interface RedditSearchResponse {
   conversations: RedditConversation[];
   nextCursor?: string;
@@ -137,10 +294,25 @@ export interface RedditSearchResponse {
  * Production implementations must use an approved API. The `apify-test` mode
  * is an explicitly guarded MVP test adapter and is never treated as approved.
  */
+/** Reported once per retry attempt so a caller can surface live progress. */
+export interface RedditDiscoveryRetryNotice {
+  reason: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
+export interface RedditDiscoverOptions {
+  onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>;
+}
+
 export interface RedditProvider {
   readonly name: string;
   readonly sourceMode: RedditConversation["sourceMode"];
-  search(request: RedditSearchRequest): Promise<RedditSearchResponse>;
+  discover(request: RedditSearchRequest, options?: RedditDiscoverOptions): Promise<RedditDiscoveryResponse>;
+  enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse>;
+  /** Deprecated compatibility path. The active scan never calls it. */
+  search?(request: RedditSearchRequest): Promise<RedditSearchResponse>;
 }
 
 export interface EmailMessage {

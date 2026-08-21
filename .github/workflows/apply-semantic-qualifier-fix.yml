@@ -1,0 +1,155 @@
+name: Apply semantic qualifier preservation fix
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-semantic-qualifier-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    if: github.actor == 'zaratustrastar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Preserve semantic qualifiers in Reddit search planning
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          reddit = "lib/providers/reddit.server.ts"
+
+          replace_once(
+              reddit,
+              '''const PROBLEM_TOKEN_STOP_WORDS = new Set([\n  "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",\n  "the", "their", "this", "using", "with", "without", "your", "a", "an", "to", "of",\n  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",\n]);\n\nfunction problemTokens(value: string): string[] {\n  return normalizeSearchText(value)\n    .split(" ")\n    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));\n}''',
+              '''const PROBLEM_TOKEN_STOP_WORDS = new Set([\n  "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",\n  "the", "their", "this", "using", "with", "without", "your", "a", "an", "to", "of",\n  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",\n  // Common short function words stay out, while meaningful two-character\n  // qualifiers such as TV, AI, HR, VR, AR, UI, UX, QA, BI, OS and PC survive.\n  "am", "as", "at", "by", "do", "go", "he", "if", "in", "it", "me", "my", "no",\n  "on", "so", "up", "us", "we",\n]);\n\nfunction problemTokens(value: string): string[] {\n  return normalizeSearchText(value)\n    .split(" ")\n    .filter((token) => token.length >= 2 && !PROBLEM_TOKEN_STOP_WORDS.has(token));\n}''',
+          )
+
+          replace_once(
+              reddit,
+              '''  const categoryExpression = (value: string): string => {\n    const tokens = problemTokens(value);\n    if (tokens.length === 0) return "";\n    const selected = tokens.slice(0, 2);\n    const descriptor = tokens.find((token) =>\n      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),\n    );\n    if (descriptor && !selected.includes(descriptor)) selected.push(descriptor);\n    return selected.join(" ");\n  };''',
+              '''  const categoryExpression = (value: string): string => {\n    const tokens = problemTokens(value);\n    if (tokens.length === 0) return "";\n\n    // Category qualifiers carry product-market meaning. Keep enough of the\n    // grounded phrase to distinguish, for example, Android TV parental control\n    // from generic Android parental-control apps. Bound it so Reddit searches\n    // remain concise, and preserve a product descriptor when one exists.\n    const selected = tokens.slice(0, 5);\n    const descriptor = tokens.find((token) =>\n      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),\n    );\n    if (descriptor && !selected.includes(descriptor)) {\n      if (selected.length >= 5) selected[selected.length - 1] = descriptor;\n      else selected.push(descriptor);\n    }\n    return selected.join(" ");\n  };''',
+          )
+
+          replace_once(
+              reddit,
+              '''    const seedTokens = seed\n      .split(" ")\n      .filter(\n        (token) =>\n          token.length >= 3 &&\n          !PROBLEM_TOKEN_STOP_WORDS.has(token),\n      )\n      .slice(0, 6);''',
+              '''    const seedTokens = problemTokens(seed).slice(0, 6);''',
+          )
+
+          tests = Path("tests/apify-reddit-provider.test.mjs")
+          text = tests.read_text()
+          marker = 'test("preserves semantic device and acronym qualifiers in search planning", () => {'
+          if marker not in text:
+              text += r'''
+
+test("preserves semantic device and acronym qualifiers in search planning", () => {
+  const makeRequest = (category, problems = ["need a better setup"]) => ({
+    queries: {
+      productTerms: ["ExampleCo", category],
+      brandTerms: ["ExampleCo"],
+      productCategories: [category],
+      customerProblems: problems,
+      jobsToBeDone: ["control access by schedule"],
+      workarounds: ["manual controls"],
+      triggerEvents: ["needs change this week"],
+      buyerIntent: ["recommendations"],
+      competitors: ["LegacyCo"],
+      excludedTerms: [],
+      ambiguityRisks: [],
+    },
+    limit: 25,
+  });
+
+  const tvPlan = redditModule.buildApifyRedditSearchPlan(makeRequest(
+    "Android TV parental control app",
+    ["kids watching TV too long", "TV outside allowed hours"],
+  ));
+  assert.ok(
+    tvPlan.some((entry) =>
+      entry.lane === "direct_buying_intent" &&
+      entry.query === "looking for android tv parental control app"),
+    JSON.stringify(tvPlan),
+  );
+  assert.ok(
+    tvPlan.some((entry) =>
+      entry.lane === "category_recommendation" &&
+      entry.query === "android tv parental control app recommendations"),
+    JSON.stringify(tvPlan),
+  );
+  assert.ok(
+    tvPlan.some((entry) =>
+      entry.lane === "problem_pain" &&
+      entry.query.includes("kids watching tv too long")),
+    JSON.stringify(tvPlan),
+  );
+  assert.ok(
+    tvPlan.some((entry) =>
+      entry.lane === "problem_pain" &&
+      entry.query.includes("tv outside allowed hours")),
+    JSON.stringify(tvPlan),
+  );
+  assert.ok(
+    tvPlan.every((entry) => entry.query !== "looking for android parental app"),
+    JSON.stringify(tvPlan),
+  );
+
+  for (const [category, expected] of [
+    ["AI recruiting software", "looking for ai recruiting software"],
+    ["HR analytics software", "looking for hr analytics software"],
+    ["VR training platform", "looking for vr training platform"],
+    ["PC monitoring app", "looking for pc monitoring app"],
+  ]) {
+    const plan = redditModule.buildApifyRedditSearchPlan(makeRequest(category));
+    assert.ok(
+      plan.some((entry) => entry.query === expected),
+      `${category}: ${JSON.stringify(plan)}`,
+    );
+  }
+});
+'''
+              tests.write_text(text)
+          PY
+
+          git diff --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - run: npm ci
+      - run: node --test tests/apify-reddit-provider.test.mjs
+      - run: npm run build
+      - run: npm run lint
+      - run: node --test tests/*.test.mjs
+      - run: git diff --check
+
+      - name: Commit fully verified qualifier fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          git commit -m "Preserve semantic qualifiers in Reddit search planning"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

@@ -1,0 +1,22 @@
+name: Inspect runner sudo boundary
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/inspect-runner-sudo-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 3
+    steps:
+      - name: Show authorized sudo commands only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n -l

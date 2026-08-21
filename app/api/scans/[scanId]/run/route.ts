@@ -1,7 +1,8 @@
 import { apiErrorResponse, requireWorkspace } from "@/lib/server/http";
 import { presentScan, requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
-import { runScan } from "@/lib/server/scan-workflow";
+import { getStateRepository } from "@/lib/server/repository";
+import { enqueueScanRun, runScan } from "@/lib/server/scan-workflow";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
@@ -22,6 +23,16 @@ export async function POST(request: Request, context: RouteContext) {
         status: 202,
         headers: { "Cache-Control": "no-store" },
       });
+    }
+    // In queue mode the worker owns long-running execution; running inline
+    // here would hold the HTTP request open for the whole Reddit scan.
+    const workerMode = process.env.BACKGROUND_WORKER_MODE?.trim().toLowerCase();
+    if (workerMode === "queue" && getStateRepository().kind === "postgres") {
+      const job = await enqueueScanRun(scan);
+      return Response.json(
+        { ...(await presentScan(scan)), job: { id: job.id, status: job.status } },
+        { status: 202, headers: { "Cache-Control": "no-store" } },
+      );
     }
     const completed = await runScan(scan.id);
     return Response.json(await presentScan(completed), {

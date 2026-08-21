@@ -1,18 +1,39 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ProductDashboard,
   type RedditConnectionStatus,
+  type RedditMonitoringStatus,
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
   type ApiScanResponse,
 } from "./demand-intelligence/from-scan";
+import { DiscoveryProfile } from "./DiscoveryProfile";
+import { CompetitorsSetup } from "./CompetitorsSetup";
 import styles from "./ThreadlineExperience.module.css";
 
-type View = "landing" | "scanning" | "restoring" | "report" | "error";
+// "competitors" is a dedicated, optional step (Back/Skip/Continue) between
+// the fast analysis and the review screen. "refining" is a brief wait screen
+// after it: the fast, homepage-only profile is never shown to the user --
+// this waits for the fuller background analysis so "profile" always shows
+// the complete picture. See RefiningProfile's doc comment.
+type View =
+  | "landing"
+  | "analyzing"
+  | "competitors"
+  | "refining"
+  | "profile"
+  | "scanning"
+  | "restoring"
+  | "report"
+  | "error";
 type AccessLevel = "free" | "pass" | "core";
+
+const SCAN_POLL_INTERVAL_MS = 3_000;
+const SCAN_POLL_BACKOFF_BASE_MS = 1_500;
+const SCAN_POLL_BACKOFF_MAX_MS = 10_000;
 
 const disconnectedReddit: RedditConnectionStatus = {
   configured: false,
@@ -22,8 +43,11 @@ const disconnectedReddit: RedditConnectionStatus = {
   requiresPaidAccess: true,
 };
 
-function effectiveAccessLevel(access: ApiScanResponse["access"]): AccessLevel {
-  return access.unlocked ? access.plan : "free";
+function effectiveAccessLevel(access: ApiScanResponse["access"] | undefined | null): AccessLevel {
+  // Defense in depth: every scan response is supposed to include "access",
+  // but a future endpoint that forgets it (as one already did) should
+  // degrade to the free tier instead of crashing the whole page.
+  return access?.unlocked ? access.plan : "free";
 }
 
 const progressSteps = [
@@ -74,6 +98,12 @@ function safeDomain(value: string) {
   }
 }
 
+function isTransientPollFailure(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (!(error instanceof Error)) return false;
+  return /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(error.message);
+}
+
 async function copyText(value: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -97,14 +127,14 @@ async function copyText(value: string): Promise<boolean> {
 
 function Brand() {
   return (
-    <div className={styles.brand} aria-label="Threadline home">
+    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">
       <span className={styles.brandMark} aria-hidden="true">
         <i />
         <i />
         <i />
       </span>
       <span>threadline</span>
-    </div>
+    </a>
   );
 }
 
@@ -172,7 +202,7 @@ function Landing({ onSubmit }: { onSubmit: (url: string) => void }) {
               <p className={styles.formError} id="url-error">{error}</p>
             ) : (
               <p className={styles.formNote} id="scan-note">
-                No card required · Public same-domain pages only · About 60 seconds
+                No card required · Public same-domain pages only · Usually several minutes
               </p>
             )}
           </form>
@@ -327,16 +357,100 @@ function Scanning({
   );
 }
 
+/**
+ * Waits for the background full business analysis (see scan-workflow.ts's
+ * refineDiscoveryProfile) before showing the review screen, so the user
+ * only ever sees the complete, multi-page profile -- never the thinner
+ * fast-pass preview that made the earlier /analyze call return quickly.
+ *
+ * The competitors step the user just came from already gave that
+ * background work a head start, so this is usually brief. Polling gives up
+ * after ~90s and shows whatever is ready either way: the full analysis
+ * still runs synchronously the moment the real scan starts regardless (see
+ * scan-workflow.ts's canReusePersistedAnalysis check), so this screen only
+ * ever affects how soon the user sees the better profile, never whether
+ * discovery ends up using it.
+ */
+function RefiningProfile({
+  scanId,
+  url,
+  setView,
+}: {
+  scanId: string;
+  url: string;
+  setView: (view: View) => void;
+}) {
+  const domain = useMemo(() => safeDomain(url), [url]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 36; // ~2.5s * 36 ~= 90s
+
+    const check = async () => {
+      attempts += 1;
+      try {
+        const response = await fetch(
+          `/api/scans/${encodeURIComponent(scanId)}/discovery-terms`,
+          { cache: "no-store" },
+        );
+        if (response.ok && !cancelled) {
+          const payload = (await response.json()) as { profileStage?: "fast" | "full" | null };
+          if (!cancelled && payload.profileStage === "full") {
+            clearInterval(timer);
+            setView("profile");
+            return;
+          }
+        }
+      } catch {
+        // Best-effort; a persistent failure just falls through to the
+        // MAX_ATTEMPTS timeout below.
+      }
+      if (attempts >= MAX_ATTEMPTS && !cancelled) {
+        clearInterval(timer);
+        setView("profile");
+      }
+    };
+
+    const timer = setInterval(check, 2_500);
+    void check();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [scanId, setView]);
+
+  return (
+    <main className={styles.scanScreen}>
+      <header className={styles.scanHeader}><Brand /><span>Finishing your analysis</span></header>
+      <section className={styles.scanPanel}>
+        <div className={styles.scanVisual} aria-hidden="true">
+          <div className={styles.orbit}><i /><i /><i /></div>
+          <span>↗</span>
+        </div>
+        <div className={styles.scanKicker}>Analyzing {domain}</div>
+        <h1>Putting together your business profile</h1>
+        <p>Reading a few more pages and double-checking what we found.</p>
+        <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+      </section>
+    </main>
+  );
+}
+
 export function ThreadlineExperience() {
   const [view, setView] = useState<View>("landing");
   const [url, setUrl] = useState("");
   const [scanResponse, setScanResponse] = useState<ApiScanResponse | null>(null);
   const [scanProgress, setScanProgress] = useState<ApiScanResponse["scan"]["progress"]>([]);
+  /** Set once the website is analyzed and the profile is awaiting review. */
+  const [reviewScanId, setReviewScanId] = useState("");
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("free");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const resumedScanRef = useRef<ApiScanResponse | null>(null);
   const [redditConnection, setRedditConnection] =
     useState<RedditConnectionStatus>(disconnectedReddit);
+  const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
   const dashboardData = useMemo(
     () => (scanResponse ? scanResponseToDashboard(scanResponse) : null),
     [scanResponse],
@@ -375,12 +489,20 @@ export function ThreadlineExperience() {
           const response = await fetch("/api/scans/latest", { cache: "no-store" });
           if (response.status === 401 || response.status === 404) return;
           const latest = (await response.json()) as ApiScanResponse;
-          if (!response.ok || cancelled || latest.scan.status !== "complete" || !latest.report) return;
+          if (!response.ok || cancelled || !latest.scan?.id) return;
           setUrl(latest.scan.websiteUrl);
+          resumedScanRef.current = latest;
           setScanResponse(latest);
           setScanProgress(latest.scan.progress);
           setAccessLevel(effectiveAccessLevel(latest.access));
-          setView("report");
+          if (latest.scan.status === "failed") {
+            setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");
+            setView("error");
+          } else if (latest.scan.status === "complete" && latest.report) {
+            setView("report");
+          } else {
+            setView("scanning");
+          }
         } catch {
           // The acquisition page remains usable if a prior private workspace
           // cannot be restored; no claims or access are inferred client-side.
@@ -419,7 +541,7 @@ export function ThreadlineExperience() {
           setAccessLevel(effectiveAccessLevel(latest.access));
 
           if (latest.scan.status === "failed") {
-            throw new Error(latest.scan.error ?? "Website analysis failed.");
+            throw new Error(latest.scan.error ?? "The scan stopped before completion.");
           }
           if (latest.scan.status === "complete" && latest.report) {
             setView("report");
@@ -430,7 +552,7 @@ export function ThreadlineExperience() {
             window.history.replaceState({}, "", window.location.pathname);
             return;
           }
-          if (latest.access.unlocked && latest.access.verifiedByWebhook) {
+          if (latest.access?.unlocked && latest.access.verifiedByWebhook) {
             setStatusMessage(
               latest.access.plan === "core"
                 ? "Core is active from a verified Stripe webhook."
@@ -481,7 +603,24 @@ export function ThreadlineExperience() {
         if (!cancelled) setRedditConnection(disconnectedReddit);
       }
     }
+
+    async function loadRedditMonitoring() {
+      try {
+        const response = await fetch("/api/monitoring/settings", { cache: "no-store" });
+        const payload = (await response.json()) as {
+          monitoring?: RedditMonitoringStatus;
+        };
+        if (response.ok && payload.monitoring && !cancelled) {
+          setMonitoring(payload.monitoring);
+        }
+      } catch {
+        // Monitoring is independent from Reddit OAuth. A transient settings
+        // error must not change the separately loaded connection state.
+      }
+    }
+
     void loadRedditConnection();
+    void loadRedditMonitoring();
     return () => {
       cancelled = true;
     };
@@ -489,10 +628,76 @@ export function ThreadlineExperience() {
 
   function startScan(nextUrl: string) {
     setUrl(nextUrl);
+    setMonitoring(null);
+    resumedScanRef.current = null;
     setScanResponse(null);
     setScanProgress([]);
     setErrorMessage("");
-    setView("scanning");
+    setReviewScanId("");
+    setView("analyzing");
+  }
+
+  // Phase one: create the scan without starting it, then analyze the website
+  // only. Reddit retrieval waits until the user has reviewed the profile.
+  useEffect(() => {
+    if (view !== "analyzing") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const createdResponse = await fetch("/api/scans", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ websiteUrl: url, reviewFirst: true }),
+        });
+        const created = (await createdResponse.json()) as ApiScanResponse;
+        if (!createdResponse.ok || !created.scan?.id) {
+          throw new Error(created.error?.message ?? "We could not safely read that website.");
+        }
+        if (cancelled) return;
+        setScanResponse(created);
+        setScanProgress(created.scan.progress);
+        setAccessLevel(effectiveAccessLevel(created.access));
+
+        const analyzedResponse = await fetch(
+          `/api/scans/${encodeURIComponent(created.scan.id)}/analyze`,
+          { method: "POST" },
+        );
+        const analyzed = (await analyzedResponse.json()) as ApiScanResponse;
+        if (!analyzedResponse.ok) {
+          throw new Error(analyzed.error?.message ?? "We could not analyze that website.");
+        }
+        if (cancelled) return;
+        setScanProgress(analyzed.scan.progress);
+        setReviewScanId(created.scan.id);
+        setView("competitors");
+      } catch (analysisError) {
+        if (cancelled) return;
+        setErrorMessage(
+          analysisError instanceof Error ? analysisError.message : "Website analysis failed.",
+        );
+        setView("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [view, url]);
+
+  // Phase two: the user approved the profile, so start Reddit retrieval.
+  async function beginRedditScan() {
+    try {
+      const response = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}/run`, {
+        method: "POST",
+      });
+      if (!response.ok && response.status !== 202) {
+        const failure = (await response.json()) as ApiScanResponse;
+        throw new Error(failure.error?.message ?? "The scan could not be started.");
+      }
+      setView("scanning");
+    } catch (startError) {
+      setErrorMessage(startError instanceof Error ? startError.message : "The scan could not be started.");
+      setView("error");
+    }
   }
 
   useEffect(() => {
@@ -502,14 +707,26 @@ export function ThreadlineExperience() {
 
     async function begin() {
       try {
-        const createdResponse = await fetch("/api/scans", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ websiteUrl: url, defer: true }),
-        });
-        const created = (await createdResponse.json()) as ApiScanResponse;
-        if (!createdResponse.ok || !created.scan?.id) {
-          throw new Error(created.error?.message ?? "We could not safely read that website.");
+        let created = resumedScanRef.current;
+        resumedScanRef.current = null;
+        if (!created && reviewScanId) {
+          // Already created and started by the review step; just poll it.
+          const existing = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}`, {
+            cache: "no-store",
+          });
+          const payload = (await existing.json()) as ApiScanResponse;
+          if (existing.ok && payload.scan?.id) created = payload;
+        }
+        if (!created || created.scan.websiteUrl !== url || created.scan.status === "failed") {
+          const createdResponse = await fetch("/api/scans", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ websiteUrl: url, defer: true }),
+          });
+          created = (await createdResponse.json()) as ApiScanResponse;
+          if (!createdResponse.ok || !created.scan?.id) {
+            throw new Error(created.error?.message ?? "We could not safely read that website.");
+          }
         }
         if (cancelled) return;
         setScanResponse(created);
@@ -520,28 +737,71 @@ export function ThreadlineExperience() {
           return;
         }
 
+        let transientPollFailures = 0;
         while (!cancelled) {
-          const response = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });
-          const latest = (await response.json()) as ApiScanResponse;
-          if (!response.ok) throw new Error(latest.error?.message ?? "The scan could not be updated.");
-          setScanResponse(latest);
-          setScanProgress(latest.scan.progress);
-          if (latest.scan.status === "complete" && latest.report) {
-            setAccessLevel(effectiveAccessLevel(latest.access));
-            setView("report");
-            return;
+          try {
+            const response = await fetch(
+              `/api/scans/${created.scan.id}?statusOnly=1`,
+              { cache: "no-store" },
+            );
+            if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
+              throw new TypeError(`Transient scan polling response (${response.status}).`);
+            }
+            const latest = (await response.json()) as ApiScanResponse;
+            if (!response.ok) {
+              throw new Error(latest.error?.message ?? "The scan could not be updated.");
+            }
+            setScanProgress(latest.scan.progress);
+
+            if (latest.scan.status === "complete") {
+              const reportResponse = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });
+              if (
+                reportResponse.status === 408 ||
+                reportResponse.status === 425 ||
+                reportResponse.status === 429 ||
+                reportResponse.status >= 500
+              ) {
+                throw new TypeError(`Transient scan report response (${reportResponse.status}).`);
+              }
+              const completed = (await reportResponse.json()) as ApiScanResponse;
+              if (!reportResponse.ok || !completed.report) {
+                throw new Error(completed.error?.message ?? "The completed scan report could not be loaded.");
+              }
+              setScanResponse(completed);
+              setScanProgress(completed.scan.progress);
+              setAccessLevel(effectiveAccessLevel(completed.access));
+              setView("report");
+              return;
+            }
+            if (latest.scan.status === "failed") {
+              throw new Error(latest.scan.error ?? "The scan stopped before completion.");
+            }
+            // "retrying" is not an error: a background job attempt failed but
+            // another is already scheduled. Keep polling -- the active
+            // stage's own `detail` text (already updated server-side) shows
+            // the retry message, so no separate error state is needed here.
+            transientPollFailures = 0;
+          } catch (pollError) {
+            if (!isTransientPollFailure(pollError)) throw pollError;
+            transientPollFailures += 1;
+            const retryDelay = Math.min(
+              SCAN_POLL_BACKOFF_MAX_MS,
+              SCAN_POLL_BACKOFF_BASE_MS * 2 ** Math.min(transientPollFailures - 1, 3),
+            );
+            await new Promise<void>((resolve) => {
+              pollTimer = window.setTimeout(resolve, retryDelay);
+            });
+            continue;
           }
-          if (latest.scan.status === "failed") {
-            throw new Error(latest.scan.error ?? "Website analysis failed.");
-          }
+
           await new Promise<void>((resolve) => {
-            pollTimer = window.setTimeout(resolve, 700);
+            pollTimer = window.setTimeout(resolve, SCAN_POLL_INTERVAL_MS);
           });
         }
       } catch (error) {
         if (cancelled) return;
         window.clearTimeout(pollTimer);
-        setErrorMessage(error instanceof Error ? error.message : "Website analysis failed.");
+        setErrorMessage(error instanceof Error ? error.message : "The scan stopped before completion.");
         setView("error");
       }
     }
@@ -551,7 +811,7 @@ export function ThreadlineExperience() {
       cancelled = true;
       window.clearTimeout(pollTimer);
     };
-  }, [view, url]);
+  }, [view, url, reviewScanId]);
 
   async function refreshScan(scanId: string) {
     const response = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });
@@ -666,6 +926,34 @@ export function ThreadlineExperience() {
       setStatusMessage("Reddit disconnected. Stored Reddit tokens were removed.");
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Reddit could not be disconnected.");
+    }
+  }
+
+  async function updateMonitoring(
+    enabled: boolean,
+    watchTerms: RedditMonitoringStatus["watchTerms"],
+  ): Promise<boolean> {
+    try {
+      const response = await fetch("/api/monitoring/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled, watchTerms }),
+      });
+      const payload = (await response.json()) as {
+        monitoring?: RedditMonitoringStatus;
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.monitoring) {
+        throw new Error(payload.error?.message ?? "Daily Reddit monitoring could not be updated.");
+      }
+      setMonitoring(payload.monitoring);
+      setStatusMessage(enabled
+        ? "Daily Reddit monitoring is on. All active terms will be checked together."
+        : "Daily Reddit monitoring is off.");
+      return true;
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Daily Reddit monitoring could not be updated.");
+      return false;
     }
   }
 
@@ -788,6 +1076,32 @@ export function ThreadlineExperience() {
   }
 
   if (view === "landing") return <Landing onSubmit={startScan} />;
+  if (view === "analyzing") {
+    return <Scanning url={url} progress={scanProgress} />;
+  }
+  if (view === "competitors") {
+    return (
+      <CompetitorsSetup
+        scanId={reviewScanId}
+        websiteUrl={url}
+        onContinue={() => setView("refining")}
+        onBack={() => setView("landing")}
+      />
+    );
+  }
+  if (view === "refining") {
+    return <RefiningProfile scanId={reviewScanId} url={url} setView={setView} />;
+  }
+  if (view === "profile") {
+    return (
+      <DiscoveryProfile
+        scanId={reviewScanId}
+        websiteUrl={url}
+        onStartScan={beginRedditScan}
+        onBack={() => setView("landing")}
+      />
+    );
+  }
   if (view === "scanning" || view === "restoring") {
     return <Scanning url={url} progress={scanProgress} />;
   }
@@ -798,10 +1112,10 @@ export function ThreadlineExperience() {
         <section className={`${styles.scanPanel} ${styles.errorPanel}`}>
           <div className={styles.errorMark}>!</div>
           <div className={styles.scanKicker}>Safe analysis stopped</div>
-          <h1>We couldn’t analyze that website</h1>
+          <h1>The scan stopped before every check finished</h1>
           <p>{errorMessage}</p>
-          <button className={styles.tryAgain} type="button" onClick={() => setView("landing")}>Try another website</button>
-          <div className={styles.domainSafety}>No Reddit results or business claims were created for this failed scan.</div>
+          <button className={styles.tryAgain} type="button" onClick={() => setView("landing")}>Run another scan</button>
+          <div className={styles.domainSafety}>Completed stages remain recorded. Unverified findings are never promoted as definitive leads.</div>
         </section>
       </main>
     );
@@ -826,6 +1140,8 @@ export function ThreadlineExperience() {
         redditConnection={redditConnection}
         onConnectReddit={connectReddit}
         onDisconnectReddit={disconnectReddit}
+        monitoring={monitoring}
+        onUpdateMonitoring={updateMonitoring}
         onFunnelEvent={recordFunnelEvent}
       />
     </div>

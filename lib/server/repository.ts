@@ -59,6 +59,7 @@ export interface StateRepository {
   saveScan(record: ScanRecord): Promise<void>;
   getScan(scanId: string): Promise<ScanRecord | null>;
   getLatestScan(workspaceId: string): Promise<ScanRecord | null>;
+  getLatestWorkspaceScan(workspaceId: string): Promise<ScanRecord | null>;
   beginScanRun(scanId: string): Promise<{
     state: "claimed" | "complete" | "running" | "missing";
     scan: ScanRecord | null;
@@ -187,6 +188,12 @@ class MemoryStateRepository implements StateRepository {
   async getLatestScan(workspaceId: string) {
     return [...getStore().scans.values()]
       .filter((scan) => scan.workspaceId === workspaceId && scan.status === "complete")
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;
+  }
+
+  async getLatestWorkspaceScan(workspaceId: string) {
+    return [...getStore().scans.values()]
+      .filter((scan) => scan.workspaceId === workspaceId)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;
   }
 
@@ -517,6 +524,16 @@ class PostgresStateRepository implements StateRepository {
       .select({ record: runtimeScans.record })
       .from(runtimeScans)
       .where(and(eq(runtimeScans.workspaceId, workspaceId), eq(runtimeScans.status, "complete")))
+      .orderBy(desc(runtimeScans.createdAt))
+      .limit(1);
+    return row?.record ?? null;
+  }
+
+  async getLatestWorkspaceScan(workspaceId: string) {
+    const [row] = await getDb()
+      .select({ record: runtimeScans.record })
+      .from(runtimeScans)
+      .where(eq(runtimeScans.workspaceId, workspaceId))
       .orderBy(desc(runtimeScans.createdAt))
       .limit(1);
     return row?.record ?? null;

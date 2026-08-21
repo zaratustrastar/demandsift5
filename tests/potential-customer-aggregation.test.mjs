@@ -93,14 +93,14 @@ test("intent buckets are mutually exclusive and add up to the headline count", (
   );
 });
 
-test("excludes mock, stale, unsafe, low-confidence, anonymous and deleted records", () => {
+test("excludes mock, stale, unsafe, non-customer, anonymous and deleted records", () => {
   const result = aggregation.aggregatePotentialCustomers({
     opportunities: [
       opportunity("valid", "realperson", "problem_aware"),
       opportunity("mock", "mockperson", "high_intent", { synthetic: true, sourceMode: "mock" }),
       opportunity("stale", "staleuser", "high_intent", { sourceCreatedAt: "2026-07-01T12:00:00.000Z" }),
       opportunity("risk", "riskyuser", "high_intent", { communityRisk: "high" }),
-      opportunity("weak", "weakuser", "high_intent", { qualificationScore: 59 }),
+      opportunity("uncertain", "uncertainuser", "high_intent", { leadStatus: "uncertain" }),
       opportunity("missing", "[deleted]", "high_intent"),
       opportunity("deleted", "formeruser", "high_intent", { excerpt: "[removed]" }),
     ],

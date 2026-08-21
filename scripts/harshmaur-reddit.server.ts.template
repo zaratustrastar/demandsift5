@@ -1,0 +1,813 @@
+import { contentFingerprint, normalizeSearchText } from "@/lib/intelligence/opportunity-ranking";
+import type {
+  ProviderRejectionReason,
+  RedditDiscoveryDiagnostics,
+  RedditDiscoveryResponse,
+  RedditEnrichmentRequest,
+  RedditEnrichmentResponse,
+  RedditProvider,
+  RedditSearchPlanEntry,
+  RedditSearchRequest,
+  RedditSearchResponse,
+} from "@/lib/providers/contracts";
+import type {
+  EnrichedRedditConversation,
+  RedditContextMessage,
+  RedditConversation,
+  RedditDiscoveryCandidate,
+  RedditSearchLane,
+  RedditStructuredContext,
+} from "@/lib/domain/types";
+
+type SearchTime = "day" | "week" | "month" | "year" | "all";
+
+type HarshmaurItem = {
+  dataType?: unknown;
+  id?: unknown;
+  parsedId?: unknown;
+  title?: unknown;
+  body?: unknown;
+  authorName?: unknown;
+  communityName?: unknown;
+  parsedCommunityName?: unknown;
+  subredditName?: unknown;
+  postUrl?: unknown;
+  url?: unknown;
+  createdAt?: unknown;
+  commentCreatedAt?: unknown;
+  crawledAt?: unknown;
+  searchTerm?: unknown;
+  postId?: unknown;
+  parsedPostId?: unknown;
+  parentId?: unknown;
+  parsedParentId?: unknown;
+  postTitle?: unknown;
+  upVotes?: unknown;
+  commentUpVotes?: unknown;
+  score?: unknown;
+  commentsCount?: unknown;
+  postCommentsCount?: unknown;
+  over18?: unknown;
+  removedByCategory?: unknown;
+  isRobotIndexable?: unknown;
+};
+
+type DiscoveryInput = {
+  aiAnalysis: false;
+  crawlCommentsPerPost: false;
+  includeNSFW: false;
+  searchTerms: string[];
+  searchPosts: true;
+  searchComments: true;
+  searchCommunities: false;
+  searchSort: "new";
+  searchTime: SearchTime;
+  maxPostsCount: number;
+  maxCommentsCount: number;
+  maxCommentsPerPost: 0;
+  proxy: {
+    useApifyProxy: true;
+    apifyProxyGroups: ["RESIDENTIAL"];
+  };
+  withinCommunity?: string;
+};
+
+type EnrichmentInput = {
+  aiAnalysis: false;
+  crawlCommentsPerPost: true;
+  includeNSFW: false;
+  startUrls: Array<{ url: string }>;
+  maxPostsCount: number;
+  maxCommentsCount: number;
+  maxCommentsPerPost: number;
+  proxy: {
+    useApifyProxy: true;
+    apifyProxyGroups: ["RESIDENTIAL"];
+  };
+};
+
+type ActorInput = DiscoveryInput | EnrichmentInput;
+
+function text(value: unknown, max = 12_000): string {
+  return typeof value === "string"
+    ? value.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, max)
+    : "";
+}
+
+function integer(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+}
+
+function normalizeActorId(value: string): string {
+  const normalized = value.trim().replace("/", "~");
+  if (!/^(?:[A-Za-z0-9_-]{5,80}|[A-Za-z0-9_-]{1,80}~[A-Za-z0-9_-]{1,100})$/.test(normalized)) {
+    throw new Error("Harshmaur Reddit actor ID is invalid.");
+  }
+  return normalized;
+}
+
+function redditUrl(value: unknown): string | undefined {
+  const raw = text(value, 2_000);
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    if (
+      url.protocol !== "https:" ||
+      (host !== "reddit.com" && !host.endsWith(".reddit.com") && host !== "redd.it")
+    ) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function automatedAuthor(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "automoderator" ||
+    normalized === "[deleted]" ||
+    normalized === "reddit" ||
+    /(?:^|[-_])(bot|moderator)(?:$|[-_])/i.test(normalized) ||
+    normalized.endsWith("bot")
+  );
+}
+
+function rejectionCounts(): Record<ProviderRejectionReason, number> {
+  return {
+    invalid_record: 0,
+    invalid_url: 0,
+    query_mismatch: 0,
+    bot_author: 0,
+    deleted: 0,
+    nsfw: 0,
+    missing_timestamp: 0,
+    outside_window: 0,
+  };
+}
+
+function cleanPhrase(value: string, maximumWords = 6): string {
+  const normalized = normalizeSearchText(value)
+    .replace(/\b(?:looking for|need help with|need help|recommendations? for)\b/g, " ")
+    .replace(/\b(?:app|apps|software|platform|solution)\b$/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.split(" ").filter(Boolean).slice(0, maximumWords).join(" ");
+}
+
+function tvParentalExpansions(values: readonly string[]): string[] {
+  const corpus = normalizeSearchText(values.join(" "));
+  if (!/\btv\b/.test(corpus) || !/\bparental controls?\b/.test(corpus)) return [];
+  return [
+    "tv parental control",
+    "tv control for children",
+    "kids tv control",
+    "screen time tv",
+    "limit kids tv",
+  ];
+}
+
+function laneForSource(source: "category" | "problem" | "job" | "workaround" | "competitor" | "brand"): RedditSearchLane {
+  if (source === "problem") return "problem_pain";
+  if (source === "workaround") return "workaround";
+  if (source === "competitor") return "competitor_switching";
+  if (source === "brand") return "brand_competitor_mentions";
+  return "direct_buying_intent";
+}
+
+/**
+ * Retrieval terms are intentionally short, natural phrases. Search is a recall
+ * layer; buying intent and lead quality are decided downstream by AI.
+ */
+export function buildHarshmaurRedditSearchPlan(request: RedditSearchRequest): RedditSearchPlanEntry[] {
+  const sources: Array<{
+    source: "category" | "problem" | "job" | "workaround" | "competitor" | "brand";
+    value: string;
+  }> = [
+    ...(request.queries.productCategories ?? []).map((value) => ({ source: "category" as const, value })),
+    ...request.queries.productTerms.map((value) => ({ source: "category" as const, value })),
+    ...request.queries.customerProblems.map((value) => ({ source: "problem" as const, value })),
+    ...(request.queries.jobsToBeDone ?? []).map((value) => ({ source: "job" as const, value })),
+    ...(request.queries.workarounds ?? []).map((value) => ({ source: "workaround" as const, value })),
+    ...request.queries.competitors.map((value) => ({ source: "competitor" as const, value })),
+    ...(request.queries.brandTerms ?? []).map((value) => ({ source: "brand" as const, value })),
+  ];
+
+  const entries: RedditSearchPlanEntry[] = [];
+  const seen = new Set<string>();
+  const add = (query: string, lane: RedditSearchLane, seed?: string) => {
+    const cleaned = cleanPhrase(query);
+    const key = normalizeSearchText(cleaned);
+    if (cleaned.split(" ").length < 2 || !key || seen.has(key)) return;
+    seen.add(key);
+    entries.push({ lane, query: cleaned, ...(seed ? { seed } : {}) });
+  };
+
+  const profileValues = sources.map((row) => row.value);
+  for (const query of tvParentalExpansions(profileValues)) add(query, "problem_pain", query);
+
+  // Give categories and real customer problem wording first claim on the budget.
+  for (const row of sources.filter((row) => row.source === "category" || row.source === "problem")) {
+    add(row.value, laneForSource(row.source), row.value);
+  }
+  for (const row of sources.filter((row) => row.source !== "category" && row.source !== "problem")) {
+    add(row.value, laneForSource(row.source), row.value);
+  }
+
+  // Keep the acquisition plan bounded. Eight to twelve natural terms normally
+  // provide more coverage than many intent-shaped variants of the same phrase.
+  return entries.slice(0, 12);
+}
+
+function searchTimeForSince(configured: SearchTime, since?: string): SearchTime {
+  const parsed = since ? Date.parse(since) : Number.NaN;
+  if (!Number.isFinite(parsed)) return configured;
+  const ageDays = Math.max(0, (Date.now() - parsed) / 86_400_000);
+  if (ageDays <= 1.25) return "day";
+  if (ageDays <= 8) return "week";
+  if (ageDays <= 32) return "month";
+  if (ageDays <= 370) return "year";
+  return "all";
+}
+
+function postIdFromPermalink(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.hostname === "redd.it") return url.pathname.split("/").filter(Boolean)[0]?.replace(/^t3_/i, "");
+    const parts = url.pathname.split("/").filter(Boolean);
+    const index = parts.findIndex((part) => part.toLowerCase() === "comments");
+    return index >= 0 ? parts[index + 1]?.replace(/^t3_/i, "").toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function threadPermalink(value: string | undefined): string | undefined {
+  const valid = redditUrl(value);
+  if (!valid) return undefined;
+  try {
+    const url = new URL(valid);
+    if (url.hostname === "redd.it") return url.toString();
+    const parts = url.pathname.split("/").filter(Boolean);
+    const index = parts.findIndex((part) => part.toLowerCase() === "comments");
+    if (index < 0 || !parts[index + 1]) return undefined;
+    const end = parts[index + 2] ? index + 3 : index + 2;
+    url.pathname = `/${parts.slice(0, end).join("/")}/`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function itemPostId(item: HarshmaurItem): string {
+  const type = text(item.dataType, 20).toLowerCase();
+  if (type === "post") {
+    return (text(item.parsedId, 120) || text(item.id, 120).replace(/^t3_/i, "")).toLowerCase();
+  }
+  return (text(item.parsedPostId, 120) || text(item.postId, 120).replace(/^t3_/i, "")).toLowerCase();
+}
+
+function contextMessageFromItem(item: HarshmaurItem): RedditContextMessage | undefined {
+  const kind = text(item.dataType, 20).toLowerCase();
+  if (kind !== "post" && kind !== "comment") return undefined;
+  const externalId =
+    kind === "post"
+      ? text(item.parsedId, 120) || text(item.id, 120).replace(/^t3_/i, "")
+      : text(item.id, 120).replace(/^t1_/i, "");
+  const body = text(item.body) || (kind === "post" ? text(item.title, 500) : "");
+  if (!externalId || !body) return undefined;
+  const createdAt = kind === "post" ? text(item.createdAt, 80) : text(item.commentCreatedAt, 80);
+  return {
+    externalId,
+    kind,
+    author: text(item.authorName, 100) || undefined,
+    body,
+    parentExternalId:
+      kind === "comment"
+        ? text(item.parentId, 120) || text(item.postId, 120) || undefined
+        : undefined,
+    createdAt: Number.isFinite(Date.parse(createdAt)) ? new Date(createdAt).toISOString() : undefined,
+  };
+}
+
+function candidateFromItem(
+  value: unknown,
+  plan: readonly RedditSearchPlanEntry[],
+): { candidate?: RedditDiscoveryCandidate; reason?: ProviderRejectionReason } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { reason: "invalid_record" };
+  const item = value as HarshmaurItem;
+  const kind = text(item.dataType, 20).toLowerCase();
+  if (kind !== "post" && kind !== "comment") return { reason: "invalid_record" };
+  if (kind === "post" && item.over18 === true) return { reason: "nsfw" };
+
+  const body = text(item.body) || (kind === "post" ? text(item.title, 500) : "");
+  if (!body || /^\[(?:deleted|removed)\]$/i.test(body)) return { reason: "deleted" };
+  if (kind === "post" && text(item.removedByCategory, 80)) return { reason: "deleted" };
+
+  const permalink = redditUrl(kind === "post" ? item.postUrl : item.url);
+  if (!permalink) return { reason: "invalid_url" };
+
+  const author = text(item.authorName, 100);
+  if (author && automatedAuthor(author)) return { reason: "bot_author" };
+
+  const rawCreated = kind === "post" ? text(item.createdAt, 80) : text(item.commentCreatedAt, 80);
+  const created = Date.parse(rawCreated);
+  if (!Number.isFinite(created)) return { reason: "missing_timestamp" };
+
+  const subreddit = (
+    kind === "post"
+      ? text(item.parsedCommunityName, 80) || text(item.communityName, 80).replace(/^r\//i, "")
+      : text(item.subredditName, 80)
+  ).replace(/^r\//i, "");
+  if (!/^[A-Za-z0-9_]{1,32}$/.test(subreddit)) return { reason: "invalid_record" };
+
+  const rawId =
+    kind === "post"
+      ? text(item.parsedId, 120) || text(item.id, 120).replace(/^t3_/i, "")
+      : text(item.id, 120).replace(/^t1_/i, "");
+  const externalId = rawId || `derived_${contentFingerprint(`${permalink}\n${body}`)}`;
+
+  const searchTerm = text(item.searchTerm, 200);
+  const exactPlan = searchTerm
+    ? plan.find((entry) => normalizeSearchText(entry.query) === normalizeSearchText(searchTerm))
+    : undefined;
+  const matchedQueries = exactPlan ? [exactPlan.query] : searchTerm ? [searchTerm] : [];
+  const discoveryLanes = exactPlan ? [exactPlan.lane] : [];
+
+  const provider = "apify:harshmaur/reddit-scraper";
+  const observedAt = new Date().toISOString();
+  return {
+    candidate: {
+      provider,
+      sourceMode: "apify-test",
+      externalId,
+      kind,
+      parentExternalId:
+        kind === "comment"
+          ? text(item.parentId, 120) || text(item.postId, 120) || undefined
+          : undefined,
+      subreddit,
+      title: kind === "post" ? text(item.title, 500) || undefined : text(item.postTitle, 500) || undefined,
+      body,
+      author: author || undefined,
+      permalink,
+      createdAt: new Date(created).toISOString(),
+      metrics: {
+        score: integer(item.score ?? item.upVotes ?? item.commentUpVotes),
+        comments: kind === "post" ? integer(item.commentsCount) : integer(item.postCommentsCount),
+      },
+      matchedQuery: matchedQueries[0],
+      matchedQueries,
+      discoveryLanes,
+      provenance: {
+        id: `reddit_harshmaur_${contentFingerprint(`${kind}:${externalId}`)}`,
+        kind: "reddit",
+        provider,
+        providerExternalId: externalId,
+        url: permalink,
+        title: kind === "post" ? text(item.title, 500) || undefined : text(item.postTitle, 500) || undefined,
+        excerpt: body.slice(0, 280),
+        contentHash: contentFingerprint(`${kind}\n${externalId}\n${body}`),
+        observedAt,
+        isMock: false,
+        metadata: {
+          acquisitionMethod: "web-scraping",
+          actor: "harshmaur/reddit-scraper",
+          ...(searchTerm ? { searchTerm } : {}),
+        },
+      },
+    },
+  };
+}
+
+function matchedOnly(candidate: RedditDiscoveryCandidate, provider: string): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    ...candidate,
+    provider,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+    provenance: {
+      ...candidate.provenance,
+      provider,
+      observedAt: new Date().toISOString(),
+      metadata: {
+        ...(candidate.provenance.metadata ?? {}),
+        enriched: false,
+        enrichmentFallback: "verified_discovery_record",
+      },
+    },
+  };
+}
+
+function buildContext(
+  candidate: RedditDiscoveryCandidate,
+  payload: readonly unknown[],
+  provider: string,
+): EnrichedRedditConversation | undefined {
+  const postId = postIdFromPermalink(candidate.permalink);
+  if (!postId) return undefined;
+  const items = payload
+    .filter((value): value is HarshmaurItem => Boolean(value && typeof value === "object" && !Array.isArray(value)))
+    .filter((item) => itemPostId(item) === postId);
+  if (items.length === 0) return undefined;
+
+  const messages = items.flatMap((item) => {
+    const message = contextMessageFromItem(item);
+    return message ? [{ item, message }] : [];
+  });
+  const originalPost = messages.find((row) => row.message.kind === "post")?.message;
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+
+  const byId = new Map(messages.map((row) => [row.message.externalId.replace(/^t[13]_/i, ""), row.message]));
+  const parentChain: RedditContextMessage[] = [];
+  let parentId = candidate.parentExternalId?.replace(/^t[13]_/i, "");
+  while (parentId && parentChain.length < 5) {
+    const parent = byId.get(parentId);
+    if (!parent || parent.kind !== "comment") break;
+    parentChain.unshift(parent);
+    parentId = parent.parentExternalId?.replace(/^t[13]_/i, "");
+  }
+
+  const candidateId = candidate.externalId.replace(/^t[13]_/i, "");
+  const replies = messages
+    .map((row) => row.message)
+    .filter(
+      (message) =>
+        message.kind === "comment" &&
+        message.externalId.replace(/^t[13]_/i, "") !== candidateId &&
+        message.parentExternalId?.replace(/^t[13]_/i, "") === candidateId,
+    )
+    .slice(0, 6);
+
+  const used = new Set([
+    candidateId,
+    ...parentChain.map((row) => row.externalId.replace(/^t[13]_/i, "")),
+    ...replies.map((row) => row.externalId.replace(/^t[13]_/i, "")),
+    ...(originalPost ? [originalPost.externalId.replace(/^t[13]_/i, "")] : []),
+  ]);
+  const surroundingComments = messages
+    .map((row) => row.message)
+    .filter(
+      (message) =>
+        message.kind === "comment" &&
+        !used.has(message.externalId.replace(/^t[13]_/i, "")),
+    )
+    .slice(0, 6);
+
+  const context: RedditStructuredContext = {
+    originalPost,
+    matched,
+    parentChain,
+    replies,
+    surroundingComments,
+  };
+  const sections: string[] = [];
+  if (originalPost && originalPost.externalId !== candidate.externalId) sections.push(`Original post: ${originalPost.body}`);
+  if (parentChain.length) sections.push(`Parent chain:\n${parentChain.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  if (replies.length) sections.push(`Replies:\n${replies.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  if (surroundingComments.length) sections.push(`Other comments:\n${surroundingComments.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+
+  return {
+    ...candidate,
+    provider,
+    structuredContext: context,
+    threadContext: sections.join("\n\n").slice(0, 8_000) || undefined,
+    provenance: {
+      ...candidate.provenance,
+      provider,
+      observedAt: new Date().toISOString(),
+      contentHash: contentFingerprint(`${candidate.title ?? ""}\n${candidate.body}\n${JSON.stringify(context)}`),
+      metadata: {
+        ...(candidate.provenance.metadata ?? {}),
+        enriched: true,
+        actor: "harshmaur/reddit-scraper",
+      },
+    },
+  };
+}
+
+export class HarshmaurRedditProvider implements RedditProvider {
+  readonly name = "apify-harshmaur-reddit";
+  readonly sourceMode = "apify-test" as const;
+  private readonly actorId: string;
+  private readonly token: string;
+  private readonly maximumItems: number;
+  private readonly enrichmentLimit: number;
+  private readonly enrichmentComments: number;
+  private readonly timeoutMs: number;
+  private readonly timeRange: SearchTime;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(input: {
+    token: string;
+    actorId?: string;
+    maximumItems?: number;
+    enrichmentLimit?: number;
+    enrichmentComments?: number;
+    timeoutMs?: number;
+    timeRange?: SearchTime;
+    fetchImpl?: typeof fetch;
+  }) {
+    this.actorId = normalizeActorId(input.actorId ?? "harshmaur/reddit-scraper");
+    this.token = input.token.trim();
+    if (!this.token) throw new Error("APIFY_TOKEN is required for the Harshmaur Reddit provider.");
+    this.maximumItems = Math.max(25, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
+    this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
+    this.enrichmentComments = Math.max(1, Math.min(100, Math.trunc(input.enrichmentComments ?? 12)));
+    this.timeoutMs = Math.max(20_000, Math.min(600_000, Math.trunc(input.timeoutMs ?? 360_000)));
+    this.timeRange = input.timeRange ?? "week";
+    this.fetchImpl = input.fetchImpl ?? fetch;
+  }
+
+  private async readJson(response: Response, maximumBytes: number): Promise<unknown> {
+    const raw = await response.text();
+    if (new TextEncoder().encode(raw).byteLength > maximumBytes) {
+      throw new Error("The Harshmaur Reddit response exceeded the size limit.");
+    }
+    if (!response.ok) throw new Error(`Harshmaur Reddit request failed with HTTP ${response.status}.`);
+    try {
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error("The Harshmaur Reddit provider returned invalid JSON.");
+    }
+  }
+
+  private async safeGet(endpoint: URL, signal: AbortSignal): Promise<Response> {
+    const retryable = new Set([408, 425, 429, 500, 502, 503, 504]);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await this.fetchImpl(endpoint, {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${this.token}`,
+          },
+          signal,
+        });
+        if (response.ok || !retryable.has(response.status) || attempt === 2) return response;
+        await response.text().catch(() => "");
+      } catch (error) {
+        lastError = error;
+        if (signal.aborted || attempt === 2) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
+    }
+    throw lastError ?? new Error("Harshmaur Reddit GET request failed.");
+  }
+
+  private async runActor(actorInput: ActorInput, datasetLimit: number): Promise<unknown[]> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const headers = {
+      accept: "application/json",
+      authorization: `Bearer ${this.token}`,
+      "content-type": "application/json",
+    };
+    const runData = (payload: unknown): Record<string, unknown> => {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid Apify run metadata.");
+      const data = (payload as { data?: unknown }).data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid Apify run metadata.");
+      return data as Record<string, unknown>;
+    };
+
+    try {
+      const start = new URL(`/v2/actors/${encodeURIComponent(this.actorId)}/runs`, "https://api.apify.com");
+      start.searchParams.set("waitForFinish", "0");
+      start.searchParams.set("timeout", String(Math.max(20, Math.floor((this.timeoutMs - 30_000) / 1_000))));
+      start.searchParams.set("maxTotalChargeUsd", "0.75");
+      const response = await this.fetchImpl(start, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(actorInput),
+        signal: controller.signal,
+      });
+      let data = runData(await this.readJson(response, 1_000_000));
+      const runId = text(data.id, 120);
+      let status = text(data.status, 40).toUpperCase();
+      let datasetId = text(data.defaultDatasetId, 120);
+      if (!runId || !status) throw new Error("Harshmaur Reddit run metadata was incomplete.");
+
+      const terminal = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
+      while (!terminal.has(status)) {
+        const endpoint = new URL(`/v2/actor-runs/${encodeURIComponent(runId)}`, "https://api.apify.com");
+        endpoint.searchParams.set("waitForFinish", "60");
+        data = runData(await this.readJson(await this.safeGet(endpoint, controller.signal), 1_000_000));
+        status = text(data.status, 40).toUpperCase();
+        datasetId = text(data.defaultDatasetId, 120) || datasetId;
+      }
+      const usablePartial = status === "TIMED-OUT" && Boolean(datasetId);
+      if (status !== "SUCCEEDED" && !usablePartial) {
+        throw new Error(`Harshmaur Reddit actor ended with status ${status}.`);
+      }
+      if (!datasetId) throw new Error("Harshmaur Reddit actor completed without a dataset.");
+
+      const items: unknown[] = [];
+      for (let offset = 0; offset < datasetLimit; offset += 100) {
+        const endpoint = new URL(`/v2/datasets/${encodeURIComponent(datasetId)}/items`, "https://api.apify.com");
+        endpoint.searchParams.set("clean", "true");
+        endpoint.searchParams.set("format", "json");
+        endpoint.searchParams.set("offset", String(offset));
+        endpoint.searchParams.set("limit", String(Math.min(100, datasetLimit - offset)));
+        const page = await this.readJson(await this.safeGet(endpoint, controller.signal), 8_000_000);
+        if (!Array.isArray(page)) throw new Error("Harshmaur Reddit dataset was not an array.");
+        items.push(...page);
+        if (page.length < Math.min(100, datasetLimit - offset)) break;
+      }
+      return items.slice(0, datasetLimit);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`Harshmaur Reddit run timed out after ${Math.ceil(this.timeoutMs / 1_000)} seconds.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    const searchPlan = buildHarshmaurRedditSearchPlan(request);
+    if (searchPlan.length === 0) throw new Error("The company context did not produce usable Reddit discovery terms.");
+
+    const target = Math.min(this.maximumItems, Math.max(25, Math.trunc(request.limit)));
+    const perTypePerTerm = Math.max(3, Math.ceil(target / Math.max(1, searchPlan.length * 2)));
+    const withinCommunity =
+      request.subreddits?.length === 1 && /^[A-Za-z0-9_]{1,32}$/.test(request.subreddits[0]?.replace(/^r\//i, "") ?? "")
+        ? `r/${request.subreddits[0]!.replace(/^r\//i, "")}`
+        : undefined;
+
+    const actorInput: DiscoveryInput = {
+      aiAnalysis: false,
+      crawlCommentsPerPost: false,
+      includeNSFW: false,
+      searchTerms: searchPlan.map((entry) => entry.query),
+      searchPosts: true,
+      searchComments: true,
+      searchCommunities: false,
+      searchSort: "new",
+      searchTime: searchTimeForSince(this.timeRange, request.since),
+      maxPostsCount: perTypePerTerm,
+      maxCommentsCount: perTypePerTerm,
+      maxCommentsPerPost: 0,
+      proxy: { useApifyProxy: true, apifyProxyGroups: ["RESIDENTIAL"] },
+      ...(withinCommunity ? { withinCommunity } : {}),
+    };
+
+    // Per-term caps bound the actor's output; read modest headroom for duplicates.
+    const payload = await this.runActor(actorInput, Math.min(800, Math.max(target * 2, 100)));
+    const rejectedByReason = rejectionCounts();
+    const sinceMs = request.since && Number.isFinite(Date.parse(request.since)) ? Date.parse(request.since) : null;
+    const byKey = new Map<string, RedditDiscoveryCandidate>();
+
+    for (const value of payload) {
+      const parsed = candidateFromItem(value, searchPlan);
+      if (!parsed.candidate) {
+        rejectedByReason[parsed.reason ?? "invalid_record"] += 1;
+        continue;
+      }
+      if (sinceMs !== null && Date.parse(parsed.candidate.createdAt) < sinceMs) {
+        rejectedByReason.outside_window += 1;
+        continue;
+      }
+      const key = `${parsed.candidate.kind}:${parsed.candidate.externalId}`;
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, parsed.candidate);
+      } else {
+        byKey.set(key, {
+          ...existing,
+          matchedQuery: existing.matchedQuery ?? parsed.candidate.matchedQuery,
+          matchedQueries: [...new Set([...existing.matchedQueries, ...parsed.candidate.matchedQueries])],
+          discoveryLanes: [...new Set([...existing.discoveryLanes, ...parsed.candidate.discoveryLanes])],
+        });
+      }
+    }
+
+    const candidates = [...byKey.values()].slice(0, target);
+    const laneQueryCounts: Partial<Record<RedditSearchLane, number>> = {};
+    for (const entry of searchPlan) laneQueryCounts[entry.lane] = (laneQueryCounts[entry.lane] ?? 0) + 1;
+    const diagnostics: RedditDiscoveryDiagnostics = {
+      queryCount: searchPlan.length,
+      fetchedCandidates: payload.length,
+      normalizedCandidates: [...byKey.values()].length,
+      verifiedRecentCandidates: candidates.length,
+      rejectedByReason,
+      laneQueryCounts,
+    };
+    return { candidates, searchPlan, sourceMode: this.sourceMode, diagnostics };
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const candidates = request.candidates.slice(0, this.enrichmentLimit);
+    if (candidates.length === 0) {
+      return {
+        conversations: [],
+        sourceMode: this.sourceMode,
+        diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 },
+      };
+    }
+
+    const urls = [...new Set(candidates.flatMap((candidate) => {
+      const url = threadPermalink(candidate.permalink);
+      return url ? [url] : [];
+    }))];
+    if (urls.length === 0) {
+      const conversations = candidates.map((candidate) => matchedOnly(candidate, `apify:${this.actorId}`));
+      return {
+        conversations,
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: "missing_reddit_thread_urls",
+        },
+      };
+    }
+
+    const maxComments = Math.max(1, Math.min(100, Math.trunc(request.maxComments ?? this.enrichmentComments)));
+    const input: EnrichmentInput = {
+      aiAnalysis: false,
+      crawlCommentsPerPost: true,
+      includeNSFW: false,
+      startUrls: urls.map((url) => ({ url })),
+      maxPostsCount: urls.length,
+      maxCommentsCount: urls.length * maxComments,
+      maxCommentsPerPost: maxComments,
+      proxy: { useApifyProxy: true, apifyProxyGroups: ["RESIDENTIAL"] },
+    };
+
+    let payload: unknown[];
+    try {
+      payload = await this.runActor(input, Math.min(800, urls.length * (maxComments + 2)));
+    } catch (error) {
+      const conversations = candidates.map((candidate) => matchedOnly(candidate, `apify:${this.actorId}`));
+      return {
+        conversations,
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: `actor_error:${error instanceof Error ? error.message.slice(0, 400) : "unknown"}`,
+        },
+      };
+    }
+
+    let enriched = 0;
+    const conversations = candidates.map((candidate) => {
+      const result = buildContext(candidate, payload, `apify:${this.actorId}`);
+      if (result) {
+        enriched += 1;
+        return result;
+      }
+      return matchedOnly(candidate, `apify:${this.actorId}`);
+    });
+    const failed = candidates.length - enriched;
+    return {
+      conversations,
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        requested: candidates.length,
+        enriched,
+        failed,
+        fallbackUsed: failed,
+        ...(failed > 0 ? { failureReason: "partial_thread_mapping" } : {}),
+      },
+    };
+  }
+
+  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+    const discovery = await this.discover(request);
+    return {
+      conversations: discovery.candidates.map((candidate) => matchedOnly(candidate, `apify:${this.actorId}`)),
+      sourceMode: this.sourceMode,
+    };
+  }
+}

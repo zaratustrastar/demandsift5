@@ -1,7 +1,9 @@
-import type { OpportunityRecord, ReplyRecord, ScanRecord } from "./contracts";
+import { dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
+import type { MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
 import { getEffectiveEntitlement, getStateRepository } from "./repository";
+import { summarizeTrackedResults } from "./result-totals";
 
 export { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 
@@ -30,7 +32,12 @@ function publicOpportunity(opportunity: OpportunityRecord) {
     replyId: opportunity.replyId,
     sourceIds: [opportunity.sourceId],
     dataMode: opportunity.sourceMode ?? (opportunity.synthetic ? "mock" : "live"),
-    canReplyOnReddit: Boolean(opportunity.redditThingId && opportunity.permalink && !opportunity.synthetic),
+    canReplyOnReddit: Boolean(
+      opportunity.shouldReply !== false &&
+      opportunity.redditThingId &&
+      opportunity.permalink &&
+      !opportunity.synthetic
+    ),
     conversationType: opportunity.conversationType ?? "post",
     potentialCustomerIntent: opportunity.potentialCustomerIntent ?? null,
     qualificationScore: opportunity.qualificationScore ?? opportunity.score,
@@ -40,6 +47,31 @@ function publicOpportunity(opportunity: OpportunityRecord) {
     supportingSourceIds: opportunity.supportingSourceIds ?? [opportunity.sourceId],
     supportingSignalCount: opportunity.supportingSignalCount ?? 1,
     appearedInPreviousDemandDrop: opportunity.appearedInPreviousDemandDrop ?? false,
+    mentionProduct: opportunity.mentionProduct === true,
+    disclosureRequired: opportunity.disclosureRequired === true,
+  };
+}
+
+function publicRelevantConversation(
+  intelligence: MarketIntelligenceRecord,
+  source: Provenance | undefined,
+) {
+  const dataMode = source?.sourceMode ?? (source?.synthetic ? "mock" : "live");
+  return {
+    id: intelligence.id,
+    title: intelligence.title,
+    summary: intelligence.summary,
+    subreddit: intelligence.subreddit,
+    author: intelligence.author,
+    permalink: source?.url || null,
+    postedAt: intelligence.sourceCreatedAt,
+    tags: intelligence.tags,
+    demandSignals: intelligence.demandSignals,
+    competitor: intelligence.competitor,
+    sourceIds: intelligence.sourceIds,
+    provider: source?.provider ?? "reddit",
+    dataMode,
+    replyId: intelligence.replyId ?? null,
   };
 }
 
@@ -88,6 +120,20 @@ export async function presentAccess(workspaceId: string, websiteUrl?: string) {
   };
 }
 
+function freeVisibleOpportunities(
+  opportunities: OpportunityRecord[],
+  generatedReplies: ReplyRecord[],
+): OpportunityRecord[] {
+  const previewReply = generatedReplies[0];
+  if (!previewReply) return opportunities.slice(0, 3);
+  const replyOpportunity = opportunities.find((row) => row.id === previewReply.opportunityId);
+  if (!replyOpportunity) return opportunities.slice(0, 3);
+  return [
+    replyOpportunity,
+    ...opportunities.filter((row) => row.id !== replyOpportunity.id),
+  ].slice(0, 3);
+}
+
 export async function presentScan(scan: ScanRecord) {
   const access = await presentAccess(scan.workspaceId, scan.websiteUrl);
   const result = scan.result;
@@ -101,6 +147,7 @@ export async function presentScan(scan: ScanRecord) {
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt,
         error: scan.error,
+        errorCode: scan.errorCode ?? null,
       },
       access,
       report: null,
@@ -125,23 +172,57 @@ export async function presentScan(scan: ScanRecord) {
           normalizedBusinessHostname(scan.websiteUrl),
       ))
     .map(({ row }) => row);
-  const competitorSignalCount = result.competitorWeakness.verified ? 1 : 0;
-  const visibleOpportunities = fullAccess ? result.opportunities : result.opportunities.slice(0, 3);
-  const lockedOpportunities = fullAccess ? [] : result.opportunities.slice(visibleOpportunities.length);
-  const visibleOpportunityIds = new Set(visibleOpportunities.map((opportunity) => opportunity.id));
-  const persistedReplies = await getStateRepository().listRepliesForScan(scan.id);
+
+  const resultTotals = summarizeTrackedResults(trackedResults);
+
+  const persistedReplies = await repository.listRepliesForScan(scan.id);
   const persistedById = new Map(persistedReplies.map((reply) => [reply.id, reply]));
   const latestReplies = result.replies.map((reply) => persistedById.get(reply.id) ?? reply);
+  const generatedReplies = latestReplies.filter((reply) => reply.content.trim().length > 0);
+  const generatedByOpportunity = new Map(generatedReplies.map((reply) => [reply.opportunityId, reply]));
+
+  const competitorSignalCount = result.competitorWeakness.verified ? 1 : 0;
+  const visibleOpportunities = fullAccess
+    ? result.opportunities
+    : freeVisibleOpportunities(result.opportunities, generatedReplies);
+  const visibleOpportunityIds = new Set(visibleOpportunities.map((opportunity) => opportunity.id));
+  const lockedOpportunities = fullAccess
+    ? []
+    : result.opportunities.filter((opportunity) => !visibleOpportunityIds.has(opportunity.id));
   const visibleReplies = fullAccess
     ? latestReplies
-    : latestReplies.filter((reply) => reply.opportunityId === visibleOpportunities[0]?.id).slice(0, 1);
+    : generatedReplies.filter((reply) => visibleOpportunityIds.has(reply.opportunityId)).slice(0, 1);
+  const visibleGeneratedReplyIds = new Set(
+    visibleReplies.filter((reply) => reply.content.trim()).map((reply) => reply.id),
+  );
   const visibleInsights = fullAccess ? result.insights : result.insights.slice(0, 2);
+  const leadSourceIds = new Set(result.opportunities.map((opportunity) => opportunity.sourceId));
+  // Competitor intelligence ranks by competitor value; the rest of the relevant
+  // corpus ranks by research value. Neither uses lead value.
+  const relevantConversations = dedupeMarketIntelligenceRecords(
+    result.marketIntelligence.filter(
+      (conversation) => !leadSourceIds.has(conversation.sourceId),
+    ),
+  ).sort((left, right) => {
+    // A named competitor makes a conversation competitor intelligence first;
+    // everything else ranks by research value.
+    const leftKey = left.competitor ? (left.competitorScore ?? 0) + 1_000 : (left.researchScore ?? 0);
+    const rightKey = right.competitor ? (right.competitorScore ?? 0) + 1_000 : (right.researchScore ?? 0);
+    return rightKey - leftKey;
+  });
+  const visibleRelevantConversations = fullAccess
+    ? relevantConversations
+    : relevantConversations.slice(0, 3);
+  const redditSourceById = new Map(
+    result.sources.filter((source) => source.kind === "reddit").map((source) => [source.id, source]),
+  );
   const visibleSourceIds = new Set([
     ...result.profile.sourceIds,
     ...visibleOpportunities.flatMap((opportunity) =>
       opportunity.supportingSourceIds ?? [opportunity.sourceId],
     ),
     ...visibleInsights.flatMap((insight) => insight.sourceIds),
+    ...visibleRelevantConversations.flatMap((conversation) => conversation.sourceIds),
     ...result.competitorWeakness.sourceIds,
   ]);
 
@@ -154,11 +235,20 @@ export async function presentScan(scan: ScanRecord) {
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt,
       error: scan.error,
+      errorCode: scan.errorCode ?? null,
     },
     access,
     report: {
       profile: result.profile,
       insights: visibleInsights,
+      // Themes are aggregations over the relevant corpus. Older stored results
+      // predate them, so an absent field is an empty list rather than an error.
+      conversationThemes: (result.conversationThemes ?? []).filter(
+        (theme) => theme.sourceIds.length > 0,
+      ),
+      relevantConversations: visibleRelevantConversations.map((conversation) =>
+        publicRelevantConversation(conversation, redditSourceById.get(conversation.sourceId))
+      ),
       competitorWeakness: result.competitorWeakness,
       opportunities: visibleOpportunities.map(publicOpportunity),
       potentialCustomers: result.potentialCustomers ?? {
@@ -178,6 +268,38 @@ export async function presentScan(scan: ScanRecord) {
         },
         newSincePreviousDemandDrop: result.opportunities.length,
       },
+      qualificationCoverage: {
+        credibleCandidates: result.diagnostics.deterministicSurvivors,
+        // Only provider-confirmed thread enrichment counts as context coverage.
+        // Discovery-only fallbacks may still be classified internally, but are
+        // never presented to the user as full-context review.
+        fullContextReviewed: result.diagnostics.enrichedSuccessfully,
+        requiredFullContextReviews: result.diagnostics.requiredFullContextReviews ?? 0,
+        limited: result.diagnostics.coverageLimited ?? false,
+      },
+      // MVP transparency: expose every credible candidate that reached AI triage,
+      // its exact public Reddit destination, search attribution, and decisions.
+      // This is intentionally not paywalled while retrieval/qualification quality
+      // is being validated. Raw provider-invalid records remain counts only.
+      scanEvidence: {
+        searchPlan: result.retrievalDiagnostics?.searchPlan ?? [],
+        diagnostics: result.diagnostics,
+        candidates: result.processedRedditState.map((state) => ({
+          externalId: state.externalId,
+          title: state.title,
+          excerpt: state.excerpt,
+          subreddit: state.subreddit,
+          author: state.author,
+          permalink: state.canonicalPermalink,
+          sourceCreatedAt: state.sourceCreatedAt,
+          matchedQueries: state.matchedQueries,
+          discoveryLanes: state.discoveryLanes,
+          fullContextVerified:
+            state.threadContextVerified ?? Boolean(state.contextHash && state.deepQualification),
+          triage: state.triage,
+          deepQualification: state.deepQualification,
+        })),
+      },
       lockedOpportunityPreviews: lockedOpportunities.map((opportunity) => ({
         id: opportunity.id,
         subreddit: opportunity.subreddit,
@@ -185,7 +307,7 @@ export async function presentScan(scan: ScanRecord) {
         conversationType: opportunity.conversationType ?? "post",
         potentialCustomerIntent: opportunity.potentialCustomerIntent ?? null,
         supportingSignalCount: opportunity.supportingSignalCount ?? 1,
-        hasSuggestedReply: Boolean(opportunity.replyId),
+        hasSuggestedReply: Boolean(generatedByOpportunity.get(opportunity.id)?.content.trim()),
         dataMode: opportunity.sourceMode ?? (opportunity.synthetic ? "mock" : "live"),
       })),
       replies: visibleReplies.map(publicReply),
@@ -195,23 +317,24 @@ export async function presentScan(scan: ScanRecord) {
       analysisMode: result.analysisMode,
       storedCounts: {
         opportunities: result.opportunities.length,
+        relevantConversations: relevantConversations.length,
         insights: result.insights.length,
         competitorSignals: competitorSignalCount,
-        replies: result.replies.length,
+        replies: generatedReplies.length,
       },
       additionalLockedCounts: fullAccess
-        ? { opportunities: 0, insights: 0, competitorSignals: 0, replies: 0 }
+        ? { opportunities: 0, relevantConversations: 0, insights: 0, competitorSignals: 0, replies: 0 }
         : {
             opportunities: Math.max(0, result.opportunities.length - visibleOpportunityIds.size),
+            relevantConversations: Math.max(
+              0,
+              relevantConversations.length - visibleRelevantConversations.length,
+            ),
             insights: Math.max(0, result.insights.length - visibleInsights.length),
             competitorSignals: 0,
-            replies: Math.max(0, result.replies.length - visibleReplies.length),
+            replies: Math.max(0, generatedReplies.length - visibleGeneratedReplyIds.size),
           },
-      resultTotals: {
-        clicks: trackedResults.filter((row) => row.kind === "click").length,
-        conversions: trackedResults.filter((row) => row.kind === "conversion").length,
-        valueCents: trackedResults.reduce((sum, row) => sum + (row.valueCents ?? 0), 0),
-      },
+      resultTotals,
     },
     pricing: {
       marketScan: { amountCents: 0, label: "Personalized Market Scan" },
@@ -254,7 +377,7 @@ export async function requireAccessibleReply(workspaceId: string, replyId: strin
   if (!opportunity || !scan.result) {
     throw new ApiError("Reply source was not found.", 404, "opportunity_not_found");
   }
-  const previewReplyId = scan.result.opportunities[0]?.replyId;
+  const previewReplyId = scan.result.replies.find((row) => row.content.trim())?.id;
   if (!(await isUnlocked(workspaceId, scan.websiteUrl)) && reply.id !== previewReplyId) {
     throw new ApiError(
       "This reply is included with the Full Access Pass or Core plan.",

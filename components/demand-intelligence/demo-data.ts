@@ -400,7 +400,6 @@ const baseNavigation: NavigationSection[] = [
   },
   { id: "results", label: "Results" },
   { id: "billing", label: "Billing" },
-  { id: "settings", label: "Settings" },
 ];
 
 export const redditDemandDemoData: RedditDemandDemoData = {
@@ -584,6 +583,9 @@ export const redditDemandDemoData: RedditDemandDemoData = {
       verifiedWithinDemoFixture: true,
     },
   ],
+  // Demo fixture: themes are aggregated from the fictional corpus above, so the
+  // evidence links resolve to the same fictional conversations.
+  conversationThemes: [],
   insights: [
     {
       id: "insight-ownership-before-automation",

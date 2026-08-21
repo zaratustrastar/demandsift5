@@ -1,9 +1,17 @@
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/http";
-import { getStateRepository } from "@/lib/server/repository";
+import { OpenAiProviderError } from "@/lib/providers/openai.server";
+import { getStateRepository, type StateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
+import { runRedditMonitorScan } from "@/lib/server/reddit-monitor-workflow";
+import {
+  getClaimedRedditMonitorJob,
+  getRedditMonitorRun,
+} from "@/lib/server/reddit-monitor-repository";
+import type { ScanRecord } from "@/lib/server/contracts";
 
 type RouteContext = { params: Promise<{ jobId: string }> | { jobId: string } };
 type ExecuteBody = { workerId?: unknown };
+type ClaimedJob = NonNullable<Awaited<ReturnType<StateRepository["getJob"]>>>;
 
 function safeEqual(left: string, right: string): boolean {
   const length = Math.max(left.length, right.length);
@@ -29,6 +37,149 @@ function requireWorker(request: Request) {
   }
 }
 
+async function requireClaimedScan(
+  jobId: string,
+  workerId: string,
+): Promise<{ job: ClaimedJob; scan: ScanRecord }> {
+  const repository = getStateRepository();
+  if (repository.kind !== "postgres") {
+    throw new ApiError("Persistent jobs require PostgreSQL.", 503, "worker_unavailable");
+  }
+  const job = await repository.getJob(jobId);
+  if (!job || job.type !== "scan.run") {
+    throw new ApiError("Job was not found.", 404, "job_not_found");
+  }
+  if (job.status !== "running" || job.lockedBy !== workerId) {
+    throw new ApiError("Job is not claimed by this worker.", 409, "job_not_claimed");
+  }
+  const scan = await repository.getScan(job.payload.scanId);
+  if (!scan || scan.workspaceId !== job.payload.workspaceId) {
+    throw new ApiError("Job scan was not found.", 404, "scan_not_found");
+  }
+  return { job, scan };
+}
+
+function terminalScanFailure(scan: ScanRecord) {
+  const message = scan.error?.trim() || "The scan failed unexpectedly.";
+  // Prefer the structured code runScan already classified the error into;
+  // only fall back to regexing the message for scan records written before
+  // errorCode existed.
+  const code =
+    scan.errorCode ??
+    (/structured (?:chat )?(?:json|output)/iu.test(message)
+      ? "openai_structured_output_failed"
+      : /reddit enrichment/iu.test(message)
+        ? "reddit_enrichment_failed"
+        : /reddit discovery/iu.test(message)
+          ? "reddit_discovery_failed"
+          : "scan_execution_failed");
+  return {
+    ok: false,
+    executorStatus: 502,
+    error: { code, message },
+  };
+}
+
+const activeScanExecutions = new Map<string, Promise<void>>();
+const activeMonitorExecutions = new Map<string, Promise<void>>();
+
+async function executeClaimedScan(
+  scanId: string,
+  resumeRunning = false,
+  jobAttempts?: number,
+  jobMaxAttempts?: number,
+): Promise<void> {
+  try {
+    await runScan(scanId, { resumeRunning, jobAttempts, jobMaxAttempts });
+  } catch (error) {
+    if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
+      console.error("Background scan exhausted structured AI recovery.");
+      return;
+    }
+    console.error("Background scan execution failed.", error);
+  }
+}
+
+function ensureClaimedScanExecution(
+  scanId: string,
+  resumeRunning = false,
+  jobAttempts?: number,
+  jobMaxAttempts?: number,
+): Promise<void> {
+  const existing = activeScanExecutions.get(scanId);
+  if (existing) return existing;
+  const execution = executeClaimedScan(scanId, resumeRunning, jobAttempts, jobMaxAttempts);
+  activeScanExecutions.set(scanId, execution);
+  void execution.finally(() => {
+    if (activeScanExecutions.get(scanId) === execution) activeScanExecutions.delete(scanId);
+  });
+  return execution;
+}
+
+function executionSnapshot(job: ClaimedJob, scan: ScanRecord) {
+  // "retrying" is not done executing from the job's point of view either --
+  // this attempt still ended without a result, so the worker still needs to
+  // see a failure response to run its own retry/backoff bookkeeping. The
+  // difference already happened where it matters: the scan record itself
+  // never sat at a terminal-looking "failed" while a retry was scheduled.
+  if (scan.status === "failed" || scan.status === "retrying") return terminalScanFailure(scan);
+  return {
+    ok: true,
+    jobId: job.id,
+    scanId: scan.id,
+    status: scan.status,
+    complete: scan.status === "complete",
+  };
+}
+
+function monitorExecutionSnapshot(jobId: string, run: NonNullable<Awaited<ReturnType<typeof getRedditMonitorRun>>>) {
+  if (run.status === "failed") {
+    return {
+      ok: false,
+      executorStatus: 502,
+      error: { code: "reddit_monitor_failed", message: run.error || "Reddit monitoring failed." },
+    };
+  }
+  return {
+    ok: true,
+    jobId,
+    monitorRunId: run.id,
+    scanId: run.scanId,
+    status: run.status,
+    complete: run.status === "succeeded",
+  };
+}
+
+function ensureMonitorExecution(runId: string): Promise<void> {
+  const existing = activeMonitorExecutions.get(runId);
+  if (existing) return existing;
+  const execution = runRedditMonitorScan(runId).then(() => undefined).catch((error) => {
+    console.error("Background Reddit monitor execution failed.", error);
+  });
+  activeMonitorExecutions.set(runId, execution);
+  void execution.finally(() => {
+    if (activeMonitorExecutions.get(runId) === execution) activeMonitorExecutions.delete(runId);
+  });
+  return execution;
+}
+
+async function claimedMonitorSnapshot(jobId: string, workerId: string, start: boolean) {
+  const job = await getClaimedRedditMonitorJob(jobId, workerId);
+  if (!job) return null;
+  const run = await getRedditMonitorRun(job.monitorRunId);
+  if (!run || run.workspaceId !== job.workspaceId) {
+    throw new ApiError("Reddit monitor run was not found.", 404, "monitor_run_not_found");
+  }
+  if (start && run.status !== "succeeded" && run.status !== "failed") {
+    void ensureMonitorExecution(run.id);
+  }
+  const snapshot = monitorExecutionSnapshot(job.id, run);
+  return Response.json(snapshot, {
+    status: snapshot.ok && !snapshot.complete ? 202 : 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
 export async function POST(request: Request, context: RouteContext) {
   try {
     requireWorker(request);
@@ -37,37 +188,55 @@ export async function POST(request: Request, context: RouteContext) {
       throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
     const { jobId } = await context.params;
-    const repository = getStateRepository();
-    if (repository.kind !== "postgres") {
-      throw new ApiError("Persistent jobs require PostgreSQL.", 503, "worker_unavailable");
+    const monitorResponse = await claimedMonitorSnapshot(jobId, body.workerId, true);
+    if (monitorResponse) return monitorResponse;
+    const { job, scan } = await requireClaimedScan(jobId, body.workerId);
+    if (scan.status === "complete" || scan.status === "failed") {
+    return Response.json(executionSnapshot(job, scan), {
+      status: 200,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+  if (scan.status === "running") {
+    // If this web process restarted, no execution is registered for the
+    // persisted running scan. Resume it instead of blocking the queue.
+    void ensureClaimedScanExecution(scan.id, true, job.attempts, job.maxAttempts);
+    return Response.json(executionSnapshot(job, scan), {
+      status: 202,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+
+  // The VPS is a persistent Node process, not a request-scoped serverless
+    // function. Start the durable scan and release the HTTP request immediately.
+    // Worker and browser status checks are then independent short requests, so
+    // no proxy/server timeout can terminate a long-running scan. This also
+    // covers a scan left at "retrying" by a prior attempt's failure: this
+    // POST only happens once the worker has freshly reclaimed the job, so
+    // it starts a brand-new attempt rather than resuming a stale one.
+    void ensureClaimedScanExecution(scan.id, false, job.attempts, job.maxAttempts);
+    return Response.json(
+      { ok: true, jobId: job.id, scanId: scan.id, status: "starting", complete: false },
+      { status: 202, headers: { "cache-control": "no-store" } },
+    );
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    requireWorker(request);
+    const workerId = new URL(request.url).searchParams.get("workerId") ?? "";
+    if (workerId.length < 3 || workerId.length > 160) {
+      throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
-    const job = await repository.getJob(jobId);
-    if (!job || job.type !== "scan.run") {
-      throw new ApiError("Job was not found.", 404, "job_not_found");
-    }
-    if (job.status !== "running" || job.lockedBy !== body.workerId) {
-      throw new ApiError("Job is not claimed by this worker.", 409, "job_not_claimed");
-    }
-    const scan = await repository.getScan(job.payload.scanId);
-    if (!scan || scan.workspaceId !== job.payload.workspaceId) {
-      throw new ApiError("Job scan was not found.", 404, "scan_not_found");
-    }
-    if (scan.status === "complete") {
-      return Response.json({ jobId: job.id, scanId: scan.id, status: "complete", duplicate: true });
-    }
-    const completed = await runScan(scan.id);
-    if (completed.status === "running") {
-      throw new ApiError(
-        "The scan is currently running in another request.",
-        409,
-        "scan_already_running",
-      );
-    }
-    return Response.json({
-      jobId: job.id,
-      scanId: completed.id,
-      status: completed.status,
-      duplicate: false,
+    const { jobId } = await context.params;
+    const monitorResponse = await claimedMonitorSnapshot(jobId, workerId, false);
+    if (monitorResponse) return monitorResponse;
+    const { job, scan } = await requireClaimedScan(jobId, workerId);
+    return Response.json(executionSnapshot(job, scan), {
+      headers: { "cache-control": "no-store" },
     });
   } catch (error) {
     return apiErrorResponse(error);

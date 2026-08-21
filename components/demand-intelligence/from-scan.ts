@@ -5,6 +5,7 @@ import type {
   NavigationSection,
   RedditDemandDemoData,
   RedditOpportunity,
+  ScanEvidence,
 } from "./types";
 
 type ApiSource = {
@@ -39,6 +40,25 @@ type ApiInsight = {
   signal: "rising" | "steady" | "emerging";
   opportunityIds: string[];
   sourceIds: string[];
+  evidenceScope?: "single-conversation" | "recurring-pattern";
+  sourceCount?: number;
+};
+
+type ApiRelevantConversation = {
+  id: string;
+  title: string;
+  summary: string;
+  subreddit: string;
+  author: string | null;
+  permalink: string | null;
+  postedAt: string;
+  tags: string[];
+  demandSignals: string[];
+  competitor: string | null;
+  sourceIds: string[];
+  provider: string;
+  dataMode: "mock" | "live" | "apify-test";
+  replyId?: string | null;
 };
 
 type ApiOpportunity = {
@@ -69,6 +89,8 @@ type ApiOpportunity = {
   supportingSourceIds: string[];
   supportingSignalCount: number;
   appearedInPreviousDemandDrop: boolean;
+  mentionProduct: boolean;
+  disclosureRequired: boolean;
 };
 
 type ApiReply = {
@@ -87,6 +109,14 @@ type ApiReply = {
 type ApiReport = {
   profile: ApiProfile;
   insights: ApiInsight[];
+  relevantConversations?: ApiRelevantConversation[];
+  conversationThemes?: Array<{
+    id: string;
+    label: string;
+    kind: "struggle" | "request";
+    conversationCount: number;
+    sourceIds: string[];
+  }>;
   competitorWeakness: {
     id: string;
     verified: boolean;
@@ -110,6 +140,13 @@ type ApiReport = {
     };
     newSincePreviousDemandDrop: number;
   };
+  qualificationCoverage?: {
+    credibleCandidates: number;
+    fullContextReviewed: number;
+    requiredFullContextReviews?: number;
+    limited?: boolean;
+  };
+  scanEvidence?: ScanEvidence;
   lockedOpportunityPreviews: Array<{
     id: string;
     subreddit: string;
@@ -127,12 +164,14 @@ type ApiReport = {
   analysisMode: "openai" | "local-fallback";
   storedCounts: {
     opportunities: number;
+    relevantConversations?: number;
     insights: number;
     competitorSignals: number;
     replies: number;
   };
   additionalLockedCounts: {
     opportunities: number;
+    relevantConversations?: number;
     insights: number;
     competitorSignals: number;
     replies: number;
@@ -147,7 +186,13 @@ type ApiReport = {
 export type ApiScanResponse = {
   scan: {
     id: string;
-    status: "queued" | "running" | "complete" | "failed";
+    /**
+     * "retrying" mirrors lib/server/contracts.ts's ScanRecord.status: the
+     * pipeline hit an error, but a background job attempt is still
+     * scheduled to try again. Treat it like "running" -- keep polling, do
+     * not show an error screen.
+     */
+    status: "queued" | "running" | "retrying" | "complete" | "failed";
     websiteUrl: string;
     progress: Array<{
       id: string;
@@ -158,8 +203,9 @@ export type ApiScanResponse = {
     createdAt: string;
     updatedAt: string;
     error: string | null;
+    errorCode?: string | null;
   };
-  access: {
+  access : {
     plan: "free" | "pass" | "core";
     status: string;
     unlocked: boolean;
@@ -187,9 +233,10 @@ function redditProviderLabel(dataMode: ApiReport["dataMode"]): string {
   return "approved-reddit-provider";
 }
 
-function conversationEvidenceLabel(dataMode: ApiReport["dataMode"]): string {
+function sourceEvidenceLabel(source: ApiSource, dataMode: ApiReport["dataMode"]): string {
+  if (source.kind === "website") return "Verified business website evidence";
   if (dataMode === "mock") return "Mock provider evidence";
-  if (dataMode === "apify-test") return "Apify test-source evidence";
+  if (dataMode === "apify-test") return "Public Reddit evidence via Apify test source";
   return "Public conversation evidence";
 }
 
@@ -248,7 +295,9 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       supportingSignalCount: opportunity.supportingSignalCount,
       supportingSourceIds: opportunity.supportingSourceIds,
       appearedInPreviousDemandDrop: opportunity.appearedInPreviousDemandDrop,
-      matchReasons: [opportunity.whyItMatters, opportunity.customerProblem].filter(Boolean),
+      mentionProduct: opportunity.mentionProduct,
+      disclosureRequired: opportunity.disclosureRequired,
+      matchReasons: [opportunity.customerProblem, opportunity.whyItMatters].filter(Boolean),
       classification: {
         relevanceScore: opportunity.relevanceScore ?? 0,
         buyerIntent: intent(opportunity.intent),
@@ -270,7 +319,9 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
           reply?.content ??
           "This reply is stored but hidden in the free Market Scan. Unlocking does not publish it.",
         alternateDrafts: [],
-        disclosure: "Disclose the business connection whenever the product is mentioned.",
+        disclosure: opportunity.disclosureRequired
+          ? "Disclose the business connection because this reply mentions the product."
+          : "No disclosure is needed while the reply remains product-neutral.",
         verifiedClaims: report.profile.features,
         sourceFactIds: factIds,
         provenanceIds: [...report.profile.sourceIds, ...opportunity.sourceIds],
@@ -284,6 +335,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
   const lockedResults = lockedRecords(report);
   const lockedCounts = {
     opportunities: report.additionalLockedCounts.opportunities,
+    relevantConversations: report.additionalLockedCounts.relevantConversations ?? 0,
     insights: report.additionalLockedCounts.insights,
     competitorSignals: report.additionalLockedCounts.competitorSignals,
     visibilityOpportunities: 0,
@@ -296,7 +348,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       item.id === "opportunities"
         ? report.storedCounts.opportunities
         : item.id === "insights"
-          ? report.storedCounts.insights
+          ? report.storedCounts.insights + (report.storedCounts.relevantConversations ?? 0)
           : item.id === "competitors"
             ? report.storedCounts.competitorSignals
             : item.id === "replies"
@@ -309,7 +361,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       report.dataMode === "mock"
         ? "Live website analysis · mock Reddit provider"
         : report.dataMode === "apify-test"
-          ? "Live website analysis · real Apify Reddit test data"
+          ? "Live website analysis » real Apify Reddit test data"
           : "Live website and approved-provider analysis",
     fixtureDisclosure:
       report.dataMode === "mock"
@@ -356,27 +408,105 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       verifiedWithinDemoFixture:
         source.kind === "website" || (source.sourceMode ?? report.dataMode) === "live",
     })),
-    insights: report.insights.map((insight) => ({
-      id: insight.id,
-      eyebrow: "Customer demand insight",
-      title: insight.title,
-      summary: insight.summary,
-      evidence: [...new Set(insight.sourceIds)].slice(0, 2).flatMap((sourceId) => {
-        const source = sourceById.get(sourceId);
-        return source
-          ? [{
-              quote: source.excerpt,
-              sourceLabel: conversationEvidenceLabel(report.dataMode),
-              provenanceId: sourceId,
-            }]
-          : [];
-      }),
-      whyItMatters: insight.summary,
-      recommendedAction: "Use the underlying question to guide a useful answer and product messaging.",
-      signalStrength: confidence(insight.signal),
-      opportunityIds: insight.opportunityIds,
-      provenanceIds: insight.sourceIds,
-    })),
+    relevantConversations: (report.relevantConversations ?? []).map((conversation) => {
+      const reply = conversation.replyId ? replyByOpportunity.get(conversation.id) : undefined;
+      return {
+        id: conversation.id,
+        provider: conversation.provider,
+        isMock: conversation.dataMode === "mock",
+        title: conversation.title,
+        summary: conversation.summary,
+        subreddit: conversation.subreddit.startsWith("r/")
+          ? conversation.subreddit
+          : `r/${conversation.subreddit}`,
+        authorLabel: conversation.author ?? "Reddit participant",
+        capturedAt: conversation.postedAt,
+        permalink: conversation.permalink,
+        tags: conversation.tags,
+        demandSignals: conversation.demandSignals,
+        competitorName: conversation.competitor,
+        provenanceIds: conversation.sourceIds,
+        // Independent of lead status: present only when this relevant
+        // conversation was classified reply-suitable and a grounded reply was
+        // drafted for it. Never counted as a potential customer.
+        reply: conversation.replyId
+          ? {
+              id: reply?.id ?? conversation.replyId,
+              opportunityId: conversation.id,
+              status: reply?.status ?? "draft",
+              draft:
+                reply?.content ??
+                "This reply is stored but hidden in the free Market Scan. Unlocking does not publish it.",
+              alternateDrafts: [],
+              disclosure: "Review before posting; disclose the business connection if the reply mentions the product.",
+              verifiedClaims: [],
+              sourceFactIds: [],
+              provenanceIds: conversation.sourceIds,
+              publishedVia: reply?.publishedVia ?? null,
+              publishedUrl: reply?.publishedUrl ?? null,
+            }
+          : undefined,
+      };
+    }),
+    // Themes resolve their sourceIds against the relevant corpus so each one can
+    // link the actual conversations behind it. A theme whose evidence cannot be
+    // resolved is dropped rather than shown as an unbacked claim.
+    conversationThemes: (report.conversationThemes ?? []).flatMap((theme) => {
+      const evidence = theme.sourceIds.flatMap((sourceId) => {
+        const conversation = (report.relevantConversations ?? []).find((row) =>
+          row.sourceIds.includes(sourceId),
+        );
+        if (!conversation) return [];
+        return [{
+          sourceId,
+          title: conversation.title,
+          subreddit: conversation.subreddit,
+          permalink: conversation.permalink ?? "",
+        }];
+      });
+      if (evidence.length === 0) return [];
+      return [{
+        id: theme.id,
+        label: theme.label,
+        kind: theme.kind,
+        // Report only what can be shown, so the count always matches evidence.
+        conversationCount: evidence.length,
+        evidence,
+      }];
+    }),
+    insights: report.insights.map((insight) => {
+      const sourceCount = insight.sourceCount ?? new Set(insight.sourceIds).size;
+      const evidenceScope = insight.evidenceScope ??
+        (sourceCount >= 2 ? "recurring-pattern" : "single-conversation");
+      return {
+        id: insight.id,
+        eyebrow: evidenceScope === "recurring-pattern"
+          ? String(sourceCount) + "-conversation demand pattern"
+          : "Single-conversation demand signal",
+        title: insight.title,
+        summary: insight.summary,
+        evidence: [...new Set(insight.sourceIds)].slice(0, 2).flatMap((sourceId) => {
+          const source = sourceById.get(sourceId);
+          return source
+            ? [{
+                quote: source.excerpt,
+                sourceLabel: sourceEvidenceLabel(source, report.dataMode),
+                provenanceId: sourceId,
+                sourceUrl: source.url || null,
+              }]
+            : [];
+        }),
+        whyItMatters: insight.summary,
+        recommendedAction: "Use the underlying question to guide a useful answer and product messaging.",
+        signalStrength: evidenceScope === "single-conversation"
+          ? "medium"
+          : confidence(insight.signal),
+        opportunityIds: insight.opportunityIds,
+        provenanceIds: insight.sourceIds,
+        evidenceScope,
+        sourceCount,
+      };
+    }),
     competitorWeaknesses: [
       {
         id: report.competitorWeakness.id,
@@ -390,8 +520,9 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
           return source
             ? [{
                 quote: source.excerpt,
-                sourceLabel: conversationEvidenceLabel(report.dataMode),
+                sourceLabel: sourceEvidenceLabel(source, report.dataMode),
                 provenanceId: sourceId,
+                sourceUrl: source.url || null,
               }]
             : [];
         }),
@@ -419,6 +550,8 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       },
       newSincePreviousDemandDrop: report.storedCounts.opportunities,
     },
+    qualificationCoverage: report.qualificationCoverage,
+    scanEvidence: report.scanEvidence,
     lockedResults,
     lockedCounts,
     metrics: {

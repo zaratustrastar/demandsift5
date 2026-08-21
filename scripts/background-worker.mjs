@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import postgres from "postgres";
 
 const workerId = `${hostname()}:${process.pid}`;
+export const REDDIT_MONITOR_MAX_WATCH_TERMS = 5;
 
 const MONITORING_STAGES = [
   {
@@ -646,6 +647,7 @@ export async function scheduleRedditMonitorScans(
           .filter((term) => term && term.active !== false && typeof term.value === "string")
           .map((term) => term.value.trim())
           .filter(Boolean)
+          .slice(0, REDDIT_MONITOR_MAX_WATCH_TERMS)
         : [];
       if (activeTerms.length === 0) continue;
       const runId = createRunId();

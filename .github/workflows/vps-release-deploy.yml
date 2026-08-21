@@ -1,0 +1,242 @@
+name: DemandSift trusted VPS release
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/vps-release-deploy.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    outputs:
+      log_b64: ${{ steps.exportlog.outputs.log_b64 }}
+    steps:
+      - name: Check out verified feature head in isolated runner workspace
+        uses: actions/checkout@v4
+        with:
+          # Pin to the exact commit that triggered this run. Checking out the
+          # branch name resolved to a stale tip on the reused runner workspace,
+          # so a release reported deploying one SHA while building another.
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Deploy through the sanctioned ops interface
+        id: release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > /tmp/release.log 2>&1
+
+          # The runner has no unrestricted passwordless sudo; its only root
+          # interface is /usr/local/bin/demandsift-ops. Generic `sudo docker`
+          # and `sudo docker compose` are therefore unavailable and every
+          # privileged action goes through the ops verb below.
+          OPS="sudo /usr/local/bin/demandsift-ops"
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          echo "release_sha=$RELEASE_SHA"
+          echo "trigger_sha=${{ github.sha }}"
+          # A release that builds a different commit than it reports is worse
+          # than one that fails, so refuse rather than deploy the wrong code.
+          if [ "$RELEASE_SHA" != "${{ github.sha }}" ]; then
+            echo "checkout_sha_mismatch=true"
+            exit 5
+          fi
+          echo "runner_user=$(whoami)"
+
+          echo "--- pre-release runtime ---"
+          $OPS runtime || echo "ops_runtime_unavailable=true"
+
+          # Preflight: prove what this runner actually sees at execution time,
+          # rather than trusting a previous run's log. An earlier report was
+          # drawn from a stale comment and wrongly concluded the verb was absent.
+          echo "--- ops preflight ---"
+          $OPS 2>&1 || true
+          $OPS deploy badsha 2>&1 || true
+          echo "--- ops status (source checkout visibility) ---"
+          $OPS status 2>&1 || true
+
+          # Prove the actual git state of the source checkout before drawing any
+          # conclusion from the helper's error name. These are read-only and
+          # unprivileged; if the runner cannot read the path at all, that is
+          # itself the answer.
+          echo "--- source repo git state ---"
+          SRC=/opt/demandsift5-pr1
+          ls -ld "$SRC/.git" 2>&1 || true
+          file "$SRC/.git" 2>&1 || true
+          echo "is_inside_work_tree=$(git -C "$SRC" rev-parse --is-inside-work-tree 2>&1 || true)"
+          echo "git_dir=$(git -C "$SRC" rev-parse --git-dir 2>&1 || true)"
+          echo "common_dir=$(git -C "$SRC" rev-parse --git-common-dir 2>&1 || true)"
+          echo "head=$(git -C "$SRC" rev-parse HEAD 2>&1 || true)"
+          echo "dot_git_is_file=$([ -f "$SRC/.git" ] && echo true || echo false)"
+          echo "dot_git_is_dir=$([ -d "$SRC/.git" ] && echo true || echo false)"
+
+          # Source-repo guard on the VPS now uses `git rev-parse
+          # --is-inside-work-tree` instead of `test -d .git`, so the linked
+          # worktree at /opt/demandsift5-pr1 validates correctly.
+          echo "--- request deploy ---"
+          # Contract for the ops deploy verb:
+          #   demandsift-ops deploy <git-sha>
+          # It is expected to build web/worker/migrate from that SHA with
+          # RELEASE_SHA exported (so deploy/compose.vps.yaml stamps
+          # org.opencontainers.image.revision), bring up the demandsift2
+          # project reusing its existing database and Caddy volumes, and
+          # roll back the previous images on health failure.
+          if ! $OPS deploy "$RELEASE_SHA"; then
+            echo "ops_deploy_failed=true"
+            echo "--- post-failure runtime ---"
+            $OPS runtime || true
+            echo "--- recent logs ---"
+            $OPS logs || true
+            exit 3
+          fi
+
+          echo "--- post-release runtime ---"
+          $OPS runtime > /tmp/runtime.txt 2>&1 || true
+          cat /tmp/runtime.txt
+
+          echo "--- prove both containers run this release ---"
+          # The runtime verb reports each container's image revision label.
+          # A release that cannot prove its own SHA is treated as failed, which
+          # is what allowed a 2026-08-09 build to serve production unnoticed.
+          missing=0
+          for target in web worker; do
+            if grep -qi "$target" /tmp/runtime.txt && grep -q "$RELEASE_SHA" /tmp/runtime.txt; then
+              echo "${target}_revision_confirmed=true"
+            else
+              echo "${target}_revision_confirmed=false"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "release_revision_mismatch=true"
+            exit 4
+          fi
+
+          echo "--- container status ---"
+          $OPS status || true
+
+          echo "--- reddit configuration in effect ---"
+          $OPS reddit-config || true
+
+          echo "release_verified=true"
+
+      - name: Export release log
+        id: exportlog
+        if: always()
+        shell: bash
+        run: |
+          sleep 1
+          tail -c 18000 /tmp/release.log > /tmp/release.trim.log 2>/dev/null || echo "no release log" > /tmp/release.trim.log
+          echo "log_b64=$(base64 -w0 /tmp/release.trim.log)" >> "$GITHUB_OUTPUT"
+
+# Trigger: deploy the current feature branch into the live demandsift2 project
+# with SHA-stamped images, replacing the stale 2026-08-09 production build.
+
+  # External, black-box proof. Runs off the VPS so "production works" means
+  # reachable from the public internet, not just healthy from inside the host.
+  prove:
+    needs: deploy
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      proof_b64: ${{ steps.proof.outputs.proof_b64 }}
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Prove public HTTP
+        id: proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/proof.md
+          {
+            echo "### Public production HTTP"
+            code="$(curl -sS -o /tmp/home.html -w '%{http_code}' --max-time 30 "$APP_URL/" || echo 000)"
+            echo "GET / -> $code"
+            echo "bytes=$(wc -c < /tmp/home.html 2>/dev/null || echo 0)"
+
+            echo
+            echo "### Real queue job end-to-end"
+            echo "Disabled: this used to POST a real scan of tvcp.app on"
+            echo "every deploy, spending real Apify budget against the live"
+            echo "production Reddit provider. Combined with the background"
+            echo "job's retry-up-to-5x behavior, two deploys pushed back to"
+            echo "back were found to spawn roughly 10-20 real Apify actor"
+            echo "runs from this step alone (2026-08-19). Re-enable"
+            echo "deliberately -- e.g. behind a manual workflow_dispatch"
+            echo "input -- rather than running it unconditionally on every"
+            echo "push."
+          } > "$OUT" 2>&1
+          cat "$OUT"
+          echo "proof_b64=$(base64 -w0 "$OUT")" >> "$GITHUB_OUTPUT"
+
+  report:
+    needs: [deploy, prove]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Publish the release outcome
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOG_B64: ${{ needs.deploy.outputs.log_b64 }}
+          PROOF_B64: ${{ needs.prove.outputs.proof_b64 }}
+          RESULT: ${{ needs.deploy.result }}
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "## VPS release — ${RESULT}"
+            echo
+            echo '```'
+            if [ -n "${LOG_B64:-}" ]; then echo "$LOG_B64" | base64 -d; else echo "no log captured"; fi
+            echo '```'
+            echo
+            if [ -n "${PROOF_B64:-}" ]; then echo "$PROOF_B64" | base64 -d; else echo "no external proof captured"; fi
+          } > /tmp/r.md
+          python3 - <<'PY' > /tmp/body.json
+          import json
+          print(json.dumps({"body": open("/tmp/r.md").read()[:60000]}))
+          PY
+          curl -sS -o /dev/null -w 'comment_http=%{http_code}\n' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/1/comments" \
+            --data @/tmp/body.json
+# redeploy: ship enrichment timeout fix 2026-08-17T11:16:02Z
+# trigger: deploy invalid_timestamp discovery-cleaning fix (2026-08-17)
+# trigger: deploy loosened worthEnriching gate + Harshmaur default provider + real thread enrichment (2026-08-17T14:43:22Z)
+# retry: checkout action hit GitHub codeload rate limit on prior attempt (2026-08-17T14:57:20Z)
+# trigger: fix missing access field crash on in-progress scan poll (2026-08-17T21:35:08Z)
+# trigger: deploy scan-trace collapse + softened zero-leads report state (2026-08-17T22:43:24Z)
+# trigger: naturalize Reddit query generation + lower Harshmaur volume caps (2026-08-18T12:28:15Z)
+# trigger: remove Settings tab, relocate Reddit connect into Replies (2026-08-18T13:38:25Z)
+# trigger: collapse product UI into single report (business card + relevant posts) (2026-08-18T15:58:03Z)
+# trigger: Reddit Direct-URL search (startUrls + fastMode:false) as primary discovery (2026-08-18T22:35:32Z)
+# trigger: natural pain-language prompt (full clauses, not clipped keyword fragments) (2026-08-19T01:54:45Z)
+# trigger: fix Reddit query generator bugs -- contractions, blanket exclusions, near-dup word order, actor timeout (2026-08-19T02:48:42Z)
+# trigger: minimize Discovery Profile to 3 sections, drop all NOT clauses, fix quoted-fragment truncation (2026-08-19T04:50:47Z)
+# trigger: Reddit discovery reliability -- retry transient Apify failures, chunked query batches, retrying status (2026-08-19T17:12:55Z)
+# trigger: Simplify Reddit query generation -- plain natural-language, no boolean/quotes, capped 3/3/2 (2026-08-19T22:27:09Z)
+# trigger: Cap discovery-terms UI add-controls to 3/3/2 per category (2026-08-19T23:02:09Z)
+# trigger: checkpoint Reddit discovery across job retries, 9-query cap with per-query post budget, disable real-scan prove step (2026-08-19T23:54:27Z)
+# trigger: customerProblemLanguage prompt now generates market-anchored search concepts, not raw complaint sentences (2026-08-20T00:17:20Z)
+# trigger: customerProblemLanguage caps at up to 5 (no padding), semantic minimum-context composition instead of category-concatenation (2026-08-20T14:29:21Z)
+# trigger: cap discovery-terms initial display to 3 per card, not just future adds (2026-08-20T14:46:30Z)
+# trigger: cap Apify discovery concurrency, abort orphaned runs on client timeout (2026-08-20T15:08:56Z)
+# trigger: abort-before-retry invariant hardened, concurrency defaults to full query cap (2026-08-20T15:36:41Z)
+# trigger: widen Reddit discovery window to 1 year, 50 posts per query (2026-08-20T19:15:01Z)
+# trigger: disable thread enrichment run by default, relax publish gate to match (2026-08-20T19:29:44Z)
+# trigger: fast homepage-only first-pass business profile, full analysis refines in background (2026-08-21T01:25:07Z)
+# trigger: optional competitor website analysis sidecar, homepage-only fast pass appended to Reddit query planning (2026-08-21T02:24:49Z)
+# trigger: restructure setup flow -- competitors step before review, hide preliminary profile behind a refining wait screen (2026-08-21T03:13:32Z)
+# trigger: replace Reddit conversations list with a single-card horizontal carousel (2026-08-21T03:34:22Z)
+# trigger: MVP AI visibility tracking -- weekly ChatGPT/Gemini/Perplexity scans via Apify, deterministic + AI mention analysis (2026-08-21T16:17:22Z)

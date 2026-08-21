@@ -32,6 +32,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
+      labels:
+        org.opencontainers.image.revision: ${RELEASE_SHA:-unknown}
     command: ["node", "scripts/background-worker.mjs", "migrate"]
     environment: *app-environment
     depends_on:
@@ -44,6 +46,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.web
+      labels:
+        org.opencontainers.image.revision: ${RELEASE_SHA:-unknown}
+        org.opencontainers.image.created: ${RELEASE_BUILT_AT:-unknown}
     restart: unless-stopped
     init: true
     env_file:
@@ -63,6 +68,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
+      labels:
+        org.opencontainers.image.revision: ${RELEASE_SHA:-unknown}
+        org.opencontainers.image.created: ${RELEASE_BUILT_AT:-unknown}
     command: ["node", "scripts/background-worker.mjs", "work"]
     restart: unless-stopped
     init: true

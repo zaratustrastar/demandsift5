@@ -1,0 +1,161 @@
+name: Phase1 verify deployed code and env
+
+# Proves what production is actually running before anything is tuned.
+# Reports back as a PR comment because Actions logs are only retrievable
+# through blob storage.
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/phase1-verify-deployment.yml
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  verify:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
+
+      - name: Collect deployment truth
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -u
+          out=/tmp/phase1.md
+          : > "$out"
+
+          BRANCH_SHA="$(git rev-parse HEAD)"
+          {
+            echo "## Phase 1 — what production is actually running"
+            echo
+            echo "branch head: \`$BRANCH_SHA\`"
+            echo
+            echo "### Containers"
+            echo
+            echo '```'
+          } >> "$out"
+
+          docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}' \
+            | grep -i demandsift >> "$out" 2>/dev/null || echo "(no demandsift containers found)" >> "$out"
+          echo '```' >> "$out"
+
+          # Prove which code is inside each container by grepping the built
+          # bundle for markers unique to specific commits. This is more reliable
+          # than a label, which can be stale or absent.
+          probe_container() {
+            local svc="$1"
+            local cid
+            cid="$(docker ps --filter "name=demandsift-${svc}" --format '{{.ID}}' | head -1)"
+            if [ -z "$cid" ]; then
+              echo "- **$svc**: container not found" >> "$out"
+              return 0
+            fi
+            echo "" >> "$out"
+            echo "**$svc** (\`$cid\`)" >> "$out"
+            echo '```' >> "$out"
+            for marker in \
+              "prioritizeCandidates" \
+              "Embedding prefilter unavailable" \
+              "CONCEPT_SYNONYMS" \
+              "conversationThemes" \
+              "discoveryProfile" \
+              "stopAfterUnderstanding" \
+              "researchScore" \
+              "reviewFirst"
+            do
+              if docker exec "$cid" sh -c "grep -rlF -- '$marker' /app 2>/dev/null | head -1" | grep -q .; then
+                echo "PRESENT  $marker" >> "$out"
+              else
+                echo "MISSING  $marker" >> "$out"
+              fi
+            done
+            echo '```' >> "$out"
+
+            # Whitelisted, non-secret runtime config only.
+            echo "runtime Reddit config seen by $svc:" >> "$out"
+            echo '```' >> "$out"
+            docker exec "$cid" sh -c 'for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET BACKGROUND_WORKER_MODE APP_RUNTIME_ENV; do v=$(printenv "$k" || true); echo "$k=${v:-<unset>}"; done; for k in APIFY_TOKEN OPENAI_API_KEY; do v=$(printenv "$k" || true); if [ -n "$v" ]; then echo "$k=<set:${#v} chars>"; else echo "$k=<unset>"; fi; done' >> "$out" 2>/dev/null || echo "(exec failed)" >> "$out"
+            echo '```' >> "$out"
+          }
+
+          echo "" >> "$out"
+          echo "### Code markers inside running containers" >> "$out"
+          probe_container web
+          probe_container worker
+
+          # The authoritative env file, per vps-release-deploy.yml.
+          ENV_FILE=/opt/demandsift5-pr1/deploy/vps.env
+          {
+            echo ""
+            echo "### $ENV_FILE (whitelisted keys only)"
+            echo '```'
+          } >> "$out"
+          if sudo -n test -f "$ENV_FILE" 2>/dev/null || test -f "$ENV_FILE"; then
+            for k in APIFY_REDDIT_ACTOR_ID APIFY_REDDIT_MAX_RESULTS APIFY_REDDIT_ENRICHMENT_LIMIT \
+                     APIFY_REDDIT_ENRICHMENT_COMMENTS APIFY_REDDIT_TIME_RANGE \
+                     REDDIT_ACQUISITION_CANDIDATES REDDIT_TRIAGE_BUDGET REDDIT_ENRICHMENT_BUDGET \
+                     BACKGROUND_WORKER_MODE APP_RUNTIME_ENV REDDIT_PROVIDER; do
+              line="$( (sudo -n cat "$ENV_FILE" 2>/dev/null || cat "$ENV_FILE") | grep -E "^${k}=" | head -1 || true)"
+              echo "${line:-${k}=<not set in file>}" >> "$out"
+            done
+            # Secrets: presence only, never values.
+            for k in APIFY_TOKEN OPENAI_API_KEY POSTGRES_PASSWORD; do
+              if ( (sudo -n cat "$ENV_FILE" 2>/dev/null || cat "$ENV_FILE") | grep -qE "^${k}=" ); then
+                echo "${k}=<present, redacted>" >> "$out"
+              else
+                echo "${k}=<absent>" >> "$out"
+              fi
+            done
+          else
+            echo "(env file not readable by the runner)" >> "$out"
+          fi
+          echo '```' >> "$out"
+
+          COMPOSE="$GITHUB_WORKSPACE/deploy/compose.vps.yaml"
+          WEB_ENVFILE=$(sed -n '/^  web:/,/^  worker:/p' "$COMPOSE" | grep -c 'vps.env' || echo 0)
+          WORKER_ENVFILE=$(sed -n '/^  worker:/,/^  caddy:/p' "$COMPOSE" | grep -c 'vps.env' || echo 0)
+          {
+            echo ""
+            echo "### compose wiring"
+            echo '```'
+            echo "web    vps.env references: $WEB_ENVFILE"
+            echo "worker vps.env references: $WORKER_ENVFILE"
+            echo '```'
+          } >> "$out"
+
+          head -c 60000 "$out" > /tmp/phase1.trimmed.md
+
+      - name: Publish the report to a diagnostics branch
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          test -f /tmp/phase1.trimmed.md || echo "collection produced no output" > /tmp/phase1.trimmed.md
+
+          # Comment posting from this runner silently no-ops, so the report is
+          # committed to a dedicated branch where it can be read via the API.
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p diagnostics
+          cp /tmp/phase1.trimmed.md "diagnostics/phase1-$(date -u +%Y%m%dT%H%M%SZ).md"
+          cp /tmp/phase1.trimmed.md diagnostics/phase1-latest.md
+          git checkout -B diagnostics-reports
+          git add -f diagnostics
+          git commit -m "phase1 deployment verification report" || echo "nothing to commit"
+          git push -f origin diagnostics-reports || echo "push failed"
+
+          echo "----- REPORT (also in job log) -----"
+          cat /tmp/phase1.trimmed.md

@@ -1,0 +1,28 @@
+name: One-shot monitoring acceptance diagnostic
+
+on:
+  push:
+    branches:
+      - codex/monitoring-live-diagnostic-20260821
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 8
+    steps:
+      - name: Inspect exact acceptance scan without secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scan_id='scan_327ce0c3ce28416899842de87262fed6'
+          sudo -n /usr/local/sbin/demandsift-release inspect
+          echo "=== sanitized scan status ==="
+          sudo -n /usr/local/sbin/demandsift-release scan-status "$scan_id"
+          echo "=== aggregate funnel diagnostics ==="
+          sudo -n /usr/local/sbin/demandsift-release diagnose "$scan_id"

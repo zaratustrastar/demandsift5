@@ -21,6 +21,14 @@ async function compile(relativePath, replacements = {}) {
 const directAi = await import(await compile("../lib/server/ai.ts"));
 const usageModule = moduleUrl(`
   export function estimateAiCostUsd() { return 0; }
+  export function combineTokenUsage(records) {
+    return records.reduce((total, row) => ({
+      inputTokens: total.inputTokens + (row.inputTokens || 0),
+      outputTokens: total.outputTokens + (row.outputTokens || 0),
+      cachedInputTokens: (total.cachedInputTokens || 0) + (row.cachedInputTokens || 0),
+      cacheWriteInputTokens: (total.cacheWriteInputTokens || 0) + (row.cacheWriteInputTokens || 0),
+    }), { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 });
+  }
 `);
 const providerModule = await import(await compile("../lib/providers/openai.server.ts", {
   "@/lib/ai/usage": usageModule,

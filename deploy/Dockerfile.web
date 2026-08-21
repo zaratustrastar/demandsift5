@@ -34,7 +34,13 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
-COPY --from=build --chown=node:node /app /app
+# Vinext produces a self-contained server bundle. Copy only that runtime
+# artifact so production images do not retain source files, build tooling, or
+# the full development dependency tree.
+COPY --from=build --chown=node:node /app/dist/standalone /app/dist/standalone
+# Keep the tiny package manifest at the historical root location expected by
+# the already-installed rollback-safe VPS release validator.
+COPY --from=build --chown=node:node /app/dist/standalone/package.json /app/package.json
 
 USER node
 

@@ -224,27 +224,35 @@ test("cross-domain redirects are rejected before resolving or fetching the new h
   assert.deepEqual(resolverCalls, ["example.com", "example.com"]);
 });
 
-test("response byte limits still cancel oversized bodies", async () => {
+test("response byte limits safely analyze a useful prefix and cancel the oversized remainder", async () => {
   let cancelled = false;
   const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(
+        `<html><title>Large public site</title><body>${"Useful public product and customer evidence. ".repeat(900)}`,
+      ));
+      controller.enqueue(new TextEncoder().encode("ignored trailing hydration payload"));
+    },
     cancel() {
       cancelled = true;
     },
   });
 
-  await assert.rejects(
-    crawlWebsite("https://example.com", {
-      maxResponseBytes: 32_000,
-      resolver: async () => [PUBLIC_V4],
-      fetchImpl: async () => new Response(body, {
-        status: 200,
-        headers: {
-          "content-length": "32001",
-          "content-type": "text/html",
-        },
-      }),
+  const result = await crawlWebsite("https://example.com", {
+    maxPages: 1,
+    maxResponseBytes: 32_000,
+    resolver: async () => [PUBLIC_V4],
+    fetchImpl: async () => new Response(body, {
+      status: 200,
+      headers: {
+        "content-length": "1000000",
+        "content-type": "text/html",
+      },
     }),
-    /32000-byte response limit/,
-  );
+  });
+
+  assert.equal(result.pages.length, 1);
+  assert.equal(result.totalBytes, 32_000);
+  assert.match(result.pages[0].text, /Useful public product and customer evidence/);
   assert.equal(cancelled, true);
 });

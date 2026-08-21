@@ -58,7 +58,13 @@ function bytesToBase64Url(bytes: Uint8Array): string {
 }
 
 function base64UrlToBytes(value: string): Uint8Array<ArrayBuffer> {
+  if (!/^[A-Za-z\d_-]+$/.test(value)) {
+    throw new Error("Reddit OAuth state is invalid.");
+  }
   const decoded = Buffer.from(value, "base64url");
+  if (decoded.toString("base64url") !== value) {
+    throw new Error("Reddit OAuth state is invalid.");
+  }
   const bytes = new Uint8Array(decoded.byteLength);
   bytes.set(decoded);
   return bytes;

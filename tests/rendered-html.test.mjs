@@ -49,7 +49,17 @@ test("returns a structured authorization error without crashing the production b
 });
 
 test("keeps claims, access, and provider boundaries explicit", async () => {
-  const [fixture, mockProvider, crawler, stripe, repository, presenter, packageJson] = await Promise.all([
+  const [
+    fixture,
+    mockProvider,
+    crawler,
+    stripe,
+    repository,
+    presenter,
+    packageJson,
+    dashboard,
+    fromScan,
+  ] = await Promise.all([
     readFile(new URL("../components/demand-intelligence/demo-data.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/providers/mock-reddit.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/security/website-crawler.ts", import.meta.url), "utf8"),
@@ -57,6 +67,8 @@ test("keeps claims, access, and provider boundaries explicit", async () => {
     readFile(new URL("../lib/server/repository.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/server/presenter.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../components/demand-intelligence/ProductDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/demand-intelligence/from-scan.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(fixture, /every Reddit conversation shown here are fictional demo fixtures/i);
@@ -71,4 +83,24 @@ test("keeps claims, access, and provider boundaries explicit", async () => {
   assert.match(presenter, /additionalLockedCounts/);
   assert.match(packageJson, /"postgres"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
+  assert.match(dashboard, /opportunity\.disclosureRequired/);
+  assert.match(dashboard, /Keeps the product out unless it helps/);
+  assert.doesNotMatch(dashboard, /verifiedClaims\.length.*claims source-checked/);
+  assert.match(fromScan, /disclosureRequired: opportunity\.disclosureRequired/);
+  assert.match(presenter, /mentionProduct: opportunity\.mentionProduct === true/);
+  assert.match(presenter, /disclosureRequired: opportunity\.disclosureRequired === true/);
+  assert.match(
+    fromScan,
+    /matchReasons: \[opportunity\.customerProblem, opportunity\.whyItMatters\]/,
+  );
+});
+
+test("dashboard evidence labels preserve website and Reddit provenance", async () => {
+  const mapper = await readFile(
+    new URL("../components/demand-intelligence/from-scan.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(mapper, /source\.kind === "website"/);
+  assert.match(mapper, /Verified business website evidence/);
+  assert.match(mapper, /Public Reddit evidence via Apify test source/);
 });

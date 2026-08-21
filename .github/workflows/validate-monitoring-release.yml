@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  CODE_SHA: 1b67298f0a20ad1845c48164895b0c70aee8abe4
+  CODE_SHA: cf78890c2c6ad2827fd70b17d15a6401a3e3857d
   APP_URL: https://demandsift.143-244-154-139.sslip.io
 
 jobs:
@@ -170,7 +170,15 @@ jobs:
               monitor_complete=true
               break
             fi
-            if [ "$monitor_status" = failed ]; then exit 1; fi
+            if [ "$monitor_status" = failed ]; then
+              python3 - "$monitor" <<'PY'
+          import json, sys
+          run=(json.load(open(sys.argv[1])).get("latestRun") or {})
+          print("monitor_error=" + str(run.get("error") or ""))
+          print("monitor_actor_run_id=" + str(run.get("actorRunId") or ""))
+          PY
+              exit 1
+            fi
             sleep 5
           done
           test "$monitor_complete" = true

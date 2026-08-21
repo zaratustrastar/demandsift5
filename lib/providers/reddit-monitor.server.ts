@@ -1,4 +1,5 @@
 import type { RedditDiscoveryCandidate } from "@/lib/domain/types";
+import { REDDIT_MONITOR_LIMITS } from "@/lib/intelligence/reddit-monitor-limits";
 import { harshmaurCandidate } from "@/lib/providers/reddit-harshmaur.server";
 
 export const REDDIT_MONITOR_ACTOR_ID = "harshmaur/reddit-search-scraper";
@@ -43,7 +44,7 @@ export function normalizeWatchTerms(values: readonly string[]): string[] {
     if (term.length < 2 || seen.has(key)) continue;
     seen.add(key);
     terms.push(term);
-    if (terms.length >= 40) break;
+    if (terms.length >= REDDIT_MONITOR_LIMITS.maxWatchTerms) break;
   }
   return terms;
 }
@@ -74,8 +75,18 @@ export function buildRedditMonitorActorInput(input: {
     postedBefore: input.to.toISOString(),
     commentedAfter: input.from.toISOString(),
     commentedBefore: input.to.toISOString(),
-    maxPostsCount: boundedInteger(environment.REDDIT_MONITOR_MAX_POSTS_PER_TERM, 10, 1, 100),
-    maxCommentsCount: boundedInteger(environment.REDDIT_MONITOR_MAX_COMMENTS_PER_TERM, 10, 1, 100),
+    maxPostsCount: boundedInteger(
+      environment.REDDIT_MONITOR_MAX_POSTS_PER_TERM,
+      REDDIT_MONITOR_LIMITS.maxPostsPerTerm,
+      1,
+      REDDIT_MONITOR_LIMITS.maxPostsPerTerm,
+    ),
+    maxCommentsCount: boundedInteger(
+      environment.REDDIT_MONITOR_MAX_COMMENTS_PER_TERM,
+      REDDIT_MONITOR_LIMITS.maxCommentsPerTerm,
+      1,
+      REDDIT_MONITOR_LIMITS.maxCommentsPerTerm,
+    ),
     crawlCommentsPerPost: false,
     includeNSFW: false,
     sentimentAnalysis: false,
@@ -219,7 +230,7 @@ export async function fetchRedditMonitorCandidates(input: {
   const datasetUrl = new URL(`/v2/datasets/${encodeURIComponent(datasetId)}/items`, "https://api.apify.com");
   datasetUrl.searchParams.set("clean", "true");
   datasetUrl.searchParams.set("format", "json");
-  datasetUrl.searchParams.set("limit", "1000");
+  datasetUrl.searchParams.set("limit", String(REDDIT_MONITOR_LIMITS.maxResultsPerRun));
   const datasetResponse = await fetchImpl(datasetUrl, {
     headers: { authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(90_000),
@@ -229,13 +240,14 @@ export async function fetchRedditMonitorCandidates(input: {
   }
   const rawItems = await responseJson(datasetResponse);
   if (!Array.isArray(rawItems)) throw new Error("Reddit monitoring dataset was not an array.");
-  const parsed = rawItems
+  const limitedItems = rawItems.slice(0, REDDIT_MONITOR_LIMITS.maxResultsPerRun);
+  const parsed = limitedItems
     .map((value) => candidateFromActorItem(value, input.from.toISOString(), input.to.toISOString()))
     .filter((value): value is RedditDiscoveryCandidate => Boolean(value));
   return {
     actorRunId,
     candidates: mergeCandidates(parsed),
-    fetched: rawItems.length,
-    rejected: rawItems.length - parsed.length,
+    fetched: limitedItems.length,
+    rejected: limitedItems.length - parsed.length,
   };
 }

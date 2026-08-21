@@ -1,0 +1,6 @@
+{
+  "id": "verify-harshmaur-live-vps-2026-08-17",
+  "ops": ["runtime", "reddit-config"],
+  "inspectScans": [],
+  "startScan": { "websiteUrl": "https://linear.app", "pollSeconds": 1500 }
+}

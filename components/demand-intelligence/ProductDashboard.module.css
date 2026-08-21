@@ -14,8 +14,8 @@
   --amber: #a66814;
   --amber-soft: #fff4dc;
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 246px minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   color: var(--ink);
   background: var(--canvas);
   font-family:
@@ -42,6 +42,39 @@
 .productShell textarea:focus-visible {
   outline: 3px solid rgba(109, 90, 230, 0.23);
   outline-offset: 2px;
+}
+
+.minimalHeader {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 34px;
+  background: #10251d;
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.minimalHeader strong {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  letter-spacing: -0.03em;
+}
+
+.minimalHeaderSpacer {
+  flex: 1 1 auto;
+}
+
+.minimalHeader button {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.singleReport {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
 }
 
 .glyph {
@@ -570,6 +603,88 @@
   padding: 25px;
 }
 
+.monitoringCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px 28px;
+  margin-bottom: 30px;
+  padding: 25px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(200, 243, 107, 0.15), transparent 36%),
+    var(--surface);
+}
+
+.monitoringCard h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.18;
+  letter-spacing: -0.04em;
+}
+
+.monitoringCard p {
+  max-width: 720px;
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.monitoringToggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  gap: 9px;
+  min-height: 38px;
+  padding: 0 13px;
+  color: var(--green-dark);
+  background: var(--green-soft);
+  border: 1px solid #cfe4d6;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.monitoringToggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.monitoringTerms {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.monitoringTerms textarea {
+  width: 100%;
+  min-height: 108px;
+  resize: vertical;
+  padding: 12px 13px;
+  color: var(--ink);
+  background: #fbfcfb;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  line-height: 1.55;
+}
+
+.monitoringFooter {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.monitoringFooter small {
+  color: var(--faint);
+}
+
 .sectionHeadingRow,
 .replyHeader {
   display: flex;
@@ -893,6 +1008,161 @@
   color: #525f59;
   font-size: 10px;
   line-height: 1.5;
+}
+
+/* Single-card horizontal carousel: one Reddit conversation at a time,
+   ordered by AI reliability (rankedOpportunities is unchanged), with large
+   arrow buttons and dot pagination below the card instead of a stacked
+   list. */
+.carousel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  outline: none;
+}
+
+.carousel > .opportunityCard {
+  width: 100%;
+}
+
+.carouselTopline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.mostReliableBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  color: var(--green-dark);
+  background: var(--green-soft);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.mostReliableBadge .glyph {
+  color: #c99a1f;
+}
+
+.reliabilityBadge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 6px 12px;
+  background: var(--green-soft);
+  border-radius: 12px;
+  line-height: 1.25;
+}
+
+.reliabilityBadge strong {
+  color: var(--green-dark);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.reliabilityBadge em {
+  color: #4c7c67;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+}
+
+.carouselActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #edf0ee;
+}
+
+.carouselActions .primaryButton {
+  flex: 1 1 auto;
+}
+
+.carouselActions a {
+  flex: 1 1 auto;
+  text-decoration: none;
+}
+
+.carouselNav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+}
+
+.carouselArrow {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.carouselArrow:hover {
+  border-color: #bfc9c2;
+  background: #f5f7f5;
+  transform: translateY(-1px);
+}
+
+.carouselPosition {
+  min-width: 64px;
+  text-align: center;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.carouselDots {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+  max-width: 320px;
+}
+
+.carouselDot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  background: #dbe2dd;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 140ms ease, transform 140ms ease;
+}
+
+.carouselDot:hover {
+  background: #bfc9c2;
+}
+
+.carouselDotActive,
+.carouselDotActive:hover {
+  background: var(--green);
+  transform: scale(1.15);
+}
+
+.carouselCaption {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  text-align: center;
 }
 
 .twoColumnGrid {
@@ -2093,6 +2363,7 @@
   }
 
   .profileCard,
+  .monitoringCard,
   .opportunityCard,
   .insightCard,
   .competitorCard,
@@ -2101,6 +2372,25 @@
   .pricingCard,
   .settingsCard {
     padding: 17px;
+  }
+
+  .monitoringCard {
+    grid-template-columns: 1fr;
+  }
+
+  .monitoringToggle,
+  .monitoringTerms,
+  .monitoringFooter {
+    grid-column: 1;
+  }
+
+  .monitoringFooter {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .monitoringFooter .primaryButton {
+    width: 100%;
   }
 
   .sectionHeadingRow,
@@ -2158,3 +2448,60 @@
     text-align: left;
   }
 }
+
+/* Recurring struggle/request themes with inspectable evidence. */
+.themeCard {
+  border: 1px solid var(--line, #dde3dc);
+  border-radius: 14px;
+  background: #fff;
+  padding: 16px 18px;
+}
+
+.themeHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.themeHead h3 { margin: 0; font-size: 16px; }
+
+.themeCount {
+  font-size: 12px;
+  color: var(--muted, #66716a);
+  white-space: nowrap;
+}
+
+.themeToggle {
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--green, #1f7550);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.themeEvidence {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line, #dde3dc);
+  display: grid;
+  gap: 8px;
+}
+
+.themeEvidence li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.themeEvidence a { color: var(--ink, #18231d); }
+.themeEvidence em { font-style: normal; color: var(--muted, #66716a); white-space: nowrap; }

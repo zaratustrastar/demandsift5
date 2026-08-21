@@ -5,7 +5,13 @@ import { assertRateLimit } from "@/lib/server/rate-limit";
 import { createScan, enqueueScanRun, runScan } from "@/lib/server/scan-workflow";
 import { getStateRepository } from "@/lib/server/repository";
 
-type CreateScanBody = { websiteUrl?: unknown; website?: unknown; defer?: unknown };
+type CreateScanBody = {
+  websiteUrl?: unknown;
+  website?: unknown;
+  defer?: unknown;
+  /** Create only. The client then analyzes, lets the user review, and starts the scan. */
+  reviewFirst?: unknown;
+};
 
 function responseWithWorkspace(payload: unknown, status: number, cookie: string): Response {
   return Response.json(payload, {
@@ -48,6 +54,13 @@ export async function POST(request: Request) {
       actor = await createWorkspace();
     }
     const scan = await createScan(actor.workspaceId, validated.url.toString());
+    if (body.reviewFirst === true) {
+      // The discovery-profile step sits between analysis and Reddit retrieval,
+      // so creation must not start the scan. Enqueuing here would have the
+      // worker searching Reddit before the user has seen what we plan to
+      // look for.
+      return responseWithWorkspace(await presentScan(scan), 201, workspaceCookie(actor));
+    }
     const workerMode = process.env.BACKGROUND_WORKER_MODE?.trim().toLowerCase();
     const canDefer =
       body.defer === true && workerMode === "queue" && getStateRepository().kind === "postgres";

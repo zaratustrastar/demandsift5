@@ -1,0 +1,44 @@
+name: Clear stale release build
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/clear-stale-release-build-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  clear-stale-build:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect and stop only orphaned non-Compose npm build container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "runner_user=$(id -un)"
+          echo "--- matching host processes ---"
+          ps -eo pid,ppid,user,etime,cmd | grep -E 'demandsift-release build|docker build|npm ci --omit=dev' | grep -v grep || true
+
+          echo "--- running Docker containers ---"
+          docker ps --format 'id={{.ID}} image={{.Image}} status={{.Status}} name={{.Names}}' || exit 20
+
+          found=0
+          while IFS= read -r container; do
+            [ -n "$container" ] || continue
+            project="$(docker inspect --format '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}' "$container" 2>/dev/null || true)"
+            command="$(docker inspect --format '{{json .Config.Cmd}}' "$container" 2>/dev/null || true)"
+            if [ -z "$project" ] && [[ "$command" == *"npm ci --omit=dev"* ]]; then
+              echo "stopping_orphan_build_container=$container"
+              docker rm -f "$container"
+              found=1
+            fi
+          done < <(docker ps -q)
+
+          echo "orphan_build_container_stopped=$found"
+          sleep 3
+          echo "--- matching host processes after cleanup ---"
+          ps -eo pid,ppid,user,etime,cmd | grep -E 'demandsift-release build|docker build|npm ci --omit=dev' | grep -v grep || true

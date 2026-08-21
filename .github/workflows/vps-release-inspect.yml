@@ -1,0 +1,52 @@
+name: DemandSift VPS release inspect
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/vps-release-inspect.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect deploy state without secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          APP=/opt/demandsift5-pr1
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="$APP"
+          cd "$APP"
+          echo "whoami=$(whoami)"
+          echo "hostname=$(hostname)"
+          echo "--- checkout ---"
+          git status --short
+          echo "local_head=$(git rev-parse HEAD)"
+          git fetch --quiet origin feature/reddit-intelligence-pipeline
+          echo "remote_head=$(git rev-parse FETCH_HEAD)"
+          echo "ahead_behind_local_vs_remote=$(git rev-list --left-right --count HEAD...FETCH_HEAD)"
+          echo "dirty_stat_vs_remote:"
+          git diff --stat FETCH_HEAD -- . ':!deploy/vps.env' || true
+          echo "--- sudo/docker capability ---"
+          if sudo -n true 2>/dev/null; then
+            echo "passwordless_sudo=true"
+            sudo -n docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+            echo "compose_projects:"
+            sudo -n docker compose ls || true
+            echo "demand_images:"
+            sudo -n docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' | grep -Ei 'demandsift|threadline' | head -n 30 || true
+          else
+            echo "passwordless_sudo=false"
+          fi
+          echo "--- deploy files ---"
+          find . -maxdepth 2 -type f \( -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' -o -name 'compose*.yml' -o -name 'compose*.yaml' -o -name 'Dockerfile*' \) -print | sort
+          echo "--- resource headroom ---"
+          df -h / "$APP" | tail -n +2
+          free -h

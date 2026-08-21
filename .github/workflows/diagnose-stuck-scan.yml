@@ -1,0 +1,158 @@
+name: Diagnose failed daily monitor
+
+on:
+  push:
+    branches:
+      - codex/diagnose-stuck-scan-20260821
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Read safe release and discovery status
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n /usr/local/sbin/demandsift-release scan-status scan_65b79e33b60f4fa2b49a457c3d438c5e
+          sudo -n /usr/local/sbin/demandsift-release inspect
+
+      - name: Locate diagnostic credential metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(find /home/demandsift-dev -maxdepth 7 -type f -name apify-token -print 2>/dev/null | wc -l)"
+          echo "diagnostic_token_file_count=$count"
+          find /home/demandsift-dev -maxdepth 7 -type f -name apify-token -printf 'diagnostic_token_file=%p mode=%m owner=%u:%g\n' 2>/dev/null || true
+
+      - name: Read strictly filtered application failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          sensitive = re.compile(r"(?:Bearer\s+|apify_api_|github_pat_|ghp_)[A-Za-z0-9._-]+", re.I)
+          url = re.compile(r"https?://\S+", re.I)
+          credential_assignment = re.compile(
+              r"(?i)(token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,}]+"
+          )
+          allowed = re.compile(
+              r"reddit_monitor|monitoring|monitor_scan|job_failed|actor ended|actor timed out|timed-out|timeout",
+              re.I,
+          )
+
+          for container in ("demandsift2-web-1", "demandsift2-worker-1"):
+              completed = subprocess.run(
+                  ["docker", "logs", "--since", "2026-08-21T14:34:00Z", container],
+                  text=True,
+                  capture_output=True,
+                  timeout=60,
+              )
+              combined = (completed.stdout or "") + "\n" + (completed.stderr or "")
+              selected = []
+              for raw in combined.splitlines():
+                  if not allowed.search(raw):
+                      continue
+                  line = sensitive.sub("<redacted-credential>", raw)
+                  line = credential_assignment.sub(r"\1=<redacted>", line)
+                  line = url.sub("<redacted-url>", line)
+                  selected.append(line[:800])
+              print(f"{container}_docker_exit={completed.returncode}")
+              print(f"{container}_sanitized_lines={len(selected)}")
+              for line in selected[-80:]:
+                  print(f"{container}_log={line}")
+          PY
+
+      - name: Read sanitized recent Apify failure when diagnostic copy exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime
+          import json
+          import pathlib
+          import re
+          import urllib.parse
+          import urllib.request
+
+          candidates = list(pathlib.Path("/home/demandsift-dev").glob("**/apify-token"))
+          if not candidates:
+              print("apify_diagnostic_skipped=credential_copy_absent")
+              raise SystemExit(0)
+
+          token = candidates[0].read_text().strip()
+          if not token:
+              print("apify_diagnostic_skipped=credential_copy_empty")
+              raise SystemExit(0)
+
+          def request_json(url):
+              request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          payload = request_json("https://api.apify.com/v2/actor-runs?desc=1&limit=30")
+          items = ((payload.get("data") or {}).get("items") or [])
+          threshold = datetime.datetime.fromisoformat("2026-08-21T14:34:00+00:00")
+          recent = []
+          for item in items:
+              started = str(item.get("startedAt") or "")
+              try:
+                  stamp = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
+              except ValueError:
+                  continue
+              if stamp >= threshold:
+                  recent.append(item)
+
+          print("recent_actor_runs=" + str(len(recent)))
+          for item in recent:
+              safe = {
+                  "id": item.get("id"),
+                  "actId": item.get("actId"),
+                  "status": item.get("status"),
+                  "statusMessage": item.get("statusMessage"),
+                  "startedAt": item.get("startedAt"),
+                  "finishedAt": item.get("finishedAt"),
+              }
+              print("actor_run=" + json.dumps(safe, separators=(",", ":"), sort_keys=True))
+
+          failed = next(
+              (item for item in recent if item.get("status") in {"FAILED", "ABORTED", "TIMED-OUT"}),
+              None,
+          )
+          if not failed:
+              print("apify_failed_run=not_found")
+              raise SystemExit(0)
+
+          run_id = str(failed.get("id") or "")
+          request = urllib.request.Request(
+              "https://api.apify.com/v2/logs/" + urllib.parse.quote(run_id),
+              headers={"Authorization": "Bearer " + token},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              log = response.read(2_000_000).decode("utf-8", "replace")
+
+          sensitive = re.compile(r"(?:Bearer\s+|apify_api_)[A-Za-z0-9._-]+", re.I)
+          url = re.compile(r"https?://\S+", re.I)
+          selected = []
+          for line in log.splitlines():
+              if not re.search(
+                  r"ERROR|WARN|fail|invalid|timeout|timed out|quota|limit|memory|charge",
+                  line,
+                  re.I,
+              ):
+                  continue
+              line = sensitive.sub("<redacted-credential>", line)
+              line = url.sub("<redacted-url>", line)
+              selected.append(line[:600])
+          print("sanitized_error_lines=" + str(len(selected)))
+          for line in selected[-40:]:
+              print("actor_log=" + line)
+          PY

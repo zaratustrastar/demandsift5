@@ -1,0 +1,89 @@
+name: Diagnose recall v3 regression
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/diagnose-recall-v3-regression-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+      - name: Reproduce proposed recall patch without committing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('lib/providers/reddit.server.ts')
+          source = path.read_text()
+          old_type = '  sort: "relevance";\n  time: "day" | "week" | "month" | "year" | "all";\n  includeNSFW: false;'
+          new_type = '  sort: "relevance" | "new";\n  time: "day" | "week" | "month" | "year" | "all";\n  postDateLimit?: string;\n  commentDateLimit?: string;\n  includeNSFW: false;'
+          if old_type in source:
+              source = source.replace(old_type, new_type, 1)
+          if 'const perSearchBudget' not in source:
+              start = source.find('    const maxItems = Math.min(\n', source.find('async discover('))
+              end = source.find('    );\n', start) + len('    );\n')
+              budget = (
+                  '    const maxItems = Math.min(\n'
+                  '      this.maximumItems,\n'
+                  '      Math.max(40, Math.min(50, request.limit * 2)),\n'
+                  '    );\n'
+                  '    const perSearchBudget = Math.max(5, Math.ceil(maxItems / Math.max(1, searches.length)));\n'
+                  '    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))\n'
+                  '      ? Date.parse(request.since)\n'
+                  '      : null;\n'
+                  '    const dateLimit = sinceMs === null\n'
+                  '      ? undefined\n'
+                  '      : new Date(sinceMs).toISOString().slice(0, 10);\n'
+              )
+              source = source[:start] + budget + source[end:]
+          if 'postDateLimit: dateLimit' not in source:
+              start = source.find('      sort: "relevance",', source.find('const discoveryInput'))
+              marker = '      maxComments: 0,\n'
+              end = source.find(marker, start) + len(marker)
+              replacement = (
+                  '      sort: "new",\n'
+                  '      time: boundedSearchTime(this.timeRange, request.since),\n'
+                  '      ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),\n'
+                  '      includeNSFW: false,\n'
+                  '      maxItems,\n'
+                  '      maxPostCount: perSearchBudget,\n'
+                  '      maxComments: perSearchBudget,\n'
+              )
+              source = source[:start] + replacement + source[end:]
+          path.write_text(source)
+
+          test_path = Path('tests/apify-reddit-provider.test.mjs')
+          test = test_path.read_text()
+          start_marker = '  assert.equal(discovery.maxComments, 0);\n'
+          end_marker = '  assert.equal(Object.hasOwn(discovery, "commentDateLimit"), false);\n'
+          start = test.find(start_marker)
+          end = test.find(end_marker, start) + len(end_marker)
+          replacement = (
+              '  assert.equal(discovery.sort, "new");\n'
+              '  assert.equal(discovery.maxItems, 40);\n'
+              '  assert.equal(discovery.maxPostCount, 5);\n'
+              '  assert.equal(discovery.maxComments, 5);\n'
+              '  assert.ok(discovery.maxPostCount < discovery.maxItems);\n'
+              '  assert.ok(discovery.maxComments > 0);\n'
+              '  assert.equal(startCall.url.searchParams.get("maxItems"), "40");\n'
+              '  assert.equal(startCall.url.searchParams.get("timeout"), "570");\n'
+              '  assert.equal(discovery.time, "week");\n'
+              '  assert.match(discovery.postDateLimit, /^\\d{4}-\\d{2}-\\d{2}$/);\n'
+              '  assert.equal(discovery.commentDateLimit, discovery.postDateLimit);\n'
+          )
+          test_path.write_text(test[:start] + replacement + test[end:])
+          PY
+      - run: npm ci
+      - name: Focused test with full output
+        run: node --test tests/apify-reddit-provider.test.mjs tests/concept-gate-market-evidence.test.mjs tests/demand-intelligence-trust.test.mjs

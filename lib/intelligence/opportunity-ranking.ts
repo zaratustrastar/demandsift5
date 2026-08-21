@@ -29,6 +29,15 @@ export function normalizeSearchText(value: string): string {
     .replace(/[\u0300-\u036f]/g, "")
     .toLocaleLowerCase("en-US")
     .replace(/https?:\/\/\S+/g, " ")
+    // Apostrophes are dropped, not replaced with a space, so a contraction
+    // collapses into one word ("can't" -> "cant", "child's" -> "childs")
+    // instead of splitting into a real word plus an orphaned single-letter
+    // fragment ("can t", "child s"). Downstream code that condenses text
+    // down to its first few surviving words has no way to recognize "t" or
+    // "s" as junk -- they read as content words and end up in generated
+    // search queries, e.g. a real production query was "t lock the tv
+    // remotely" from "can't lock the TV remotely".
+    .replace(/['\u2019]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     .replace(/\s+/g, " ");
@@ -199,7 +208,8 @@ export interface RankingComponents {
   problemLanguage: number;
   buyerIntent: number;
   competitorSignal: number;
-  semanticSimilarity: number;
+  /** Real embedding cosine distance, distinct from the LLM `solutionFit`. */
+  embeddingSimilarity: number;
   quality: number;
   recency: number;
   irrelevantPenalty: number;
@@ -246,7 +256,7 @@ export function rankConversations(
       const problemLanguage = phraseCoverage(text, problems);
       const buyerIntent = phraseCoverage(text, BUYER_PHRASES);
       const competitorSignal = phraseCoverage(text, competitors);
-      const semanticSimilarity = bounded(
+      const embeddingSimilarity = bounded(
         options.semanticSimilarities?.[conversation.externalId] ?? 0,
       );
       const engagement =
@@ -265,7 +275,7 @@ export function rankConversations(
           problemLanguage * 0.23 +
           buyerIntent * 0.2 +
           competitorSignal * 0.1 +
-          semanticSimilarity * 0.18 +
+          embeddingSimilarity * 0.18 +
           quality * 0.04 +
           recency * 0.03 -
           irrelevantPenalty * 0.45,
@@ -275,7 +285,7 @@ export function rankConversations(
       if (buyerIntent >= 0.25) reasons.push("Requests a recommendation or buying guidance");
       if (problemLanguage >= 0.25) reasons.push("Describes a customer problem the business addresses");
       if (competitorSignal >= 0.25) reasons.push("Mentions a relevant competitor or alternative");
-      if (semanticSimilarity >= 0.6) reasons.push("Semantically close to the business use case");
+      if (embeddingSimilarity >= 0.6) reasons.push("Semantically close to the business use case");
       if (irrelevantPenalty > 0) reasons.push("Contains an excluded or irrelevant topic");
 
       return {
@@ -286,7 +296,7 @@ export function rankConversations(
           problemLanguage,
           buyerIntent,
           competitorSignal,
-          semanticSimilarity,
+          embeddingSimilarity,
           quality,
           recency,
           irrelevantPenalty,
@@ -300,7 +310,7 @@ export function rankConversations(
         evidence.productTerm >= 0.2 ||
         evidence.problemLanguage >= 0.2 ||
         evidence.competitorSignal >= 0.2 ||
-        evidence.semanticSimilarity >= 0.6;
+        evidence.embeddingSimilarity >= 0.6;
       return (
         (options.requireBusinessEvidence === false || hasBusinessEvidence) &&
         evidence.irrelevantPenalty < 0.5 &&

@@ -452,6 +452,47 @@ test("two length-limited empty string responses get a bounded 16000-token recove
   ]);
 });
 
+test("empty structured chat responses use the configured comparable fallback model", async () => {
+  const requestedModels = [];
+  const diagnostics = [];
+  const primaryModel = openai.DEFAULT_OPENAI_MODELS.economyModel;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    modelFallbacks: { [primaryModel]: ["gpt-5.5"] },
+    onDiagnostic: (event) => diagnostics.push(event),
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requestedModels.push(request.model);
+      if (request.model === primaryModel) {
+        return new Response(JSON.stringify({
+          id: `chat_empty_${requestedModels.length}`,
+          model: primaryModel,
+          choices: [{ finish_reason: "stop", message: { content: null } }],
+          usage: { prompt_tokens: 10, completion_tokens: 508 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: [triageItem("a")] });
+    },
+  });
+
+  const result = await provider.triageConversations({
+    business,
+    candidates: [candidate("a")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.deepEqual(requestedModels, [primaryModel, primaryModel, primaryModel, "gpt-5.5"]);
+  assert.equal(result.model, "gpt-5.5");
+  assert.equal(result.value[0].externalId, "a");
+  assert.deepEqual(diagnostics.map((event) => event.kind), [
+    "structured_chat_empty_retry",
+    "structured_chat_empty_retry",
+    "model_structured_output_fallback",
+  ]);
+});
+
 test("malformed structured chat JSON is retried without rerunning discovery", async () => {
   const diagnostics = [];
   let calls = 0;

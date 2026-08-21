@@ -167,7 +167,7 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
       discovery: checkpointFromCandidates(unseen, watchTerms, fetched.fetched),
     });
     run = { ...run, scanId: scan.id, updatedAt: new Date().toISOString() };
-    await Promise.all([repository.saveScan(scan), saveRedditMonitorRun(run)]);
+    // The monitor run has a foreign key to runtime_scans. Persist the scan first;\n    // running these writes concurrently can race and make PostgreSQL reject scan_id.\n    await repository.saveScan(scan);\n    await saveRedditMonitorRun(run);
 
     const completedScan = await runScan(scan.id, { jobAttempts: 1, jobMaxAttempts: 1 });
     if (completedScan.status !== "complete" || !completedScan.result) {

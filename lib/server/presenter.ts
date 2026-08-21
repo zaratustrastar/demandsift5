@@ -72,6 +72,11 @@ function publicRelevantConversation(
     provider: source?.provider ?? "reddit",
     dataMode,
     replyId: intelligence.replyId ?? null,
+    // Same 0-100 scale as an opportunity's classification.relevanceScore, so
+    // the frontend can merge opportunities and relevant-but-not-lead
+    // conversations into one carousel ordered by a single reliability axis
+    // instead of two separately-sorted lists.
+    reliabilityScore: Math.max(0, Math.min(100, Math.round(intelligence.researchScore ?? 0))),
   };
 }
 

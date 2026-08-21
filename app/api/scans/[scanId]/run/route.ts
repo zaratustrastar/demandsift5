@@ -1,4 +1,4 @@
-import { apiErrorResponse, requireWorkspace } from "@/lib/server/http";
+import { apiErrorResponse, ApiError, requireWorkspace } from "@/lib/server/http";
 import { presentScan, requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
 import { getStateRepository } from "@/lib/server/repository";
@@ -34,7 +34,18 @@ export async function POST(request: Request, context: RouteContext) {
         { status: 202, headers: { "Cache-Control": "no-store" } },
       );
     }
-    const completed = await runScan(scan.id);
+    let completed;
+    try {
+      completed = await runScan(scan.id);
+    } catch (runError) {
+      // Preserve the specific reason runScan already wrote onto scan.error
+      // (e.g. a Reddit discovery/enrichment or structured-AI failure)
+      // instead of letting apiErrorResponse fall back to its generic
+      // "Something went wrong" message for a plain, unbranded Error.
+      if (runError instanceof ApiError) throw runError;
+      const message = runError instanceof Error ? runError.message : "The scan could not be started.";
+      throw new ApiError(message, 502, "scan_run_failed");
+    }
     return Response.json(await presentScan(completed), {
       status: completed.status === "running" ? 202 : 200,
       headers: { "Cache-Control": "no-store" },

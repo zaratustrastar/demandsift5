@@ -36,7 +36,20 @@ export async function POST(request: Request, context: RouteContext) {
       });
     }
 
-    const analyzed = await runScan(scan.id, { stopAfterUnderstanding: true });
+    let analyzed;
+    try {
+      analyzed = await runScan(scan.id, { stopAfterUnderstanding: true });
+    } catch (runError) {
+      // runScan already persisted the specific reason onto scan.error before
+      // re-throwing; without this catch, the raw Error reaches
+      // apiErrorResponse's generic fallback ("Something went wrong. Please
+      // try again.") and the real, often actionable reason (e.g. "Website
+      // analysis could not read the site: Page did not contain enough
+      // readable public text.") never reaches the browser.
+      if (runError instanceof ApiError) throw runError;
+      const message = runError instanceof Error ? runError.message : "Website analysis failed.";
+      throw new ApiError(message, 502, "website_analysis_failed");
+    }
     if (!analyzed.discoveryProfile && analyzed.status === "failed") {
       throw new ApiError(
         analyzed.error ?? "Website analysis failed.",

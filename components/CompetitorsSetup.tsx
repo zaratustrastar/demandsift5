@@ -70,6 +70,11 @@ export function CompetitorsSetup({
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // What analyzeCompetitors() last actually ran against, so Continue can
+  // tell "URLs were typed but never analyzed" apart from "already analyzed,
+  // just navigate" without a separate button for the user to remember to
+  // press first.
+  const [analyzedUrlsKey, setAnalyzedUrlsKey] = useState("");
 
   // Context mode has no URL to crawl for the primary business, but the
   // business understanding built from the user's own description already
@@ -137,12 +142,7 @@ export function CompetitorsSetup({
     setCompetitorUrls((current) => current.map((url, i) => (i === index ? value : url)));
   }
 
-  async function analyzeCompetitors() {
-    const urls = competitorUrls.map((url) => url.trim()).filter(Boolean);
-    if (urls.length === 0) {
-      setError("Add at least one competitor website first.");
-      return;
-    }
+  async function analyzeCompetitors(urls: string[]): Promise<boolean> {
     setAnalyzing(true);
     setError("");
     try {
@@ -160,8 +160,11 @@ export function CompetitorsSetup({
       }
       setCompetitorProfiles(payload.competitorProfiles ?? []);
       setPhraseEdited(false);
+      setAnalyzedUrlsKey(urls.join("|"));
+      return true;
     } catch (analyzeError) {
       setError(analyzeError instanceof Error ? analyzeError.message : "Something went wrong.");
+      return false;
     } finally {
       setAnalyzing(false);
     }
@@ -195,8 +198,17 @@ export function CompetitorsSetup({
   }
 
   async function saveAndContinue() {
-    setSaving(true);
     setError("");
+    const pendingUrls = competitorUrls.map((url) => url.trim()).filter(Boolean);
+    if (pendingUrls.length > 0 && pendingUrls.join("|") !== analyzedUrlsKey) {
+      // Typing competitor.com fields and pressing Continue is the same
+      // action as the old separate "Analyze competitors" button used to be:
+      // analyze first, show the results for review, then a second Continue
+      // (URLs unchanged now) actually saves and moves on.
+      await analyzeCompetitors(pendingUrls);
+      return;
+    }
+    setSaving(true);
     try {
       if (phraseEdited && competitorProfiles.length > 0) {
         const response = await fetch("/api/competitors", {
@@ -303,16 +315,6 @@ export function CompetitorsSetup({
             </div>
           ))}
         </div>
-        <div className={styles.addRow}>
-          <button
-            type="button"
-            className={styles.secondary}
-            onClick={analyzeCompetitors}
-            disabled={analyzing}
-          >
-            {analyzing ? "Analyzing…" : "Analyze competitors"}
-          </button>
-        </div>
         {error && <p className={styles.error}>{error}</p>}
 
         {competitorProfiles.length > 0 && (
@@ -388,14 +390,14 @@ export function CompetitorsSetup({
       </section>
 
       <footer className={styles.actions}>
-        <button className={styles.secondary} type="button" onClick={onBack} disabled={saving}>
+        <button className={styles.secondary} type="button" onClick={onBack} disabled={analyzing || saving}>
           Back
         </button>
         <button className={styles.skipLink} type="button" onClick={onContinue} disabled={saving}>
           Skip
         </button>
-        <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={saving}>
-          {saving ? "Continuing…" : "Continue"}
+        <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={analyzing || saving}>
+          {analyzing ? "Analyzing competitors…" : saving ? "Continuing…" : "Continue"}
         </button>
       </footer>
     </main>

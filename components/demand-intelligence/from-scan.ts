@@ -59,6 +59,7 @@ type ApiRelevantConversation = {
   provider: string;
   dataMode: "mock" | "live" | "apify-test";
   replyId?: string | null;
+  reliabilityScore?: number;
 };
 
 type ApiOpportunity = {
@@ -437,6 +438,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
         demandSignals: conversation.demandSignals,
         competitorName: conversation.competitor,
         provenanceIds: conversation.sourceIds,
+        reliabilityScore: conversation.reliabilityScore ?? 0,
         // Independent of lead status: present only when this relevant
         // conversation was classified reply-suitable and a grounded reply was
         // drafted for it. Never counted as a potential customer.

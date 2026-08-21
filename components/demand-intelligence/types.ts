@@ -119,6 +119,12 @@ export interface RelevantConversation {
   competitorName: string | null;
   provenanceIds: string[];
   /**
+   * Same 0-100 scale as RedditOpportunity.classification.relevanceScore --
+   * lets the UI merge opportunities and relevant-but-not-lead conversations
+   * into a single carousel ordered by one reliability axis.
+   */
+  reliabilityScore: number;
+  /**
    * Present only when this conversation was independently classified as
    * reply-suitable and a grounded reply was drafted for it. Never implies
    * potential-customer/lead status -- it is shown as a research signal with

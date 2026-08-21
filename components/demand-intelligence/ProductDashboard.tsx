@@ -550,6 +550,106 @@ export function RelevantConversationCard({
   );
 }
 
+/**
+ * The carousel's single-card presentation of a RelevantConversation --
+ * mirrors CarouselOpportunityCard's topline (reliability badge, "Most
+ * reliable" star) so a relevant-but-not-lead conversation reads as one more
+ * card in the same swipeable browser, not a visually distinct fallback.
+ * Actions stay conversation's own (a static pre-drafted reply revealed
+ * in-card), not the full generate/edit/publish flow opportunities get.
+ */
+function CarouselRelevantCard({
+  conversation,
+  isMostReliable,
+  isRevealed,
+  onToggleReply,
+}: {
+  conversation: RelevantConversation;
+  isMostReliable: boolean;
+  isRevealed: boolean;
+  onToggleReply: () => void;
+}) {
+  const reliabilityScore = Math.round(conversation.reliabilityScore);
+  const signalLabels = [...new Set([
+    ...conversation.demandSignals,
+    ...conversation.tags,
+  ])].slice(0, 5);
+  const hasReply = Boolean(conversation.reply?.draft.trim());
+
+  return (
+    <article className={styles.opportunityCard}>
+      <div className={styles.carouselTopline}>
+        {isMostReliable ? (
+          <span className={styles.mostReliableBadge}>
+            <Icon name="star" size={12} /> Most reliable
+          </span>
+        ) : (
+          <span aria-hidden="true" />
+        )}
+        <span className={styles.reliabilityBadge}>
+          <strong>{reliabilityScore}%</strong>
+          <em>AI reliability</em>
+        </span>
+      </div>
+
+      <div className={styles.opportunityTopline}>
+        <div className={styles.sourceIdentity}>
+          <span className={styles.redditMark}>r/</span>
+          <div>
+            <strong>{conversation.authorLabel.replace(/^u\//i, "")}</strong>
+            <span>
+              {relativeTime(conversation.capturedAt)} &middot; {conversation.subreddit} &middot; Public conversation
+            </span>
+          </div>
+        </div>
+        <span className={`${styles.intentPill} ${styles.intentMedium}`}>
+          Research signal — not a lead
+        </span>
+      </div>
+
+      <h3>{conversation.title}</h3>
+      <div className={styles.mockExcerpt}>
+        <span>Why it matters</span>
+        <p>{conversation.summary}</p>
+      </div>
+      {signalLabels.length > 0 && (
+        <div className={styles.opportunityMeta}>
+          {signalLabels.map((signal) => (
+            <span key={signal}>{intelligenceLabel(signal)}</span>
+          ))}
+          {conversation.competitorName && (
+            <span>Competitor: {conversation.competitorName}</span>
+          )}
+        </div>
+      )}
+      {hasReply && isRevealed && (
+        <div className={styles.mockExcerpt}>
+          <span>Suggested reply</span>
+          <p>{conversation.reply?.draft}</p>
+        </div>
+      )}
+
+      <div className={styles.carouselActions}>
+        {hasReply && (
+          <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
+            <Icon name="refresh" size={14} />
+            {isRevealed ? "Hide suggested reply" : "Suggested reply ready"}
+          </button>
+        )}
+        {conversation.permalink && !conversation.isMock && (
+          <a
+            className={styles.secondaryButton}
+            href={conversation.permalink}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            View Reddit conversation <Icon name="external" size={14} />
+          </a>
+        )}
+      </div>
+    </article>
+  );
+}
 
 export function ScanEvidencePanel({ evidence }: { evidence: ScanEvidence }) {
   const rejected = [
@@ -1007,8 +1107,19 @@ function CarouselOpportunityCard({
  * freely in either direction with the arrow buttons, the dots, or the
  * left/right arrow keys.
  */
+/**
+ * One card of the unified carousel: either a qualified opportunity (lead) or
+ * a relevant-but-not-lead conversation. Merging both into a single sorted
+ * list is what lets "ordered by AI reliability, highest first" mean one
+ * ranking axis across everything that passed filtering, instead of two
+ * separately-ranked lists shown in two different places.
+ */
+type CarouselItem =
+  | { kind: "opportunity"; id: string; reliability: number; opportunity: RedditOpportunity }
+  | { kind: "relevant"; id: string; reliability: number; conversation: RelevantConversation };
+
 function OpportunityCarousel({
-  opportunities,
+  items,
   drafts,
   editingReplyId,
   copiedReplyId,
@@ -1021,7 +1132,7 @@ function OpportunityCarousel({
   redditConnection,
   onFunnelEvent,
 }: {
-  opportunities: RedditOpportunity[];
+  items: CarouselItem[];
   drafts: Record<string, string>;
   editingReplyId: string | null;
   copiedReplyId: string | null;
@@ -1036,26 +1147,26 @@ function OpportunityCarousel({
 }) {
   const [index, setIndex] = useState(0);
   const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
-  const total = opportunities.length;
+  const total = items.length;
 
   // Derived rather than stored: if the underlying list ever changes size
   // (e.g. a fresh scan result swaps in a shorter list) the position clamps
   // back into range on the next render without a setState-in-effect, and
   // without touching the list or its order.
   const safeIndex = total === 0 ? 0 : Math.min(index, total - 1);
-  const opportunity = opportunities[safeIndex];
-  if (!opportunity) return null;
+  const item = items[safeIndex];
+  if (!item) return null;
 
   const goTo = (nextIndex: number) => setIndex(((nextIndex % total) + total) % total);
-  const toggleReply = (opportunityId: string) => {
+  const toggleReply = (itemId: string) => {
     setRevealedReplyIds((current) => {
       const next = new Set(current);
-      if (next.has(opportunityId)) next.delete(opportunityId);
-      else next.add(opportunityId);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
       return next;
     });
   };
-  const isRevealed = revealedReplyIds.has(opportunity.id);
+  const isRevealed = revealedReplyIds.has(item.id);
 
   return (
     <div
@@ -1064,26 +1175,35 @@ function OpportunityCarousel({
       aria-roledescription="carousel"
       aria-label="Relevant Reddit conversations, ordered by AI reliability, highest first"
     >
-      <CarouselOpportunityCard
-        opportunity={opportunity}
-        isMostReliable={safeIndex === 0}
-        isRevealed={isRevealed}
-        onToggleReply={() => toggleReply(opportunity.id)}
-      />
+      {item.kind === "opportunity" ? (
+        <CarouselOpportunityCard
+          opportunity={item.opportunity}
+          isMostReliable={safeIndex === 0}
+          isRevealed={isRevealed}
+          onToggleReply={() => toggleReply(item.id)}
+        />
+      ) : (
+        <CarouselRelevantCard
+          conversation={item.conversation}
+          isMostReliable={safeIndex === 0}
+          isRevealed={isRevealed}
+          onToggleReply={() => toggleReply(item.id)}
+        />
+      )}
 
-      {isRevealed && (
+      {isRevealed && item.kind === "opportunity" && (
         <TrackedSection event="suggested_reply_viewed" onView={onFunnelEvent}>
           <ReplyComposer
-            opportunity={opportunity}
-            value={drafts[opportunity.id] ?? opportunity.reply.draft}
-            isEditing={editingReplyId === opportunity.id}
-            isCopied={copiedReplyId === opportunity.id}
-            isPublished={publishedOpportunityIds.includes(opportunity.id)}
-            onChange={(value) => onDraftChange(opportunity.id, value)}
-            onEdit={() => onToggleEdit(opportunity.id)}
-            onRegenerate={() => onRegenerate(opportunity)}
-            onCopy={() => onCopy(opportunity.id)}
-            onPublish={() => onPublish(opportunity)}
+            opportunity={item.opportunity}
+            value={drafts[item.opportunity.id] ?? item.opportunity.reply.draft}
+            isEditing={editingReplyId === item.opportunity.id}
+            isCopied={copiedReplyId === item.opportunity.id}
+            isPublished={publishedOpportunityIds.includes(item.opportunity.id)}
+            onChange={(value) => onDraftChange(item.opportunity.id, value)}
+            onEdit={() => onToggleEdit(item.opportunity.id)}
+            onRegenerate={() => onRegenerate(item.opportunity)}
+            onCopy={() => onCopy(item.opportunity.id)}
+            onPublish={() => onPublish(item.opportunity)}
             redditConnection={redditConnection}
           />
         </TrackedSection>
@@ -1112,9 +1232,9 @@ function OpportunityCarousel({
       </div>
 
       <div className={styles.carouselDots}>
-        {opportunities.map((item, dotIndex) => (
+        {items.map((dotItem, dotIndex) => (
           <button
-            key={item.id}
+            key={dotItem.id}
             type="button"
             className={`${styles.carouselDot} ${dotIndex === safeIndex ? styles.carouselDotActive : ""}`}
             aria-label={`Go to conversation ${dotIndex + 1} of ${total}`}
@@ -1150,7 +1270,7 @@ export function ProductDashboard({
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
-  const relevantConversations = data.relevantConversations ?? [];
+  const relevantConversations = useMemo(() => data.relevantConversations ?? [], [data.relevantConversations]);
   const normalizedAnalyzedDomain = analyzedDomain
     ?.replace(/^https?:\/\//, "")
     .replace(/\/$/, "")
@@ -1240,6 +1360,26 @@ export function ProductDashboard({
 
   const hasAnyRelevantContent = rankedOpportunities.length > 0 || relevantConversations.length > 0;
 
+  // One ranking axis across everything that passed filtering -- a lead and a
+  // relevant-but-not-lead conversation are both "AI reliability checked,
+  // source linked," so they browse as one swipeable carousel instead of a
+  // carousel for leads plus a separate static list underneath it.
+  const carouselItems = useMemo<CarouselItem[]>(() => {
+    const opportunityItems: CarouselItem[] = rankedOpportunities.map((opportunity) => ({
+      kind: "opportunity",
+      id: opportunity.id,
+      reliability: opportunity.classification.relevanceScore,
+      opportunity,
+    }));
+    const relevantItems: CarouselItem[] = relevantConversations.map((conversation) => ({
+      kind: "relevant",
+      id: conversation.id,
+      reliability: conversation.reliabilityScore,
+      conversation,
+    }));
+    return [...opportunityItems, ...relevantItems].sort((a, b) => b.reliability - a.reliability);
+  }, [rankedOpportunities, relevantConversations]);
+
   return (
     <div className={styles.productShell}>
       <header className={styles.minimalHeader}>
@@ -1284,10 +1424,17 @@ export function ProductDashboard({
               <p>Nothing cleared qualification this run; nothing was substituted to fill the space.</p>
             </section>
           ) : (
-            rankedOpportunities.length > 0 && (
+            carouselItems.length > 0 && (
               <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
+                <div className={styles.sectionHeadingRow}>
+                  <div>
+                    <span className={styles.eyebrow}>Relevant Reddit conversations</span>
+                    <h2>{rankedOpportunities.length > 0 ? "Leads and other relevant conversations" : "Other relevant conversations"}</h2>
+                  </div>
+                  <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
+                </div>
                 <OpportunityCarousel
-                  opportunities={rankedOpportunities}
+                  items={carouselItems}
                   drafts={drafts}
                   editingReplyId={editingReplyId}
                   copiedReplyId={copiedReplyId}
@@ -1308,23 +1455,6 @@ export function ProductDashboard({
             )
           )}
         </section>
-
-        {relevantConversations.length > 0 && (
-          <section className={styles.dashboardSection}>
-            <div className={styles.sectionHeadingRow}>
-              <div>
-                <span className={styles.eyebrow}>Related but not a lead</span>
-                <h2>Other relevant conversations</h2>
-              </div>
-              <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
-            </div>
-            <div className={styles.opportunityStack}>
-              {relevantConversations.map((conversation) => (
-                <RelevantConversationCard key={conversation.id} conversation={conversation} />
-              ))}
-            </div>
-          </section>
-        )}
 
         <ThemeSection
           kind="struggle"

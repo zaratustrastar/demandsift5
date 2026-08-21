@@ -10,7 +10,6 @@ import type {
   RedditDiscoverOptions,
   RedditDiscoveryDiagnostics,
   RedditDiscoveryResponse,
-  RedditDiscoveryRetryNotice,
   RedditEnrichmentRequest,
   RedditEnrichmentResponse,
   RedditProvider,

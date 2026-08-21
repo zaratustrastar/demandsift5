@@ -376,7 +376,7 @@ test("a Harshmaur run that times out with zero retained records is retried, not 
     token: "test-token",
     queriesPerRun: 20, // keep this to one batch; retry behavior is the point here
     discoveryRetryAttempts: 2,
-    fetchImpl: async (url, init = {}) => {
+    fetchImpl: async (url) => {
       const href = String(url);
       if (href.includes("/v2/actors/") && href.includes("/runs")) {
         runStarts += 1;

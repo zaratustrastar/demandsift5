@@ -153,10 +153,7 @@ export class MockRedditProvider implements RedditProvider {
   readonly name = "mock-reddit";
   readonly sourceMode = "mock" as const;
 
-  async discover(
-    request: RedditSearchRequest,
-    _options?: RedditDiscoverOptions,
-  ): Promise<RedditDiscoveryResponse> {
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
     const topic = pickTopic(request);
     const alternative = pickAlternative(request);
     const start = Number.parseInt(request.cursor ?? "0", 10);

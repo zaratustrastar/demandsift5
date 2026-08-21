@@ -73,6 +73,7 @@ type ApifyRedditItem = {
 type ApifySearchActorInput = {
   searches: string[];
   ignoreStartUrls: true;
+  skipComments?: true;
   skipUserPosts: true;
   skipCommunity: true;
   includeMediaLinks: false;

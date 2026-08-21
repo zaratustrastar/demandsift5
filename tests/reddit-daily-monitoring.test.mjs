@@ -253,6 +253,20 @@ test("monitor storage enforces cross-run dedupe and advances watermark only on s
     "the linked scan must exist before the monitor run stores its scan_id foreign key");
   assert.doesNotMatch(workflow, /Promise\.all\(\[repository\.saveScan\(scan\), saveRedditMonitorRun\(run\)\]\)/u,
     "scan and linked monitor-run writes must not race");
+  // A substring match alone would still pass if both statements were pasted
+  // into a `//` comment (dead code that never executes) -- confirm each
+  // await actually starts its own line as live code, not commented text.
+  const workflowLines = workflow.split("\n");
+  const saveScanLine = workflowLines.find((line) => line.includes("await repository.saveScan(scan)"));
+  const saveRunLine = workflowLines.find((line) => line.includes("await saveRedditMonitorRun(run)")
+    && !line.includes("repository.saveScan"));
+  assert.ok(saveScanLine && !saveScanLine.trim().startsWith("//"),
+    "await repository.saveScan(scan) must be live code, not commented out");
+  assert.ok(saveRunLine && !saveRunLine.trim().startsWith("//"),
+    "await saveRedditMonitorRun(run) must be live code, not commented out");
+  assert.doesNotMatch(workflow, /\\n/u,
+    "the workflow source must not contain a literal backslash-n escape sequence -- " +
+    "a botched edit can turn real newlines into dead comment text that still passes substring checks");
   assert.match(workflow, /processedRedditState\.filter/u,
     "every unseen monitoring match must receive an explicit relevance outcome");
   assert.match(workflow, /isRelevantMonitorTriage\(state\.triage\)/u);

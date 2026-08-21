@@ -989,8 +989,12 @@ function isMalformedStructuredJson(error: unknown): error is OpenAiProviderError
 
 function isRetryableStructuredOutputError(error: unknown): error is OpenAiProviderError {
   if (!(error instanceof OpenAiProviderError) || error.status !== undefined) return false;
+  // Capture the message before the type-guard call below: TypeScript narrows
+  // `error` to `never` after a same-type user-defined guard's negative
+  // branch, since it has no way to further exclude a type from itself.
+  const message = error.message;
   if (isMalformedStructuredJson(error)) return true;
-  return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/.test(error.message);
+  return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/.test(message);
 }
 
 function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderError {

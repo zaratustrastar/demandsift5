@@ -1,5 +1,5 @@
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/http";
-import { OpenAiProviderError } from "@/lib/providers/openai.server";
+import { scanPipelineErrorCode } from "@/lib/server/job-retry-classification";
 import { getStateRepository, type StateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
 import { runRedditMonitorScan } from "@/lib/server/reddit-monitor-workflow";
@@ -71,13 +71,8 @@ function terminalScanFailure(scan: ScanRecord) {
   // errorCode existed.
   const code =
     scan.errorCode ??
-    (/structured (?:chat )?(?:json|output)/iu.test(message)
-      ? "openai_structured_output_failed"
-      : /reddit enrichment/iu.test(message)
-        ? "reddit_enrichment_failed"
-        : /reddit discovery/iu.test(message)
-          ? "reddit_discovery_failed"
-          : "scan_execution_failed");
+    scanPipelineErrorCode({ message }) ??
+    "scan_execution_failed";
   return {
     ok: false,
     executorStatus: 502,
@@ -97,7 +92,7 @@ async function executeClaimedScan(
   try {
     await runScan(scanId, { resumeRunning, jobAttempts, jobMaxAttempts });
   } catch (error) {
-    if (error instanceof OpenAiProviderError && /structured (?:chat )?(?:JSON|output)/i.test(error.message)) {
+    if (scanPipelineErrorCode(error) === "openai_structured_output_failed") {
       console.error("Background scan exhausted structured AI recovery.");
       return;
     }

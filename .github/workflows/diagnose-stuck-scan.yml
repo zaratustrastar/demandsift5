@@ -1,0 +1,21 @@
+name: Diagnose stuck acceptance scan
+
+on:
+  push:
+    branches:
+      - codex/diagnose-stuck-scan-20260821
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Read safe deployed scan status
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n /usr/local/sbin/demandsift-release scan-status scan_30395b784eca488c82bc7243197547df
+          sudo -n /usr/local/sbin/demandsift-release inspect

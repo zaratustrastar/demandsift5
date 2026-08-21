@@ -36,3 +36,35 @@ export function jobWillRetryScanFailure(input: {
     !(input.code && JOB_LEVEL_TERMINAL_ERROR_CODES.has(input.code))
   );
 }
+
+
+function errorMessage(error: unknown): string {
+  if (!error || typeof error !== "object") return "";
+  const message = (error as { message?: unknown }).message;
+  return typeof message === "string" ? message : "";
+}
+
+/**
+ * Convert pipeline failures into stable queue-facing codes. Structured-output
+ * providers can fail with several precise messages; all are terminal only
+ * after the provider's own bounded same-model retry and comparable-model
+ * fallback have been exhausted.
+ */
+export function scanPipelineErrorCode(error: unknown): string | undefined {
+  if (error && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && code.trim()) return code.trim();
+  }
+  const message = errorMessage(error);
+  if (
+    /OpenAI returned no structured (?:chat )?response text/iu.test(message)
+    || /OpenAI returned malformed structured JSON/iu.test(message)
+    || /OpenAI structured chat retry did not return a result/iu.test(message)
+    || /OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/iu.test(message)
+  ) {
+    return "openai_structured_output_failed";
+  }
+  if (/Reddit enrichment failed/iu.test(message)) return "reddit_enrichment_failed";
+  if (/Reddit discovery failed/iu.test(message)) return "reddit_discovery_failed";
+  return undefined;
+}

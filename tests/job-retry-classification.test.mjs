@@ -20,7 +20,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   fileName: "job-retry-classification.ts",
 }).outputText;
-const { jobWillRetryScanFailure, JOB_LEVEL_TERMINAL_ERROR_CODES } = await import(
+const { jobWillRetryScanFailure, JOB_LEVEL_TERMINAL_ERROR_CODES, scanPipelineErrorCode } = await import(
   `data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`
 );
 
@@ -87,4 +87,28 @@ test("the terminal set matches what scripts/background-worker.mjs enforces at th
     [...JOB_LEVEL_TERMINAL_ERROR_CODES].sort(),
     [...workerCodes].sort(),
   );
+});
+
+
+test("empty structured chat exhaustion is classified terminal", () => {
+  const code = scanPipelineErrorCode({
+    name: "OpenAiProviderError",
+    message: "OpenAI returned no structured chat response text (finish_reason=stop, content_type=null, output_tokens=508).",
+  });
+  assert.equal(code, "openai_structured_output_failed");
+  assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), false);
+});
+
+test("ordinary transient failures remain unclassified and retryable", () => {
+  const code = scanPipelineErrorCode(new Error("temporary upstream timeout"));
+  assert.equal(code, undefined);
+  assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), true);
+});
+
+test("Reddit enrichment exhaustion remains terminal", () => {
+  const code = scanPipelineErrorCode(
+    new Error("Reddit enrichment failed: selected 1, enriched 0, failed 1."),
+  );
+  assert.equal(code, "reddit_enrichment_failed");
+  assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), false);
 });

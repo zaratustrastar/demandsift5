@@ -115,8 +115,9 @@ function RedditMonitoringPanel({
         <span className={styles.eyebrow}>Daily Reddit monitoring</span>
         <h2>Watch new posts and comments once per day</h2>
         <p>
-          All active terms are sent together in one daily search. New matches still have to pass
-          the same relevance and qualification checks as this report.
+          All active terms are sent together in one daily search. AI checks every unseen match
+          for business relevance. Relevant conversations are kept even when they are not leads;
+          deeper qualification is reserved for the strongest candidates.
         </p>
       </div>
       <label className={styles.monitoringToggle}>
@@ -1315,7 +1316,7 @@ export function ProductDashboard({
                 <span className={styles.eyebrow}>Related but not a lead</span>
                 <h2>Other relevant conversations</h2>
               </div>
-              <span className={styles.qualityNote}>Thread-context reviewed &middot; Source linked</span>
+              <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
             </div>
             <div className={styles.opportunityStack}>
               {relevantConversations.map((conversation) => (

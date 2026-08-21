@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  CODE_SHA: 44a5ef2038d5f7d9c98ab27594cfc581f0784065
+  CODE_SHA: 29f88d14a5fca7a6a9b4d6fd117c71cd605abe85
   APP_URL: https://demandsift.143-244-154-139.sslip.io
 
 jobs:

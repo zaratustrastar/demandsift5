@@ -32,7 +32,19 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=8080 \
     NEXT_TELEMETRY_DISABLED=1 \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Chromium backs the website crawler's headless-render fallback, used only
+# when a site's raw HTML has no readable text (JavaScript-only pages). The
+# Debian package pulls in its own runtime library dependencies, so nothing
+# else needs installing by hand. `chromium --version` fails the build (not a
+# production rollout) if the package layout ever changes so
+# CHROMIUM_EXECUTABLE_PATH silently stops matching a real binary.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chromium --version
 
 # Vinext produces a self-contained server bundle. Copy only that runtime
 # artifact so production images do not retain source files, build tooling, or
@@ -41,6 +53,11 @@ COPY --from=build --chown=node:node /app/dist/standalone /app/dist/standalone
 # Keep the tiny package manifest at the historical root location expected by
 # the already-installed rollback-safe VPS release validator.
 COPY --from=build --chown=node:node /app/dist/standalone/package.json /app/package.json
+# vinext's standalone tracer treats puppeteer-core as an external package but
+# does not always pick up its dynamic `import("puppeteer-core")` in the
+# crawler's headless-render fallback, so copy it in explicitly rather than
+# depend on that trace being complete.
+COPY --from=build --chown=node:node /app/node_modules/puppeteer-core /app/dist/standalone/node_modules/puppeteer-core
 
 USER node
 

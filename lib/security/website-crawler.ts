@@ -11,6 +11,7 @@ const DEFAULT_MAX_PAGES = 6;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_MAX_TOTAL_BYTES = 4_000_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_RENDER_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 4;
 
 const BLOCKED_HOST_SUFFIXES = [
@@ -60,8 +61,10 @@ export interface CrawlWebsiteOptions {
   maxResponseBytes?: number;
   maxTotalBytes?: number;
   timeoutMs?: number;
+  renderTimeoutMs?: number;
   userAgent?: string;
   fetchImpl?: PinnedWebsiteFetch;
+  renderImpl?: HeadlessRenderFn;
   resolver?: HostResolver;
   signal?: AbortSignal;
 }
@@ -647,6 +650,100 @@ function sha256(value: string): string {
 }
 
 /**
+ * A testable rendering boundary, mirroring `PinnedWebsiteFetch`. Production
+ * uses `renderWithHeadlessBrowser` below; custom implementations must not
+ * perform their own DNS resolution and must return the fully rendered HTML.
+ */
+export type HeadlessRenderFn = (
+  url: URL,
+  target: ValidatedWebsiteTarget,
+  options: { timeoutMs: number; userAgent: string },
+) => Promise<string>;
+
+/**
+ * Renders a page with a real (headless) browser so JavaScript-only sites --
+ * whose initial HTML has no readable text until a script fills it in -- can
+ * still be analyzed. This only ever runs as a fallback after the fast static
+ * fetch above already produced too little text, so ordinary server-rendered
+ * pages never pay for it.
+ *
+ * The same SSRF posture as the static fetch path is preserved here: Chromium's
+ * own DNS resolver is overridden with `--host-resolver-rules` so the already
+ * validated (pinned) address is the only one it can ever connect to for this
+ * hostname, and request interception aborts every request to any other host
+ * before Chromium can resolve or connect to it. A JS-only page cannot use this
+ * fallback to make the browser fetch anything the static crawler above
+ * couldn't already fetch itself.
+ */
+async function renderWithHeadlessBrowser(
+  url: URL,
+  target: ValidatedWebsiteTarget,
+  options: { timeoutMs: number; userAgent: string },
+): Promise<string> {
+  const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
+  if (!executablePath) {
+    throw new Error("Headless rendering is not configured on this server.");
+  }
+  const puppeteer = (await import("puppeteer-core")).default;
+
+  const bareHostname = canonicalHostname(target.url.hostname);
+  const pinnedAddress =
+    target.resolvedAddresses.find((entry) => entry.family === 4)?.address ??
+    target.resolvedAddresses[0]?.address;
+  if (!pinnedAddress) {
+    throw new Error("No validated address is available for rendering.");
+  }
+  const hostResolverRules = [
+    `MAP ${bareHostname} ${pinnedAddress}`,
+    `MAP www.${bareHostname} ${pinnedAddress}`,
+  ].join(",");
+
+  const browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      `--host-resolver-rules=${hostResolverRules}`,
+    ],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(options.userAgent);
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      let requestUrl: URL;
+      try {
+        requestUrl = new URL(request.url());
+      } catch {
+        void request.abort();
+        return;
+      }
+      const sameHost =
+        (requestUrl.protocol === "http:" || requestUrl.protocol === "https:") &&
+        equivalentWebsiteHost(requestUrl.hostname, bareHostname);
+      if (sameHost) {
+        void request.continue();
+      } else {
+        void request.abort();
+      }
+    });
+    try {
+      await page.goto(url.toString(), { waitUntil: "networkidle2", timeout: options.timeoutMs });
+    } catch {
+      // A page that never reaches network-idle (long polling, websockets,
+      // analytics beacons) usually has its visible text in the DOM already --
+      // fall through and read whatever rendered instead of failing outright.
+    }
+    return await page.content();
+  } finally {
+    await browser.close();
+  }
+}
+
+/**
  * Crawls a small set of public HTML pages on the submitted host (plus its www
  * counterpart). Redirects and every DNS answer are revalidated for each fetch,
  * then the socket is pinned to those answers so DNS rebinding cannot change the
@@ -668,7 +765,12 @@ export async function crawlWebsite(
     Math.min(options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES, 10_000_000),
   );
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 20_000));
+  const renderTimeoutMs = Math.max(
+    3_000,
+    Math.min(options.renderTimeoutMs ?? DEFAULT_RENDER_TIMEOUT_MS, 25_000),
+  );
   const fetchImpl = options.fetchImpl ?? fetchPinnedWebsiteTarget;
+  const renderImpl = options.renderImpl ?? renderWithHeadlessBrowser;
   const userAgent = options.userAgent ?? "DemandSignalBot/1.0 (website analysis; public pages only)";
   const queue: URL[] = [target.url];
   const queued = new Set([target.url.toString().replace(/\/$/, "")]);
@@ -701,7 +803,28 @@ export async function crawlWebsite(
       const remainingBytes = Math.min(maxResponseBytes, maxTotalBytes - totalBytes);
       const loaded = await readLimitedText(response, remainingBytes);
       totalBytes += loaded.bytes;
-      const extracted = extractPage(loaded.text);
+      let pageHtml = loaded.text;
+      let extracted = extractPage(pageHtml);
+      if (extracted.text.length < 80) {
+        // Static HTML alone was too thin -- likely a JavaScript-only page.
+        // Try rendering it with a headless browser before giving up; any
+        // failure here (unconfigured server, blocked navigation, browser
+        // crash) just leaves the too-thin static result in place below.
+        try {
+          const renderTarget = await validatePublicWebsiteUrl(finalUrl, resolver);
+          const renderedHtml = await renderImpl(finalUrl, renderTarget, {
+            timeoutMs: renderTimeoutMs,
+            userAgent,
+          });
+          const rendered = extractPage(renderedHtml);
+          if (rendered.text.length >= 80) {
+            extracted = rendered;
+            pageHtml = renderedHtml;
+          }
+        } catch {
+          // Fall through to the thin-content error below.
+        }
+      }
       if (extracted.text.length < 80) throw new Error("Page did not contain enough readable public text.");
       const retrievedAt = new Date().toISOString();
       pages.push({
@@ -714,7 +837,7 @@ export async function crawlWebsite(
       });
       if (pages.length === 1) canonicalUrl = finalUrl.toString();
 
-      for (const link of extractInternalLinks(loaded.text, finalUrl, target.url.hostname)) {
+      for (const link of extractInternalLinks(pageHtml, finalUrl, target.url.hostname)) {
         const key = link.toString().replace(/\/$/, "");
         if (!queued.has(key) && queued.size < maxPages * 8) {
           queued.add(key);

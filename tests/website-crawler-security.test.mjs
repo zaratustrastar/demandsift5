@@ -256,3 +256,61 @@ test("response byte limits safely analyze a useful prefix and cancel the oversiz
   assert.match(result.pages[0].text, /Useful public product and customer evidence/);
   assert.equal(cancelled, true);
 });
+
+test("a headless render fallback recovers text from a true JavaScript-only page", async () => {
+  const renderCalls = [];
+  const result = await crawlWebsite("https://example.com", {
+    maxPages: 1,
+    resolver: async () => [PUBLIC_V4],
+    fetchImpl: async () => new Response(
+      `<html><head><title>PMFI</title><meta property="og:description" content="Automated vaults."></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    ),
+    renderImpl: async (url, target, options) => {
+      renderCalls.push({ url: url.toString(), target, options });
+      return `<html><head><title>PMFI</title></head><body>PMFI runs automated vaults for prediction market arbitrage, giving traders a hands-off way to capture pricing inefficiencies across markets.</body></html>`;
+    },
+  });
+
+  assert.equal(renderCalls.length, 1);
+  assert.equal(renderCalls[0].url, "https://example.com/");
+  assert.deepEqual(renderCalls[0].target.resolvedAddresses, [PUBLIC_V4]);
+  assert.equal(result.pages.length, 1);
+  assert.match(result.pages[0].text, /automated vaults for prediction market arbitrage/);
+});
+
+test("the render fallback is never invoked when the static page already has enough text", async () => {
+  let renderCalls = 0;
+  const result = await crawlWebsite("https://example.com", {
+    maxPages: 1,
+    resolver: async () => [PUBLIC_V4],
+    fetchImpl: async () => new Response(
+      "<html><title>Acme</title><body>This is a sufficiently long public business page with useful product, audience, and customer problem information for analysis.</body></html>",
+      { status: 200, headers: { "content-type": "text/html" } },
+    ),
+    renderImpl: async () => {
+      renderCalls += 1;
+      throw new Error("render must not run when static text is already sufficient");
+    },
+  });
+
+  assert.equal(renderCalls, 0);
+  assert.equal(result.pages.length, 1);
+});
+
+test("a render fallback that also comes back too thin still surfaces the original error", async () => {
+  await assert.rejects(
+    crawlWebsite("https://example.com", {
+      maxPages: 1,
+      resolver: async () => [PUBLIC_V4],
+      fetchImpl: async () => new Response(
+        `<html><head><title>PMFI</title></head><body><div id="root"></div></body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      ),
+      renderImpl: async () => {
+        throw new Error("headless rendering is not configured on this server");
+      },
+    }),
+    /did not contain enough readable public text/,
+  );
+});

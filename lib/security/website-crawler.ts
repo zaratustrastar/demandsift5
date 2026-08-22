@@ -805,11 +805,14 @@ export async function crawlWebsite(
       totalBytes += loaded.bytes;
       let pageHtml = loaded.text;
       let extracted = extractPage(pageHtml);
+      let renderDiagnostic: string | undefined;
       if (extracted.text.length < 80) {
         // Static HTML alone was too thin -- likely a JavaScript-only page.
-        // Try rendering it with a headless browser before giving up; any
+        // Try rendering it with a headless browser before giving up. Any
         // failure here (unconfigured server, blocked navigation, browser
-        // crash) just leaves the too-thin static result in place below.
+        // crash) leaves the too-thin static result in place below, but the
+        // reason is kept so the eventual error is diagnosable instead of
+        // always reading identically to "no fallback was even attempted."
         try {
           const renderTarget = await validatePublicWebsiteUrl(finalUrl, resolver);
           const renderedHtml = await renderImpl(finalUrl, renderTarget, {
@@ -820,12 +823,22 @@ export async function crawlWebsite(
           if (rendered.text.length >= 80) {
             extracted = rendered;
             pageHtml = renderedHtml;
+          } else {
+            renderDiagnostic = `headless render produced only ${rendered.text.length} readable characters`;
           }
-        } catch {
-          // Fall through to the thin-content error below.
+        } catch (renderError) {
+          renderDiagnostic = `headless render failed: ${
+            renderError instanceof Error ? renderError.message : "unknown error"
+          }`;
         }
       }
-      if (extracted.text.length < 80) throw new Error("Page did not contain enough readable public text.");
+      if (extracted.text.length < 80) {
+        throw new Error(
+          renderDiagnostic
+            ? `Page did not contain enough readable public text (${renderDiagnostic}).`
+            : "Page did not contain enough readable public text.",
+        );
+      }
       const retrievedAt = new Date().toISOString();
       pages.push({
         url: finalUrl.toString(),

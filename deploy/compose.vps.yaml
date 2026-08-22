@@ -62,6 +62,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # Chromium's headless-render fallback (website-crawler.ts) launches with
+    # --disable-dev-shm-usage, but a too-small /dev/shm is still one of the
+    # most common causes of a silent Chromium crash in Docker. Docker's
+    # default is 64mb; give it real headroom rather than depending solely on
+    # that one flag.
+    shm_size: 512mb
     logging: *default-logging
 
   worker:

@@ -250,3 +250,4 @@ jobs:
 # trigger: deploy puppeteer-core dependency-closure fix (2026-08-22T02:00:23Z)
 # trigger: deploy AI visibility disabled-by-default fix (2026-08-22T11:53:53Z)
 # trigger: deploy AI visibility toggle (2026-08-22T19:07:58Z)
+# trigger: deploy unified candidate carousel (2026-08-22T22:23:03Z)

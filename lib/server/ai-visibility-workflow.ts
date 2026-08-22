@@ -11,9 +11,7 @@ import {
 } from "@/lib/server/ai-visibility-analysis";
 import {
   completeAiVisibilityScan,
-  createAiVisibilityScan,
   createAiVisibilitySettings,
-  enqueueAiVisibilityJob,
   failAiVisibilityScan,
   getAiVisibilityScan,
   getAiVisibilitySettings,
@@ -40,12 +38,16 @@ const PROVIDERS: AiVisibilityAiProvider[] = ["chatgpt", "gemini", "perplexity"];
 
 /**
  * Called once, right after a primary (non-monitoring) scan reaches
- * `status: "complete"` -- see the call site in scan-workflow.ts. Starts AI
- * visibility tracking for the workspace exactly once: creates the weekly
- * (Monday) schedule and enqueues one immediate first scan. If a schedule
- * already exists for this workspace (a later scan completing, or two
- * concurrent completions), this is a no-op -- the weekly scheduler owns all
- * runs after the first.
+ * `status: "complete"` -- see the call site in scan-workflow.ts. Seeds the
+ * weekly (Monday) schedule for the workspace exactly once, disabled by
+ * default (`enabled: false`, see createAiVisibilitySettings): no scan is
+ * enqueued here, and the weekly scheduler's own `enabled = true` filter
+ * (scheduleAiVisibilityScans in scripts/background-worker.mjs) means a
+ * disabled schedule never runs on its own either. There is currently no
+ * dashboard control that flips it to enabled -- until one exists, this
+ * seeds a dormant row rather than silently tracking a business that never
+ * asked for it. If a schedule already exists for this workspace (a later
+ * scan completing, or two concurrent completions), this is a no-op.
  *
  * Deliberately best-effort: any failure here is caught by the caller and
  * never allowed to fail the primary scan it rides on.
@@ -59,15 +61,6 @@ export async function ensureAiVisibilityTrackingStarted(scan: ScanRecord): Promi
     workspaceId: scan.workspaceId,
     seedScanId: scan.id,
     nextRunAt: nextMonday(new Date()),
-  });
-  const visibilityScan = await createAiVisibilityScan({
-    workspaceId: scan.workspaceId,
-    seedScanId: scan.id,
-  });
-  await enqueueAiVisibilityJob({
-    visibilityScanId: visibilityScan.id,
-    workspaceId: scan.workspaceId,
-    runAt: new Date(),
   });
 }
 

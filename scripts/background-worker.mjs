@@ -778,9 +778,16 @@ async function runRedditMonitorScheduler(sql, signal) {
  * AI Visibility Tracking (MVP) -- a sidecar to the Reddit monitor above,
  * not built on it: separate tables (runtime_ai_visibility_schedules /
  * runtime_ai_visibility_scans), separate job type (ai_visibility_scan),
- * separate scheduler. On by default (unlike the legacy full-scan
- * `monitoringSchedulerEnabled`, which is intentionally dormant) since the
- * spec calls for it to actually run automatically every Monday.
+ * separate scheduler.
+ *
+ * This poller itself defaults to on (`AI_VISIBILITY_SCHEDULER_ENABLED`),
+ * but every per-workspace schedule row is created with `enabled: false`
+ * (see createAiVisibilitySettings in lib/server/ai-visibility-repository.ts)
+ * and scheduleAiVisibilityScans below only ever picks up rows where
+ * `schedule.enabled = true`. So in practice nothing runs automatically
+ * for any workspace until there is a way to flip that flag -- there is no
+ * dashboard control for it yet -- rather than tracking a business that
+ * never opted in.
  */
 export function aiVisibilitySchedulerEnabled(environment = process.env) {
   return String(environment.AI_VISIBILITY_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";

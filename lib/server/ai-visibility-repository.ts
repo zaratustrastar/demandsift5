@@ -103,7 +103,7 @@ export async function createAiVisibilitySettings(input: {
     const record: AiVisibilitySettingsRecord = {
       workspaceId: input.workspaceId,
       seedScanId: input.seedScanId,
-      enabled: true,
+      enabled: false,
       lastSuccessfulScanAt: null,
       nextRunAt: input.nextRunAt.toISOString(),
       lastScanId: null,
@@ -118,7 +118,7 @@ export async function createAiVisibilitySettings(input: {
     .values({
       workspaceId: input.workspaceId,
       seedScanId: input.seedScanId,
-      enabled: true,
+      enabled: false,
       nextRunAt: input.nextRunAt,
       updatedAt: now,
     })

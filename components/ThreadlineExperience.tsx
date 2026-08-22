@@ -5,6 +5,7 @@ import {
   ProductDashboard,
   type RedditConnectionStatus,
   type RedditMonitoringStatus,
+  type AiVisibilityStatus,
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
@@ -537,6 +538,7 @@ export function ThreadlineExperience() {
   const [redditConnection, setRedditConnection] =
     useState<RedditConnectionStatus>(disconnectedReddit);
   const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
+  const [aiVisibility, setAiVisibility] = useState<AiVisibilityStatus | null>(null);
   const dashboardData = useMemo(
     () => (scanResponse ? scanResponseToDashboard(scanResponse) : null),
     [scanResponse],
@@ -709,8 +711,24 @@ export function ThreadlineExperience() {
       }
     }
 
+    async function loadAiVisibility() {
+      try {
+        const response = await fetch("/api/ai-visibility/settings", { cache: "no-store" });
+        const payload = (await response.json()) as {
+          visibility?: AiVisibilityStatus | null;
+        };
+        if (response.ok && payload.visibility && !cancelled) {
+          setAiVisibility(payload.visibility);
+        }
+      } catch {
+        // Same independence as loadRedditMonitoring above: a transient
+        // settings fetch failure must not disturb other loaded state.
+      }
+    }
+
     void loadRedditConnection();
     void loadRedditMonitoring();
+    void loadAiVisibility();
     return () => {
       cancelled = true;
     };
@@ -736,6 +754,7 @@ export function ThreadlineExperience() {
       setContextText("");
     }
     setMonitoring(null);
+    setAiVisibility(null);
     resumedScanRef.current = null;
     setScanResponse(null);
     setScanProgress([]);
@@ -1070,6 +1089,31 @@ export function ThreadlineExperience() {
     }
   }
 
+  async function updateAiVisibility(enabled: boolean): Promise<boolean> {
+    try {
+      const response = await fetch("/api/ai-visibility/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = (await response.json()) as {
+        visibility?: AiVisibilityStatus;
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.visibility) {
+        throw new Error(payload.error?.message ?? "AI visibility tracking could not be updated.");
+      }
+      setAiVisibility(payload.visibility);
+      setStatusMessage(enabled
+        ? "AI visibility tracking is on. ChatGPT, Gemini and Perplexity will be checked weekly."
+        : "AI visibility tracking is off.");
+      return true;
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "AI visibility tracking could not be updated.");
+      return false;
+    }
+  }
+
   async function regenerateReply(opportunityId: string): Promise<string | null> {
     const opportunity = dashboardData?.opportunities.find((item) => item.id === opportunityId);
     if (!opportunity) return null;
@@ -1255,6 +1299,8 @@ export function ThreadlineExperience() {
         onDisconnectReddit={disconnectReddit}
         monitoring={monitoring}
         onUpdateMonitoring={updateMonitoring}
+        aiVisibility={aiVisibility}
+        onUpdateAiVisibility={updateAiVisibility}
         onFunnelEvent={recordFunnelEvent}
       />
     </div>

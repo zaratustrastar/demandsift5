@@ -10,6 +10,7 @@ export type {
   ProductDashboardProps,
   RedditConnectionStatus,
   RedditMonitoringStatus,
+  AiVisibilityStatus,
 } from "./ProductDashboard";
 export {
   countLockedResults,

@@ -45,6 +45,12 @@ export type RedditMonitoringStatus = {
   nextRunAt: string;
 };
 
+export type AiVisibilityStatus = {
+  enabled: boolean;
+  lastSuccessfulScanAt: string | null;
+  nextRunAt: string;
+};
+
 export interface ProductDashboardProps {
   data?: RedditDemandDemoData;
   /** A complete, source-backed result from the real analysis flow. */
@@ -70,6 +76,8 @@ export interface ProductDashboardProps {
     enabled: boolean,
     watchTerms: RedditMonitoringStatus["watchTerms"],
   ) => Promise<boolean>;
+  aiVisibility?: AiVisibilityStatus | null;
+  onUpdateAiVisibility?: (enabled: boolean) => Promise<boolean>;
   onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
 }
 
@@ -150,6 +158,56 @@ function RedditMonitoringPanel({
         <button className={styles.primaryButton} type="button" disabled={saving} onClick={() => void save(monitoring.enabled)}>
           {saving ? "Saving…" : "Save watch terms"}
         </button>
+      </div>
+    </section>
+  );
+}
+
+function AiVisibilityPanel({
+  status,
+  onUpdate,
+}: {
+  status: AiVisibilityStatus | null;
+  onUpdate?: ProductDashboardProps["onUpdateAiVisibility"];
+}) {
+  const [saving, setSaving] = useState(false);
+  if (!status) return null;
+
+  const save = async (enabled: boolean) => {
+    if (!onUpdate) return;
+    setSaving(true);
+    try {
+      await onUpdate(enabled);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={`${styles.card} ${styles.monitoringCard}`}>
+      <div>
+        <span className={styles.eyebrow}>AI visibility tracking</span>
+        <h2>See how ChatGPT, Gemini and Perplexity answer about you</h2>
+        <p>
+          Once a week, the same questions are put to ChatGPT, Gemini and Perplexity to check whether
+          your business is mentioned or recommended, and which sources they cite.
+        </p>
+      </div>
+      <label className={styles.monitoringToggle}>
+        <input
+          type="checkbox"
+          checked={status.enabled}
+          disabled={saving}
+          onChange={(event) => void save(event.currentTarget.checked)}
+        />
+        <span>{status.enabled ? "Tracking on" : "Tracking off"}</span>
+      </label>
+      <div className={styles.monitoringFooter}>
+        <small>
+          {status.lastSuccessfulScanAt
+            ? `Last successful check ${relativeTime(status.lastSuccessfulScanAt)}`
+            : "No weekly check has completed yet."}
+        </small>
       </div>
     </section>
   );
@@ -1267,6 +1325,8 @@ export function ProductDashboard({
   },
   monitoring = null,
   onUpdateMonitoring,
+  aiVisibility = null,
+  onUpdateAiVisibility,
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
@@ -1415,6 +1475,12 @@ export function ProductDashboard({
             : "monitoring-unavailable"}
           monitoring={monitoring}
           onUpdate={onUpdateMonitoring}
+        />
+
+        <AiVisibilityPanel
+          key={aiVisibility ? `${aiVisibility.enabled}:${aiVisibility.nextRunAt}` : "ai-visibility-unavailable"}
+          status={aiVisibility}
+          onUpdate={onUpdateAiVisibility}
         />
 
         <section className={styles.dashboardSection}>

@@ -131,6 +131,50 @@ export async function createAiVisibilitySettings(input: {
   return existing;
 }
 
+/**
+ * Flips the per-workspace `enabled` flag from the (not-yet-built) dashboard
+ * toggle -- the AI-visibility equivalent of saveRedditMonitorSettings in
+ * reddit-monitor-repository.ts. Requires a settings row to already exist
+ * (created by ensureAiVisibilityTrackingStarted the first time a scan
+ * completes); this function only ever flips the flag on an existing row,
+ * it never creates one.
+ *
+ * Turning tracking on (false -> true) pulls nextRunAt forward to now, the
+ * same way the Reddit monitor does, so the very next scheduler poll picks
+ * it up instead of waiting for the stored Monday watermark, which could be
+ * up to a week away and would otherwise make the toggle feel broken.
+ */
+export async function updateAiVisibilitySettings(input: {
+  workspaceId: string;
+  enabled: boolean;
+}): Promise<AiVisibilitySettingsRecord> {
+  const now = new Date();
+  if (isMemoryStore()) {
+    const existing = memorySettings.get(input.workspaceId);
+    if (!existing) throw new Error("AI visibility settings have not been created for this workspace yet.");
+    const turningOn = input.enabled && !existing.enabled;
+    const record: AiVisibilitySettingsRecord = {
+      ...existing,
+      enabled: input.enabled,
+      nextRunAt: turningOn ? now.toISOString() : existing.nextRunAt,
+      updatedAt: now.toISOString(),
+    };
+    memorySettings.set(input.workspaceId, record);
+    return record;
+  }
+  const existing = await getAiVisibilitySettings(input.workspaceId);
+  if (!existing) throw new Error("AI visibility settings have not been created for this workspace yet.");
+  const turningOn = input.enabled && !existing.enabled;
+  const nextRunAt = turningOn ? now : new Date(existing.nextRunAt);
+  const [row] = await getDb()
+    .update(runtimeAiVisibilitySchedules)
+    .set({ enabled: input.enabled, nextRunAt, updatedAt: now })
+    .where(eq(runtimeAiVisibilitySchedules.workspaceId, input.workspaceId))
+    .returning();
+  if (!row) throw new Error("AI visibility settings have not been created for this workspace yet.");
+  return settingsFromRow(row);
+}
+
 export async function createAiVisibilityScan(input: {
   workspaceId: string;
   seedScanId: string;

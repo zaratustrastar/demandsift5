@@ -1,6 +1,6 @@
 {
-  "id": "verify-pmfi-round3-2026-08-22",
-  "ops": ["runtime"],
+  "id": "diagnose-apify-403-2026-08-22",
+  "ops": ["reddit-config", "runtime", "status"],
   "inspectScans": [],
-  "startScan": { "websiteUrl": "https://pmfi.cc", "pollSeconds": 400 }
+  "startScan": null
 }

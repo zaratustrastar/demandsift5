@@ -1,6 +1,6 @@
 {
-  "id": "verify-pmfi-headless-render-2026-08-22-round2",
-  "ops": ["runtime"],
-  "inspectScans": [],
-  "startScan": { "websiteUrl": "https://pmfi.cc", "pollSeconds": 300 }
+  "id": "inspect-pmfi-scans-2026-08-22",
+  "ops": ["runtime", "status"],
+  "inspectScans": ["scan_6960b21424974e85bc32d3f6cc8a049e", "scan_4446fa34921847f8a4f45cf83acd9303"],
+  "startScan": null
 }

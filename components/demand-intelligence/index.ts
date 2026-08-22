@@ -3,7 +3,6 @@ export {
   MockProviderNotice,
   OpportunityCard,
   RelevantConversationCard,
-  ScanEvidencePanel,
   ProductDashboard,
 } from "./ProductDashboard";
 export type {

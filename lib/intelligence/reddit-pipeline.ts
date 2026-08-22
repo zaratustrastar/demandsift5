@@ -614,6 +614,31 @@ export function researchScore(qualification: DeepQualification): number {
 }
 
 /**
+ * Reliability score for the "everything the lightweight AI shortlisted"
+ * carousel (see the dashboard's unified candidate carousel). A row that
+ * reached deep qualification is scored by whichever of lead/research value
+ * is higher -- deep review may have found it more valuable as a lead, as
+ * research, or both, and this ranking should not undersell either. A row
+ * that never reached deep qualification (budget-bounded, or enrichment
+ * simply had not gotten to it yet) is scored from triage alone: a real,
+ * honestly weaker signal, not a stand-in for the deep score.
+ */
+export function candidateReliabilityScore(input: {
+  triage: ConversationTriage;
+  deepQualification: DeepQualification | null;
+}): number {
+  if (input.deepQualification) {
+    return Math.max(leadScore(input.deepQualification), researchScore(input.deepQualification));
+  }
+  return percent(
+    fitScore(input.triage.productFit) * 0.35 +
+      intentScore(input.triage.intent) * 0.35 +
+      fitScore(input.triage.replyability) * 0.15 +
+      timingScore(input.triage.timing) * 0.15,
+  );
+}
+
+/**
  * @deprecated Retained so stored reports and existing call sites keep working.
  * New code should use the purpose-specific score it actually means.
  */

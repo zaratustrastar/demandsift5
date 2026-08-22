@@ -7,17 +7,20 @@ const dashboard = await readFile(new URL("../components/demand-intelligence/Prod
 const experience = await readFile(new URL("../components/ThreadlineExperience.tsx", import.meta.url), "utf8");
 const workflow = await readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8");
 
-test("MVP report exposes every triaged candidate with its exact provider permalink and decisions", () => {
+test("MVP report exposes every triaged candidate with its exact provider permalink, decisions and reliability", () => {
   assert.match(presenter, /scanEvidence:/);
   assert.match(presenter, /result\.processedRedditState\.map/);
   assert.match(presenter, /permalink: state\.canonicalPermalink/);
   assert.match(presenter, /triage: state\.triage/);
   assert.match(presenter, /deepQualification: state\.deepQualification/);
-  assert.match(dashboard, /Show full scan trace/);
-  // Collapsed by default behind a <details> disclosure so it does not read as
-  // an unfiltered raw dump on the default report view (users asked for this).
-  assert.match(dashboard, /<details className={styles.dashboardSection}>/);
-  assert.match(dashboard, /Open exact Reddit message/);
+  assert.match(presenter, /reliabilityScore: candidateReliabilityScore/);
+  // Every candidate the lightweight AI shortlisted (triage.worthEnriching) is
+  // folded into the one results carousel via candidateAsRelevantConversation,
+  // ranked alongside published opportunities/relevant conversations -- not
+  // shown as a separate raw technical dump (users asked for this to go away).
+  assert.match(dashboard, /candidateAsRelevantConversation/);
+  assert.match(dashboard, /candidate\.triage\.worthEnriching/);
+  assert.equal(dashboard.includes("Show full scan trace"), false);
 });
 
 test("late Reddit context shortfall does not masquerade as website-analysis failure", () => {

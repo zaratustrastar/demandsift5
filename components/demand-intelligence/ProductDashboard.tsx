@@ -12,7 +12,7 @@ import type {
   RedditDemandDemoData,
   RedditOpportunity,
   RelevantConversation,
-  ScanEvidence,
+  ScanEvidenceCandidate,
 } from "./types";
 
 import styles from "./ProductDashboard.module.css";
@@ -709,123 +709,6 @@ function CarouselRelevantCard({
   );
 }
 
-export function ScanEvidencePanel({ evidence }: { evidence: ScanEvidence }) {
-  const rejected = [
-    ...Object.entries(evidence.diagnostics.providerRejectedByReason ?? {}),
-    ...Object.entries(evidence.diagnostics.deterministicRejectedByReason ?? {}),
-  ].filter(([, count]) => count > 0);
-
-  return (
-    <details className={styles.dashboardSection}>
-      <summary className={styles.sectionHeadingRow} style={{ cursor: "pointer", listStyle: "none" }}>
-        <div>
-          <span className={styles.eyebrow}>Technical detail</span>
-          <h2>Show full scan trace</h2>
-        </div>
-        <span className={styles.qualityNote}>{evidence.candidates.length} candidates reviewed</span>
-      </summary>
-
-      <section className={`${styles.card} ${styles.profileCard}`}>
-        <div className={styles.opportunityMeta}>
-          <span><b>{evidence.diagnostics.retrieved}</b> provider records found</span>
-          <span><b>{evidence.diagnostics.deterministicSurvivors}</b> credible candidates analyzed</span>
-          <span><b>{evidence.diagnostics.worthEnriching}</b> selected by lightweight AI</span>
-          <span><b>{evidence.diagnostics.enrichedSuccessfully}</b> full threads verified</span>
-          <span><b>{evidence.diagnostics.deepQualificationsReturned}</b> deep AI decisions</span>
-        </div>
-        {evidence.diagnostics.coverageLimited && (
-          <p className={styles.provenanceFootnote}>
-            Full-context coverage was limited: {evidence.diagnostics.enrichedSuccessfully} verified versus a target of {evidence.diagnostics.requiredFullContextReviews ?? 0}. This report therefore does not treat zero potential customers as definitive.
-          </p>
-        )}
-        <details>
-          <summary><strong>Search plan ({evidence.searchPlan.length} queries)</strong></summary>
-          <ul className={styles.cleanList}>
-            {evidence.searchPlan.map((entry, index) => (
-              <li key={`${entry.lane}-${entry.query}-${index}`}>
-                <span className={styles.listDot} />
-                <span><b>{intelligenceLabel(entry.lane)}</b>: {entry.query}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-        {rejected.length > 0 && (
-          <details>
-            <summary><strong>Rejected before AI ({rejected.reduce((sum, [, count]) => sum + count, 0)})</strong></summary>
-            <div className={styles.opportunityMeta}>
-              {rejected.map(([reason, count]) => (
-                <span key={reason}><b>{count}</b> {intelligenceLabel(reason)}</span>
-              ))}
-            </div>
-          </details>
-        )}
-      </section>
-
-      <div className={styles.opportunityStack}>
-        {evidence.candidates.map((candidate, index) => {
-          const deep = candidate.deepQualification;
-          const status = deep
-            ? deep.leadStatus === "potential_customer" && !candidate.fullContextVerified
-              ? "Provisional customer signal — context not verified"
-              : intelligenceLabel(deep.leadStatus)
-            : candidate.triage.worthEnriching
-              ? "Selected for full-context review"
-              : candidate.triage.relevant
-                ? "Relevant at lightweight triage"
-                : "Not selected by lightweight triage";
-          return (
-            <details className={styles.opportunityCard} key={candidate.externalId}>
-              <summary>
-                <strong>{index + 1}. {candidate.title || "Reddit comment"}</strong>
-                <span> · r/{candidate.subreddit} · {status}</span>
-              </summary>
-              <div className={styles.mockExcerpt}>
-                <span>Public message excerpt</span>
-                <p>“{candidate.excerpt}”</p>
-              </div>
-              <div className={styles.opportunityMeta}>
-                <span><b>{candidate.fullContextVerified ? "Yes" : "No"}</b> full thread context</span>
-                <span><b>{intelligenceLabel(candidate.triage.intent)}</b> triage intent</span>
-                <span><b>{intelligenceLabel(candidate.triage.productFit)}</b> triage fit</span>
-                {deep && <span><b>{intelligenceLabel(deep.leadStatus)}</b> deep result</span>}
-              </div>
-              <div className={styles.fitReasonGrid}>
-                <div>
-                  <span className={styles.fieldLabel}>Why lightweight AI made this decision</span>
-                  <p>{candidate.triage.reason}</p>
-                </div>
-                <div>
-                  <span className={styles.fieldLabel}>Deep review</span>
-                  <p>{deep?.whyItMatters ?? "Not sent to deep qualification."}</p>
-                </div>
-              </div>
-              {candidate.matchedQueries.length > 0 && (
-                <div>
-                  <span className={styles.fieldLabel}>Matched search attribution</span>
-                  <p>{candidate.matchedQueries.join(" · ")}</p>
-                </div>
-              )}
-              {candidate.permalink && (
-                <div className={styles.opportunityAction}>
-                  <span>Exact discovery message retained from the provider.</span>
-                  <a
-                    className={styles.secondaryButton}
-                    href={candidate.permalink}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                  >
-                    Open exact Reddit message <Icon name="external" size={14} />
-                  </a>
-                </div>
-              )}
-            </details>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
-
 /**
  * A recurring struggle or request, with its supporting conversations behind a
  * "Show evidence" toggle.
@@ -1172,6 +1055,40 @@ function CarouselOpportunityCard({
  * ranking axis across everything that passed filtering, instead of two
  * separately-ranked lists shown in two different places.
  */
+/**
+ * Reshapes a raw ScanEvidenceCandidate (everything the lightweight AI
+ * shortlisted, whether or not it went on to a published lead or relevant
+ * conversation) into a RelevantConversation so it renders through the exact
+ * same carousel card. No reply is attached -- these never became a backend
+ * opportunity/reply record, so there is a discovery signal to show but
+ * nothing to generate or publish yet. Tags stay honest about how far this
+ * particular candidate actually got in the pipeline.
+ */
+function candidateAsRelevantConversation(candidate: ScanEvidenceCandidate): RelevantConversation {
+  const deep = candidate.deepQualification;
+  const tags = [
+    ...(deep?.intelligenceTags ?? []),
+    deep ? "AI reviewed" : "Lightweight signal only",
+    candidate.fullContextVerified ? "Full thread verified" : "Not yet verified",
+  ];
+  return {
+    id: `evidence:${candidate.externalId}`,
+    provider: "reddit",
+    isMock: false,
+    title: candidate.title || "Reddit comment",
+    summary: deep?.whyItMatters || candidate.triage.reason || candidate.excerpt,
+    subreddit: candidate.subreddit,
+    authorLabel: candidate.author ?? "Reddit user",
+    capturedAt: candidate.sourceCreatedAt,
+    permalink: candidate.permalink,
+    tags,
+    demandSignals: deep?.demandSignals ?? (candidate.triage.demandSignal ? [candidate.triage.demandSignal] : []),
+    competitorName: null,
+    provenanceIds: [],
+    reliabilityScore: candidate.reliabilityScore,
+  };
+}
+
 type CarouselItem =
   | { kind: "opportunity"; id: string; reliability: number; opportunity: RedditOpportunity }
   | { kind: "relevant"; id: string; reliability: number; conversation: RelevantConversation };
@@ -1418,12 +1335,14 @@ export function ProductDashboard({
     setPublishedIds((current) => [...current, opportunity.id]);
   };
 
-  const hasAnyRelevantContent = rankedOpportunities.length > 0 || relevantConversations.length > 0;
-
   // One ranking axis across everything that passed filtering -- a lead and a
   // relevant-but-not-lead conversation are both "AI reliability checked,
   // source linked," so they browse as one swipeable carousel instead of a
-  // carousel for leads plus a separate static list underneath it.
+  // carousel for leads plus a separate static list underneath it. Beyond
+  // those two, every remaining candidate the lightweight AI shortlisted
+  // (triage.worthEnriching) is folded in too, reshaped into the same card
+  // via candidateAsRelevantConversation -- this is the dashboard's one and
+  // only results view now; there is no separate technical scan-trace list.
   const carouselItems = useMemo<CarouselItem[]>(() => {
     const opportunityItems: CarouselItem[] = rankedOpportunities.map((opportunity) => ({
       kind: "opportunity",
@@ -1437,8 +1356,33 @@ export function ProductDashboard({
       reliability: conversation.reliabilityScore,
       conversation,
     }));
-    return [...opportunityItems, ...relevantItems].sort((a, b) => b.reliability - a.reliability);
-  }, [rankedOpportunities, relevantConversations]);
+    // A candidate already represented as an opportunity or a relevant
+    // conversation (same public Reddit URL) must not appear a second time
+    // as a lighter, reply-less card.
+    const representedPermalinks = new Set(
+      [...rankedOpportunities, ...relevantConversations]
+        .map((item) => item.permalink)
+        .filter((permalink): permalink is string => Boolean(permalink)),
+    );
+    const candidateItems: CarouselItem[] = (data.scanEvidence?.candidates ?? [])
+      .filter((candidate) => candidate.triage.worthEnriching)
+      .filter((candidate) => !(candidate.permalink && representedPermalinks.has(candidate.permalink)))
+      .map((candidate) => {
+        const conversation = candidateAsRelevantConversation(candidate);
+        const item: CarouselItem = {
+          kind: "relevant",
+          id: conversation.id,
+          reliability: conversation.reliabilityScore,
+          conversation,
+        };
+        return item;
+      });
+    return [...opportunityItems, ...relevantItems, ...candidateItems].sort(
+      (a, b) => b.reliability - a.reliability,
+    );
+  }, [rankedOpportunities, relevantConversations, data.scanEvidence]);
+
+  const hasAnyRelevantContent = carouselItems.length > 0;
 
   return (
     <div className={styles.productShell}>
@@ -1534,8 +1478,6 @@ export function ProductDashboard({
           heading="What they are asking for"
           themes={data.conversationThemes}
         />
-
-        {data.scanEvidence && <ScanEvidencePanel evidence={data.scanEvidence} />}
       </main>
     </div>
   );

@@ -313,6 +313,14 @@ export interface ScanEvidenceCandidate {
     whyItMatters: string;
     shouldReply: boolean;
   };
+  /**
+   * Same 0-100 reliability axis as RedditOpportunity.classification.relevanceScore
+   * and RelevantConversation.reliabilityScore, computed server-side by
+   * candidateReliabilityScore() -- lets the dashboard rank every candidate the
+   * lightweight AI shortlisted (not only the ones that became a published
+   * opportunity or relevant conversation) on one consistent scale.
+   */
+  reliabilityScore: number;
 }
 
 export interface ScanEvidence {

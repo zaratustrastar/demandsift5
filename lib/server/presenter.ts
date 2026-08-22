@@ -1,4 +1,4 @@
-import { dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
+import { candidateReliabilityScore, dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
 import type { MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
@@ -307,6 +307,10 @@ export async function presentScan(scan: ScanRecord) {
             state.threadContextVerified ?? Boolean(state.contextHash && state.deepQualification),
           triage: state.triage,
           deepQualification: state.deepQualification,
+          reliabilityScore: candidateReliabilityScore({
+            triage: state.triage,
+            deepQualification: state.deepQualification,
+          }),
         })),
       },
       lockedOpportunityPreviews: lockedOpportunities.map((opportunity) => ({

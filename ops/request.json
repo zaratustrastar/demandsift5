@@ -1,6 +1,6 @@
 {
-  "id": "verify-harshmaur-live-vps-2026-08-17",
-  "ops": ["runtime", "reddit-config"],
+  "id": "verify-pmfi-headless-render-2026-08-22",
+  "ops": ["runtime"],
   "inspectScans": [],
-  "startScan": { "websiteUrl": "https://linear.app", "pollSeconds": 1500 }
+  "startScan": { "websiteUrl": "https://pmfi.cc", "pollSeconds": 300 }
 }

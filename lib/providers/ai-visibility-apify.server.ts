@@ -36,7 +36,18 @@ export type VisibilityActorRunResult = {
   error: string | null;
 };
 
-const ACTOR_TIMEOUT_MS = 240_000;
+/**
+ * How long a batched, 3-question Actor run is given before Apify itself
+ * kills it (the "timeout" query param on the start call, below) and before
+ * this client gives up waiting. Observed real runs against the live
+ * account: successful chatgpt-search-scraper runs already took up to ~4
+ * minutes (3m58s, 3m16s) for 3 live AI-answered search queries, and the
+ * previous 240_000ms (4 min) value here caused Apify to kill some runs
+ * with status TIMED-OUT right at that boundary -- not a 403, not a
+ * credentials/approval problem, just not enough headroom for what this
+ * Actor actually does. Doubled for real margin.
+ */
+const ACTOR_TIMEOUT_MS = 480_000;
 
 function apifyActorId(value: string): string {
   const normalized = value.trim().replace("/", "~");
@@ -246,7 +257,14 @@ export async function runVisibilityActor(input: {
       if (!status) throw new Error(`The ${input.provider} visibility Actor returned incomplete run status.`);
     }
 
-    if (status !== "SUCCEEDED") {
+    // A TIMED-OUT run with a dataset already has real, paid-for answers in
+    // it for whatever questions finished before Apify killed the run --
+    // discarding those entirely (the previous behavior: treat any non-
+    // SUCCEEDED status as a hard failure) throws away work that already
+    // happened. Salvage them instead; FAILED/ABORTED, or TIMED-OUT with no
+    // dataset at all, still have nothing to salvage and remain hard failures.
+    const timedOutWithPartialResults = status === "TIMED-OUT" && Boolean(datasetId);
+    if (status !== "SUCCEEDED" && !timedOutWithPartialResults) {
       const message = `The ${input.provider} visibility Actor run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`;
       throw APIFY_RETRYABLE_RUN_STATUSES.has(status) ? new ApifyTransientError(message) : new Error(message);
     }
@@ -296,7 +314,15 @@ export async function runVisibilityActor(input: {
     }
 
     const failedQuestions = input.questions.filter((question) => !answeredQuestions.has(question));
-    return { provider: input.provider, actorRunId: runId || null, answers, failedQuestions, error: null };
+    // Only a soft, informational note -- not thrown -- since real answers
+    // did come back. Still surfaced as this provider's `error` (see
+    // providerErrors in ai-visibility-workflow.ts) so the results view
+    // shows why fewer than 3 answers exist instead of staying silent.
+    const partialTimeoutNote =
+      timedOutWithPartialResults && failedQuestions.length > 0
+        ? `The ${input.provider} visibility Actor timed out after ${Math.ceil(timeoutMs / 1_000)}s before finishing all ${input.questions.length} questions -- ${answers.length} answer${answers.length === 1 ? "" : "s"} completed before the cutoff, ${failedQuestions.length} did not.`
+        : null;
+    return { provider: input.provider, actorRunId: runId || null, answers, failedQuestions, error: partialTimeoutNote };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ApifyTransientError(

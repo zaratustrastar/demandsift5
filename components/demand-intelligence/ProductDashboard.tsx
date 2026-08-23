@@ -641,7 +641,6 @@ function CarouselRelevantCard({
   isCreatingReply: boolean;
   onCreateReply: () => void;
 }) {
-  const reliabilityScore = Math.round(conversation.reliabilityScore);
   const signalLabels = [...new Set([
     ...conversation.demandSignals,
     ...conversation.tags,
@@ -651,14 +650,6 @@ function CarouselRelevantCard({
 
   return (
     <article className={styles.opportunityCard}>
-      <div className={styles.carouselTopline}>
-        <span aria-hidden="true" />
-        <span className={styles.reliabilityBadge}>
-          <strong>{reliabilityScore}%</strong>
-          <em>AI reliability</em>
-        </span>
-      </div>
-
       <div className={styles.opportunityTopline}>
         <div className={styles.sourceIdentity}>
           <span className={styles.redditMark}>r/</span>
@@ -669,9 +660,6 @@ function CarouselRelevantCard({
             </span>
           </div>
         </div>
-        <span className={`${styles.intentPill} ${styles.intentMedium}`}>
-          Research signal — not a lead
-        </span>
       </div>
 
       <h3>{conversation.title}</h3>
@@ -990,20 +978,11 @@ function CarouselOpportunityCard({
   isRevealed: boolean;
   onToggleReply: () => void;
 }) {
-  const reliabilityScore = Math.round(opportunity.classification.relevanceScore);
   const tags = reliabilitySignalTags(opportunity);
   const whyItMatters = opportunity.matchReasons[0] ?? opportunity.classification.customerProblem;
 
   return (
     <article className={styles.opportunityCard}>
-      <div className={styles.carouselTopline}>
-        <span aria-hidden="true" />
-        <span className={styles.reliabilityBadge}>
-          <strong>{reliabilityScore}%</strong>
-          <em>AI reliability</em>
-        </span>
-      </div>
-
       <div className={styles.sourceIdentity}>
         <span className={styles.redditMark}>u/</span>
         <div>

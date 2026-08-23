@@ -15,6 +15,16 @@ test("the carousel no longer shows a 'Most reliable' badge", () => {
   assert.equal(dashboard.includes("Most reliable"), false);
 });
 
+test("the carousel cards no longer show 'AI reliability' or 'Research signal — not a lead' tags", () => {
+  const carouselStart = dashboard.indexOf("function CarouselRelevantCard");
+  const carouselEnd = dashboard.indexOf("A Tinder-style, single-card horizontal browser");
+  assert.ok(carouselStart > -1 && carouselEnd > carouselStart);
+  const carouselCardsSource = dashboard.slice(carouselStart, carouselEnd);
+  assert.equal(carouselCardsSource.includes("AI reliability"), false);
+  assert.equal(carouselCardsSource.includes("Research signal"), false);
+  assert.equal(carouselCardsSource.includes("reliabilityBadge"), false);
+});
+
 test("the carousel section is titled 'Reddit posts found:'", () => {
   assert.match(dashboard, /<h2>Reddit posts found:<\/h2>/);
   assert.equal(dashboard.includes("Leads and other relevant conversations"), false);

@@ -255,3 +255,4 @@ jobs:
 # trigger: deploy tag removal (2026-08-23T15:51:48Z)
 # trigger: deploy lightweight candidate reply generation (2026-08-23T16:32:26Z)
 # trigger: deploy monitoring/AI-visibility results views + 403 fix (2026-08-23T19:49:01Z)
+# trigger: deploy AI visibility timeout fix (2026-08-23T20:54:08Z)

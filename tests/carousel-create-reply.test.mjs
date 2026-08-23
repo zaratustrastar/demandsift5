@@ -36,9 +36,17 @@ test("a relevant conversation without a reply gets a working Create reply button
   assert.match(experience, /\/api\/scans\/\$\{scanResponse\.scan\.id\}\/candidates\/\$\{encodeURIComponent\(externalId\)\}\/reply/);
 });
 
-test("on-demand candidate replies never bypass deep qualification or the shouldReply safety gate", () => {
-  assert.match(candidateReplyService, /candidate_not_deep_qualified/);
-  assert.match(candidateReplyService, /qualification\.shouldReply !== true/);
+test("a deep-qualified candidate's real shouldReply decision still gates its reply", () => {
+  assert.match(candidateReplyService, /isDeepQualified && qualification\.shouldReply !== true/);
   assert.match(candidateReplyService, /entitlementCoversWebsite/);
   assert.match(route, /createCandidateReply/);
+});
+
+test("a lightweight-only (not deep-qualified) candidate gets a reply from triage instead of being refused", () => {
+  assert.match(candidateReplyService, /syntheticQualificationFromTriage/);
+  assert.match(candidateReplyService, /state\.deepQualification \?\? syntheticQualificationFromTriage\(state\)/);
+  // The synthetic path is always copy-and-review, never auto-postable or
+  // treated as vetted the way a real deep qualification is.
+  assert.match(candidateReplyService, /autoReplyAllowed: false/);
+  assert.match(candidateReplyService, /requiresHumanReview: true/);
 });

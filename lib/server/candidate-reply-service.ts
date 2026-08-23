@@ -4,10 +4,11 @@ import {
   replyScore,
   researchScore,
 } from "@/lib/intelligence/reddit-pipeline";
-import type { QualifiedOpportunity } from "@/lib/domain/types";
+import type { DeepQualification, QualifiedOpportunity } from "@/lib/domain/types";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
 import type {
   MarketIntelligenceRecord,
+  ProcessedRedditState,
   Provenance,
   ReplyRecord,
   ScanRecord,
@@ -19,22 +20,64 @@ import { getEffectiveEntitlement, getStateRepository } from "./repository";
 import { businessFromProfile, usageRecord } from "./reply-service";
 
 /**
+ * A stand-in DeepQualification for a candidate the scan only ever ran
+ * lightweight triage on -- most of the carousel, in practice, since deep
+ * qualification is budget-bounded. Built honestly from what triage actually
+ * found, not invented: productFit/intent/timing/replyability carry over
+ * directly, everything triage cannot know (painSeverity, evidenceQuality,
+ * communityRisk) stays "unknown" rather than guessed as good.
+ *
+ * shouldReply is fixed true and autoReplyAllowed fixed false by design, not
+ * by triage's opinion -- this whole path exists so the user can get a draft
+ * to review and copy for a post no AI has judged appropriate to reply to
+ * yet, never to auto-post one. requiresHumanReview/disclosureRequired stay
+ * true for the same reason: nothing here has been vetted the way a deep
+ * qualification pass vets it.
+ */
+function syntheticQualificationFromTriage(state: ProcessedRedditState): DeepQualification {
+  const triage = state.triage;
+  return {
+    externalId: state.externalId,
+    leadStatus: "uncertain",
+    demandSignals: triage.demandSignal !== "none" ? [triage.demandSignal] : [],
+    intelligenceTags: [],
+    productFit: triage.productFit,
+    painSeverity: "unknown",
+    intent: triage.intent,
+    timing: triage.timing,
+    evidenceQuality: "unknown",
+    replyability: triage.replyability,
+    communityRisk: "unknown",
+    problemSummary: triage.problem,
+    whyItMatters: triage.reason,
+    shouldReply: true,
+    autoReplyAllowed: false,
+    requiresHumanReview: true,
+    mentionProduct: true,
+    disclosureRequired: true,
+  };
+}
+
+/**
  * On-demand reply generation for the unified carousel's "Create reply"
  * button -- the counterpart to reply-service.ts's regenerateReply, which
  * only ever rerolls a reply that already exists. This creates the first
- * one, for any Reddit candidate the scan already deep-qualified, whether it
- * is a published lead (which already always has a reply -- this path is
- * never used for those), an existing relevant conversation that was not
- * picked for an automatic scan-time draft, or a raw candidate that never
- * became a MarketIntelligenceRecord at all.
+ * one, for any Reddit candidate in the carousel: a published lead (which
+ * already always has a reply -- this path is never used for those), an
+ * existing relevant conversation that was not picked for an automatic
+ * scan-time draft, or a raw candidate that never became a
+ * MarketIntelligenceRecord at all.
  *
- * Deliberately does NOT run deep qualification on demand: that is a
- * meaningful AI review with real safety consequences (community risk,
- * shouldReply, disclosure requirements) that the scan already ran for every
- * candidate it had budget for. A candidate the scan never got to reviewing
- * in depth is not silently upgraded into one here -- it is reported back to
- * the caller so the UI can say so, honestly, the same way the rest of this
- * product refuses to convert "not yet reviewed" into "reviewed and fine."
+ * A candidate the scan deep-qualified uses that real qualification and
+ * stays gated on its real shouldReply decision, unchanged from before. A
+ * candidate the scan only lightweight-triaged (most of the carousel, since
+ * deep qualification is budget-bounded) gets
+ * syntheticQualificationFromTriage above instead of being refused --
+ * the tradeoff the user asked for is a copy-and-review draft on demand
+ * for these, not the full deep-review safety gate. Deep qualification
+ * itself is still never run on demand here; see
+ * syntheticQualificationFromTriage's doc comment for why the draft this
+ * produces is always human-review-required rather than auto-postable.
  */
 export async function createCandidateReply(input: {
   workspaceId: string;
@@ -63,15 +106,11 @@ export async function createCandidateReply(input: {
   if (!state) {
     throw new ApiError("This Reddit post was not found in the scan.", 404, "candidate_not_found");
   }
-  const qualification = state.deepQualification;
-  if (!qualification) {
-    throw new ApiError(
-      "This post has not been reviewed by AI in enough depth yet to draft a reply.",
-      409,
-      "candidate_not_deep_qualified",
-    );
-  }
-  if (qualification.shouldReply !== true) {
+  const isDeepQualified = Boolean(state.deepQualification);
+  const qualification = state.deepQualification ?? syntheticQualificationFromTriage(state);
+  // Only a real deep qualification's shouldReply is a safety decision worth
+  // refusing on -- the synthetic one above is fixed true by construction.
+  if (isDeepQualified && qualification.shouldReply !== true) {
     throw new ApiError(
       "This conversation is not currently suitable for a business reply.",
       409,

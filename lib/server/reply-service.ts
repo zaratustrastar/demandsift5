@@ -34,7 +34,7 @@ function hostnameOrEmpty(websiteUrl: string): string {
   }
 }
 
-function businessFromProfile(
+export function businessFromProfile(
   profile: ScanBusinessProfile,
   workspaceId: string,
 ): BusinessUnderstanding {
@@ -158,7 +158,7 @@ function qualifiedOpportunity(
   };
 }
 
-function usageRecord(result: {
+export function usageRecord(result: {
   model: string;
   usage: { inputTokens: number; outputTokens: number };
   estimatedCostUsd: number;

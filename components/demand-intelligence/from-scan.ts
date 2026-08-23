@@ -46,6 +46,7 @@ type ApiInsight = {
 
 type ApiRelevantConversation = {
   id: string;
+  externalId: string;
   title: string;
   summary: string;
   subreddit: string;
@@ -424,6 +425,7 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
       const reply = conversation.replyId ? replyByOpportunity.get(conversation.id) : undefined;
       return {
         id: conversation.id,
+        externalId: conversation.externalId,
         provider: conversation.provider,
         isMock: conversation.dataMode === "mock",
         title: conversation.title,

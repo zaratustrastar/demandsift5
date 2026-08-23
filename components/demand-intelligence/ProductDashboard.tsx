@@ -78,6 +78,13 @@ export interface ProductDashboardProps {
   ) => Promise<boolean>;
   aiVisibility?: AiVisibilityStatus | null;
   onUpdateAiVisibility?: (enabled: boolean) => Promise<boolean>;
+  /**
+   * Drafts a first reply, on demand, for a relevant conversation (or raw
+   * carousel candidate) that does not have one yet -- returns the new
+   * draft content, or null on failure (the caller surfaces the error
+   * message itself, the same way onRegenerateReply does).
+   */
+  onCreateReply?: (conversationId: string, externalId: string) => Promise<string | null>;
   onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
 }
 
@@ -618,32 +625,34 @@ export function RelevantConversationCard({
  */
 function CarouselRelevantCard({
   conversation,
-  isMostReliable,
   isRevealed,
   onToggleReply,
+  createdDraft,
+  isCreatingReply,
+  onCreateReply,
 }: {
   conversation: RelevantConversation;
-  isMostReliable: boolean;
   isRevealed: boolean;
   onToggleReply: () => void;
+  /** A reply drafted on demand this session via "Create reply" -- kept in
+   * the parent's local state rather than the report, since it exists purely
+   * client-side until the user copies or publishes it. */
+  createdDraft?: string;
+  isCreatingReply: boolean;
+  onCreateReply: () => void;
 }) {
   const reliabilityScore = Math.round(conversation.reliabilityScore);
   const signalLabels = [...new Set([
     ...conversation.demandSignals,
     ...conversation.tags,
   ])].slice(0, 5);
-  const hasReply = Boolean(conversation.reply?.draft.trim());
+  const draft = conversation.reply?.draft ?? createdDraft;
+  const hasReply = Boolean(draft?.trim());
 
   return (
     <article className={styles.opportunityCard}>
       <div className={styles.carouselTopline}>
-        {isMostReliable ? (
-          <span className={styles.mostReliableBadge}>
-            <Icon name="star" size={12} /> Most reliable
-          </span>
-        ) : (
-          <span aria-hidden="true" />
-        )}
+        <span aria-hidden="true" />
         <span className={styles.reliabilityBadge}>
           <strong>{reliabilityScore}%</strong>
           <em>AI reliability</em>
@@ -683,15 +692,25 @@ function CarouselRelevantCard({
       {hasReply && isRevealed && (
         <div className={styles.mockExcerpt}>
           <span>Suggested reply</span>
-          <p>{conversation.reply?.draft}</p>
+          <p>{draft}</p>
         </div>
       )}
 
       <div className={styles.carouselActions}>
-        {hasReply && (
+        {hasReply ? (
           <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
             <Icon name="refresh" size={14} />
             {isRevealed ? "Hide suggested reply" : "Suggested reply ready"}
+          </button>
+        ) : (
+          <button
+            className={styles.primaryButton}
+            type="button"
+            disabled={isCreatingReply}
+            onClick={onCreateReply}
+          >
+            <Icon name="refresh" size={14} />
+            {isCreatingReply ? "Creating reply…" : "Create reply"}
           </button>
         )}
         {conversation.permalink && !conversation.isMock && (
@@ -964,12 +983,10 @@ function reliabilitySignalTags(opportunity: RedditOpportunity): string[] {
  */
 function CarouselOpportunityCard({
   opportunity,
-  isMostReliable,
   isRevealed,
   onToggleReply,
 }: {
   opportunity: RedditOpportunity;
-  isMostReliable: boolean;
   isRevealed: boolean;
   onToggleReply: () => void;
 }) {
@@ -980,13 +997,7 @@ function CarouselOpportunityCard({
   return (
     <article className={styles.opportunityCard}>
       <div className={styles.carouselTopline}>
-        {isMostReliable ? (
-          <span className={styles.mostReliableBadge}>
-            <Icon name="star" size={12} /> Most reliable
-          </span>
-        ) : (
-          <span aria-hidden="true" />
-        )}
+        <span aria-hidden="true" />
         <span className={styles.reliabilityBadge}>
           <strong>{reliabilityScore}%</strong>
           <em>AI reliability</em>
@@ -1073,6 +1084,7 @@ function candidateAsRelevantConversation(candidate: ScanEvidenceCandidate): Rele
   ];
   return {
     id: `evidence:${candidate.externalId}`,
+    externalId: candidate.externalId,
     provider: "reddit",
     isMock: false,
     title: candidate.title || "Reddit comment",
@@ -1106,6 +1118,9 @@ function OpportunityCarousel({
   onPublish,
   redditConnection,
   onFunnelEvent,
+  createdReplies,
+  creatingReplyId,
+  onCreateReply,
 }: {
   items: CarouselItem[];
   drafts: Record<string, string>;
@@ -1119,6 +1134,9 @@ function OpportunityCarousel({
   onPublish: (opportunity: RedditOpportunity) => void;
   redditConnection: RedditConnectionStatus;
   onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
+  createdReplies: Record<string, string>;
+  creatingReplyId: string | null;
+  onCreateReply: (conversation: RelevantConversation) => void;
 }) {
   const [index, setIndex] = useState(0);
   const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
@@ -1148,21 +1166,22 @@ function OpportunityCarousel({
       className={styles.carousel}
       role="group"
       aria-roledescription="carousel"
-      aria-label="Relevant Reddit conversations, ordered by AI reliability, highest first"
+      aria-label="Reddit posts found, ordered by AI reliability, highest first"
     >
       {item.kind === "opportunity" ? (
         <CarouselOpportunityCard
           opportunity={item.opportunity}
-          isMostReliable={safeIndex === 0}
           isRevealed={isRevealed}
           onToggleReply={() => toggleReply(item.id)}
         />
       ) : (
         <CarouselRelevantCard
           conversation={item.conversation}
-          isMostReliable={safeIndex === 0}
           isRevealed={isRevealed}
           onToggleReply={() => toggleReply(item.id)}
+          createdDraft={createdReplies[item.conversation.id]}
+          isCreatingReply={creatingReplyId === item.conversation.id}
+          onCreateReply={() => onCreateReply(item.conversation)}
         />
       )}
 
@@ -1244,6 +1263,7 @@ export function ProductDashboard({
   onUpdateMonitoring,
   aiVisibility = null,
   onUpdateAiVisibility,
+  onCreateReply,
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
@@ -1295,6 +1315,26 @@ export function ProductDashboard({
     () => [...new Set([...serverPublishedIds, ...publishedIds])],
     [serverPublishedIds, publishedIds],
   );
+
+  // Purely client-side: a reply drafted this session via "Create reply" for
+  // a relevant conversation (or raw carousel candidate) that had none. Not
+  // persisted into `data` -- the next fetched report will carry the real
+  // stored version once the backend has it.
+  const [createdReplies, setCreatedReplies] = useState<Record<string, string>>({});
+  const [creatingReplyId, setCreatingReplyId] = useState<string | null>(null);
+
+  const createReply = async (conversation: RelevantConversation) => {
+    if (!onCreateReply || creatingReplyId) return;
+    setCreatingReplyId(conversation.id);
+    try {
+      const content = await onCreateReply(conversation.id, conversation.externalId);
+      if (content) {
+        setCreatedReplies((current) => ({ ...current, [conversation.id]: content }));
+      }
+    } finally {
+      setCreatingReplyId((current) => (current === conversation.id ? null : current));
+    }
+  };
 
   const regenerateReply = async (opportunity: RedditOpportunity) => {
     const regenerated = await onRegenerateReply?.(opportunity.id);
@@ -1438,8 +1478,7 @@ export function ProductDashboard({
               <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
                 <div className={styles.sectionHeadingRow}>
                   <div>
-                    <span className={styles.eyebrow}>Relevant Reddit conversations</span>
-                    <h2>{rankedOpportunities.length > 0 ? "Leads and other relevant conversations" : "Other relevant conversations"}</h2>
+                    <h2>Reddit posts found:</h2>
                   </div>
                   <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
                 </div>
@@ -1460,6 +1499,9 @@ export function ProductDashboard({
                   onPublish={(opportunity) => void publishReply(opportunity)}
                   redditConnection={redditConnection}
                   onFunnelEvent={onFunnelEvent}
+                  createdReplies={createdReplies}
+                  creatingReplyId={creatingReplyId}
+                  onCreateReply={(conversation) => void createReply(conversation)}
                 />
               </TrackedSection>
             )

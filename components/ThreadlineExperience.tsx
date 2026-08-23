@@ -1137,6 +1137,32 @@ export function ThreadlineExperience() {
     }
   }
 
+  async function createCandidateReply(
+    _conversationId: string,
+    externalId: string,
+  ): Promise<string | null> {
+    if (!scanResponse?.scan.id) return null;
+    try {
+      setStatusMessage("Drafting a reply from the conversation and verified website facts…");
+      const response = await fetch(
+        `/api/scans/${scanResponse.scan.id}/candidates/${encodeURIComponent(externalId)}/reply`,
+        { method: "POST" },
+      );
+      const payload = (await response.json()) as {
+        reply?: { content: string };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.reply?.content) {
+        throw new Error(payload.error?.message ?? "The reply could not be created.");
+      }
+      setStatusMessage("Reply drafted from the conversation and verified website facts.");
+      return payload.reply.content;
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "The reply could not be created.");
+      return null;
+    }
+  }
+
   async function recordPublication(
     opportunityId: string,
     replyText: string,
@@ -1301,6 +1327,7 @@ export function ThreadlineExperience() {
         onUpdateMonitoring={updateMonitoring}
         aiVisibility={aiVisibility}
         onUpdateAiVisibility={updateAiVisibility}
+        onCreateReply={createCandidateReply}
         onFunnelEvent={recordFunnelEvent}
       />
     </div>

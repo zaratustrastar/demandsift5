@@ -59,6 +59,7 @@ function publicRelevantConversation(
   const dataMode = source?.sourceMode ?? (source?.synthetic ? "mock" : "live");
   return {
     id: intelligence.id,
+    externalId: intelligence.externalId,
     title: intelligence.title,
     summary: intelligence.summary,
     subreddit: intelligence.subreddit,

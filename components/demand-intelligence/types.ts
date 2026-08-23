@@ -106,6 +106,8 @@ export interface DemandInsight {
 
 export interface RelevantConversation {
   id: string;
+  /** Reddit's own id for this conversation -- the join key for on-demand actions like Create reply. */
+  externalId: string;
   provider: string;
   isMock: boolean;
   title: string;

@@ -26,6 +26,14 @@ export type VisibilityActorRunResult = {
   answers: RawVisibilityAnswer[];
   /** Questions the actor could not answer, so the caller can still store a record for them. */
   failedQuestions: string[];
+  /**
+   * Set only when the whole Actor run never produced a usable result (the
+   * run never started, or ended in a non-retryable failure) -- the exact
+   * reason, including any Apify-supplied remediation link, so the AI
+   * visibility results view can tell the user what actually happened
+   * instead of a bare "no answer". Null on a normal, fully successful run.
+   */
+  error: string | null;
 };
 
 const ACTOR_TIMEOUT_MS = 240_000;
@@ -48,6 +56,52 @@ function hostnameOf(url: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Turns a non-2xx Apify response body into an actionable message. Apify
+ * returns structured JSON errors (`{error: {type, message, data}}`), not
+ * just an HTTP status -- and for the specific, well-documented case of a
+ * full-permission Actor (which these 3 official search-scraper Actors are)
+ * never having been run from this account before, the body includes an
+ * `approvalUrl` that a human must open in Apify Console: approval is
+ * deliberately blocked from the API itself, so no code change or retry can
+ * fix this, only a one-time click by whoever owns the Apify account. See
+ * https://apify.com/change-log/full-permission-actors-approval.
+ */
+function describeApifyError(provider: string, status: number, raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = raw ? JSON.parse(raw) : null;
+  } catch {
+    parsed = null;
+  }
+  const errorObject =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).error
+      : null;
+  if (errorObject && typeof errorObject === "object" && !Array.isArray(errorObject)) {
+    const fields = errorObject as Record<string, unknown>;
+    const type = stringField(fields.type);
+    const message = stringField(fields.message);
+    const data = fields.data;
+    const approvalUrl =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? stringField((data as Record<string, unknown>).approvalUrl)
+        : "";
+    if (type === "full-permission-actor-not-approved" || approvalUrl) {
+      return (
+        `The ${provider} visibility Actor has never been approved for API use on this Apify account ` +
+        `(HTTP ${status}, full-permission Actor). Apify requires a one-time manual approval in Apify ` +
+        `Console before it can be called via the API -- this cannot be done from code or retried away.` +
+        (approvalUrl ? ` Approve it at: ${approvalUrl}` : "")
+      );
+    }
+    if (message) {
+      return `The ${provider} visibility Actor request failed: ${message} (HTTP ${status}).`;
+    }
+  }
+  return `${provider} visibility Actor request failed with HTTP ${status}.`;
 }
 
 /**
@@ -113,7 +167,7 @@ export async function runVisibilityActor(input: {
       throw new Error(`The ${input.provider} visibility Actor response exceeded the size limit.`);
     }
     if (!response.ok) {
-      const message = `${input.provider} visibility Actor request failed with HTTP ${response.status}.`;
+      const message = describeApifyError(input.provider, response.status, raw);
       throw isApifyRetryableHttpStatus(response.status) ? new ApifyTransientError(message) : new Error(message);
     }
     try {
@@ -242,7 +296,7 @@ export async function runVisibilityActor(input: {
     }
 
     const failedQuestions = input.questions.filter((question) => !answeredQuestions.has(question));
-    return { provider: input.provider, actorRunId: runId || null, answers, failedQuestions };
+    return { provider: input.provider, actorRunId: runId || null, answers, failedQuestions, error: null };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ApifyTransientError(
@@ -283,6 +337,6 @@ export async function runAllVisibilityActors(input: {
     // still store real answers from the providers that succeeded.
     const message = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
     console.error(`AI visibility Actor failed for ${provider}: ${message}`);
-    return { provider, actorRunId: null, answers: [], failedQuestions: [...input.questions] };
+    return { provider, actorRunId: null, answers: [], failedQuestions: [...input.questions], error: message };
   });
 }

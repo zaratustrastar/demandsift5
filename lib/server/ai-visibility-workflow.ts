@@ -160,9 +160,25 @@ export async function runAiVisibilityScan(visibilityScanId: string): Promise<AiV
     await saveAiVisibilityScan(record);
 
     const apifyToken = process.env.APIFY_TOKEN?.trim();
+    const missingTokenMessage = "APIFY_TOKEN is not configured on the server, so no AI visibility Actor could run.";
     const actorResults = apifyToken
       ? await runAllVisibilityActors({ questions, token: apifyToken })
-      : PROVIDERS.map((provider) => ({ provider, actorRunId: null, answers: [], failedQuestions: [...questions] }));
+      : PROVIDERS.map((provider) => ({
+          provider,
+          actorRunId: null,
+          answers: [],
+          failedQuestions: [...questions],
+          error: missingTokenMessage,
+        }));
+
+    const providerErrors: Record<AiVisibilityAiProvider, string | null> = {
+      chatgpt: null,
+      gemini: null,
+      perplexity: null,
+    };
+    for (const result of actorResults) {
+      if (result.error) providerErrors[result.provider] = result.error;
+    }
 
     const brandTerms = brandTermsFor(business);
     const competitorNames = competitorNamesFor(business, competitors);
@@ -231,6 +247,7 @@ export async function runAiVisibilityScan(visibilityScanId: string): Promise<AiV
       ...record,
       answers: draftAnswers,
       metrics,
+      providerErrors,
       updatedAt: new Date().toISOString(),
     };
     await completeAiVisibilityScan(record);

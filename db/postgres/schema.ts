@@ -583,6 +583,7 @@ export const runtimeAiVisibilityScans = pgTable("runtime_ai_visibility_scans", {
   answers: jsonb("answers").$type<AiVisibilityAnswer[]>().default([]).notNull(),
   metrics: jsonb("metrics").$type<Record<string, unknown> | null>(),
   error: text("error"),
+  providerErrors: jsonb("provider_errors").$type<Record<string, string | null>>().default({ chatgpt: null, gemini: null, perplexity: null }).notNull(),
   createdAt,
   updatedAt,
 }, (table) => [

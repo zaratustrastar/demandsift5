@@ -7,6 +7,7 @@ import {
   runtimeAiVisibilitySchedules,
 } from "@/db/postgres/schema";
 import type {
+  AiVisibilityAiProvider,
   AiVisibilityMetrics,
   AiVisibilityScanRecord,
   AiVisibilitySettingsRecord,
@@ -49,6 +50,10 @@ export function nextMonday(from: Date): Date {
   return result;
 }
 
+function defaultProviderErrors(): Record<AiVisibilityAiProvider, string | null> {
+  return { chatgpt: null, gemini: null, perplexity: null };
+}
+
 function settingsFromRow(row: typeof runtimeAiVisibilitySchedules.$inferSelect): AiVisibilitySettingsRecord {
   return {
     workspaceId: row.workspaceId,
@@ -72,6 +77,7 @@ function scanFromRow(row: typeof runtimeAiVisibilityScans.$inferSelect): AiVisib
     answers: row.answers,
     metrics: (row.metrics as AiVisibilityMetrics | null) ?? null,
     error: row.error,
+    providerErrors: (row.providerErrors as Record<AiVisibilityAiProvider, string | null> | null) ?? defaultProviderErrors(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -190,6 +196,7 @@ export async function createAiVisibilityScan(input: {
     answers: [],
     metrics: null,
     error: null,
+    providerErrors: defaultProviderErrors(),
     createdAt: now,
     updatedAt: now,
   };
@@ -206,6 +213,7 @@ export async function createAiVisibilityScan(input: {
     answers: record.answers,
     metrics: null,
     error: null,
+    providerErrors: record.providerErrors,
     createdAt: new Date(now),
     updatedAt: new Date(now),
   });
@@ -236,6 +244,7 @@ export async function saveAiVisibilityScan(record: AiVisibilityScanRecord): Prom
       answers: record.answers,
       metrics: record.metrics,
       error: record.error,
+      providerErrors: record.providerErrors,
       updatedAt,
     })
     .where(eq(runtimeAiVisibilityScans.id, record.id));
@@ -279,6 +288,7 @@ export async function completeAiVisibilityScan(record: AiVisibilityScanRecord): 
         answers: completed.answers,
         metrics: completed.metrics,
         error: null,
+        providerErrors: completed.providerErrors,
         updatedAt: completedAt,
       })
       .where(eq(runtimeAiVisibilityScans.id, completed.id));

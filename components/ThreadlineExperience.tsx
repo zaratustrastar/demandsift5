@@ -5,7 +5,9 @@ import {
   ProductDashboard,
   type RedditConnectionStatus,
   type RedditMonitoringStatus,
+  type RedditMonitorRunSummary,
   type AiVisibilityStatus,
+  type AiVisibilityScanSummary,
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
@@ -538,7 +540,9 @@ export function ThreadlineExperience() {
   const [redditConnection, setRedditConnection] =
     useState<RedditConnectionStatus>(disconnectedReddit);
   const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
+  const [monitorRuns, setMonitorRuns] = useState<RedditMonitorRunSummary[] | null>(null);
   const [aiVisibility, setAiVisibility] = useState<AiVisibilityStatus | null>(null);
+  const [visibilityScans, setVisibilityScans] = useState<AiVisibilityScanSummary[] | null>(null);
   const dashboardData = useMemo(
     () => (scanResponse ? scanResponseToDashboard(scanResponse) : null),
     [scanResponse],
@@ -701,9 +705,11 @@ export function ThreadlineExperience() {
         const response = await fetch("/api/monitoring/settings", { cache: "no-store" });
         const payload = (await response.json()) as {
           monitoring?: RedditMonitoringStatus;
+          recentRuns?: RedditMonitorRunSummary[];
         };
         if (response.ok && payload.monitoring && !cancelled) {
           setMonitoring(payload.monitoring);
+          setMonitorRuns(payload.recentRuns ?? []);
         }
       } catch {
         // Monitoring is independent from Reddit OAuth. A transient settings
@@ -716,9 +722,11 @@ export function ThreadlineExperience() {
         const response = await fetch("/api/ai-visibility/settings", { cache: "no-store" });
         const payload = (await response.json()) as {
           visibility?: AiVisibilityStatus | null;
+          recentScans?: AiVisibilityScanSummary[];
         };
         if (response.ok && payload.visibility && !cancelled) {
           setAiVisibility(payload.visibility);
+          setVisibilityScans(payload.recentScans ?? []);
         }
       } catch {
         // Same independence as loadRedditMonitoring above: a transient
@@ -754,7 +762,9 @@ export function ThreadlineExperience() {
       setContextText("");
     }
     setMonitoring(null);
+    setMonitorRuns(null);
     setAiVisibility(null);
+    setVisibilityScans(null);
     resumedScanRef.current = null;
     setScanResponse(null);
     setScanProgress([]);
@@ -953,6 +963,24 @@ export function ThreadlineExperience() {
     setAccessLevel(effectiveAccessLevel(latest.access));
   }
 
+  /**
+   * "View results" on a completed daily-monitoring run -- loads that run's
+   * own scan (see RedditMonitorRunRecord.scanId, created by
+   * monitoringScan() in reddit-monitor-workflow.ts) into the same report
+   * view already on screen, in place. Reuses refreshScan rather than a
+   * separate fetch: a monitor run's scan is a normal, workspace-owned
+   * ScanRecord like any other, so GET /api/scans/{scanId} already works
+   * for it unmodified.
+   */
+  async function viewMonitorRun(scanId: string) {
+    try {
+      await refreshScan(scanId);
+      setStatusMessage("Loaded this monitoring run's results.");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Could not load this run's results.");
+    }
+  }
+
   async function recordFunnelEvent(
     name:
       | "potential_customer_count_revealed"
@@ -1073,12 +1101,14 @@ export function ThreadlineExperience() {
       });
       const payload = (await response.json()) as {
         monitoring?: RedditMonitoringStatus;
+        recentRuns?: RedditMonitorRunSummary[];
         error?: { message?: string };
       };
       if (!response.ok || !payload.monitoring) {
         throw new Error(payload.error?.message ?? "Daily Reddit monitoring could not be updated.");
       }
       setMonitoring(payload.monitoring);
+      setMonitorRuns(payload.recentRuns ?? []);
       setStatusMessage(enabled
         ? "Daily Reddit monitoring is on. All active terms will be checked together."
         : "Daily Reddit monitoring is off.");
@@ -1098,12 +1128,14 @@ export function ThreadlineExperience() {
       });
       const payload = (await response.json()) as {
         visibility?: AiVisibilityStatus;
+        recentScans?: AiVisibilityScanSummary[];
         error?: { message?: string };
       };
       if (!response.ok || !payload.visibility) {
         throw new Error(payload.error?.message ?? "AI visibility tracking could not be updated.");
       }
       setAiVisibility(payload.visibility);
+      setVisibilityScans(payload.recentScans ?? []);
       setStatusMessage(enabled
         ? "AI visibility tracking is on. ChatGPT, Gemini and Perplexity will be checked weekly."
         : "AI visibility tracking is off.");
@@ -1325,8 +1357,11 @@ export function ThreadlineExperience() {
         onDisconnectReddit={disconnectReddit}
         monitoring={monitoring}
         onUpdateMonitoring={updateMonitoring}
+        monitorRuns={monitorRuns}
+        onViewMonitorRun={viewMonitorRun}
         aiVisibility={aiVisibility}
         onUpdateAiVisibility={updateAiVisibility}
+        visibilityScans={visibilityScans}
         onCreateReply={createCandidateReply}
         onFunnelEvent={recordFunnelEvent}
       />

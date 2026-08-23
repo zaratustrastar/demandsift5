@@ -15,14 +15,17 @@ export async function GET(request: Request) {
     const actor = await requireWorkspace(request);
     const [settings, recentScans] = await Promise.all([
       getAiVisibilitySettings(actor.workspaceId),
-      listAiVisibilityScans(actor.workspaceId, 1),
+      // 1 page's worth of scan history (weekly cadence -- 8 is ~2 months)
+      // for the AI visibility results view, not just the latest run.
+      listAiVisibilityScans(actor.workspaceId, 8),
     ]);
     if (!settings) {
       return Response.json({ visibility: null }, { headers: { "cache-control": "no-store" } });
     }
-    return Response.json({ visibility: settings, latestScan: recentScans[0] ?? null }, {
-      headers: { "cache-control": "no-store" },
-    });
+    return Response.json(
+      { visibility: settings, latestScan: recentScans[0] ?? null, recentScans },
+      { headers: { "cache-control": "no-store" } },
+    );
   } catch (error) {
     return apiErrorResponse(error);
   }
@@ -44,10 +47,11 @@ export async function PUT(request: Request) {
       workspaceId: actor.workspaceId,
       enabled: body.enabled,
     });
-    const recentScans = await listAiVisibilityScans(actor.workspaceId, 1);
-    return Response.json({ visibility: settings, latestScan: recentScans[0] ?? null }, {
-      headers: { "cache-control": "no-store" },
-    });
+    const recentScans = await listAiVisibilityScans(actor.workspaceId, 8);
+    return Response.json(
+      { visibility: settings, latestScan: recentScans[0] ?? null, recentScans },
+      { headers: { "cache-control": "no-store" } },
+    );
   } catch (error) {
     return apiErrorResponse(error);
   }

@@ -9,7 +9,13 @@ export type {
   ProductDashboardProps,
   RedditConnectionStatus,
   RedditMonitoringStatus,
+  RedditMonitorRunSummary,
   AiVisibilityStatus,
+  AiVisibilityProvider,
+  AiVisibilityCitationSummary,
+  AiVisibilityAnswerSummary,
+  AiVisibilityMetricsSummary,
+  AiVisibilityScanSummary,
 } from "./ProductDashboard";
 export {
   countLockedResults,

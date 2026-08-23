@@ -432,6 +432,29 @@ export async function latestRedditMonitorRun(workspaceId: string) {
   return row ? runFromRow(row) : null;
 }
 
+/**
+ * Run history for a workspace, most recent first -- the daily-monitoring
+ * results view's "recent runs" list (status, counts, error if any, and the
+ * scanId to jump into that run's full report), not just the single latest
+ * run latestRedditMonitorRun returns.
+ */
+export async function listRedditMonitorRuns(workspaceId: string, limit = 10): Promise<RedditMonitorRunRecord[]> {
+  const bounded = Math.max(1, Math.min(limit, 50));
+  if (isMemoryStore()) {
+    return [...memoryRuns.values()]
+      .filter((run) => run.workspaceId === workspaceId)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, bounded);
+  }
+  const rows = await getDb()
+    .select()
+    .from(runtimeRedditMonitorRuns)
+    .where(eq(runtimeRedditMonitorRuns.workspaceId, workspaceId))
+    .orderBy(desc(runtimeRedditMonitorRuns.createdAt))
+    .limit(bounded);
+  return rows.map(runFromRow);
+}
+
 export async function getClaimedRedditMonitorJob(jobId: string, workerId: string) {
   if (isMemoryStore()) return null;
   const [row] = await getDb()

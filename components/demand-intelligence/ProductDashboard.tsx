@@ -51,6 +51,65 @@ export type AiVisibilityStatus = {
   nextRunAt: string;
 };
 
+/**
+ * One daily monitoring run, for the "recent runs" results list -- a plain
+ * client-side mirror of the fields of lib/server/contracts.ts's
+ * RedditMonitorRunRecord actually needed here, not an import of the server
+ * type itself (this is a "use client" component; see AiVisibilityStatus
+ * above for the same pattern already in use in this file).
+ */
+export type RedditMonitorRunSummary = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  createdAt: string;
+  /** Set once the run's own scan finishes -- lets "View results" jump straight into that scan's report. */
+  scanId: string | null;
+  fetched: number;
+  normalized: number;
+  unseen: number;
+  relevant: number;
+  opportunities: number;
+  error: string | null;
+};
+
+export type AiVisibilityProvider = "chatgpt" | "gemini" | "perplexity";
+
+export type AiVisibilityCitationSummary = {
+  url: string;
+  title: string | null;
+  domain: string;
+};
+
+export type AiVisibilityAnswerSummary = {
+  provider: AiVisibilityProvider;
+  question: string;
+  answerText: string;
+  brandMentioned: boolean;
+  brandRecommended: boolean;
+  citations: AiVisibilityCitationSummary[];
+};
+
+export type AiVisibilityMetricsSummary = {
+  totalAnswers: number;
+  totalMentions: number;
+  mentionRate: number;
+  totalRecommendations: number;
+  recommendationRate: number;
+};
+
+/** One weekly AI visibility scan, for the results view -- see RedditMonitorRunSummary's doc comment for why this is hand-rolled rather than imported. */
+export type AiVisibilityScanSummary = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  createdAt: string;
+  questions: string[];
+  answers: AiVisibilityAnswerSummary[];
+  metrics: AiVisibilityMetricsSummary | null;
+  /** Per-provider Actor failure reason, e.g. an Apify approval requirement -- see providerErrors on AiVisibilityScanRecord. */
+  providerErrors: Record<AiVisibilityProvider, string | null>;
+  error: string | null;
+};
+
 export interface ProductDashboardProps {
   data?: RedditDemandDemoData;
   /** A complete, source-backed result from the real analysis flow. */
@@ -76,8 +135,14 @@ export interface ProductDashboardProps {
     enabled: boolean,
     watchTerms: RedditMonitoringStatus["watchTerms"],
   ) => Promise<boolean>;
+  /** Recent daily monitoring runs, most recent first -- the "where will I see results" answer for Reddit monitoring. */
+  monitorRuns?: RedditMonitorRunSummary[] | null;
+  /** Loads a completed monitoring run's own scan into view, in place, without leaving the dashboard. */
+  onViewMonitorRun?: (scanId: string) => Promise<void> | void;
   aiVisibility?: AiVisibilityStatus | null;
   onUpdateAiVisibility?: (enabled: boolean) => Promise<boolean>;
+  /** Recent weekly AI visibility scans, most recent first -- the "where will I see results" answer for AI visibility tracking. */
+  visibilityScans?: AiVisibilityScanSummary[] | null;
   /**
    * Drafts a first reply, on demand, for a relevant conversation (or raw
    * carousel candidate) that does not have one yet -- returns the new
@@ -88,12 +153,55 @@ export interface ProductDashboardProps {
   onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
 }
 
+function runStatusLabel(status: "queued" | "running" | "succeeded" | "failed"): string {
+  if (status === "succeeded") return "Succeeded";
+  if (status === "failed") return "Failed";
+  if (status === "running") return "Running";
+  return "Queued";
+}
+
+function RunStatusBadge({ status }: { status: "queued" | "running" | "succeeded" | "failed" }) {
+  const tone =
+    status === "succeeded" ? styles.resultsStatusOk : status === "failed" ? styles.resultsStatusFail : styles.resultsStatusPending;
+  return <span className={`${styles.resultsStatus} ${tone}`}>{runStatusLabel(status)}</span>;
+}
+
+function aiVisibilityProviderLabel(provider: AiVisibilityProvider): string {
+  if (provider === "chatgpt") return "ChatGPT";
+  if (provider === "gemini") return "Gemini";
+  return "Perplexity";
+}
+
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+
+/** Renders plain text with any bare https:// URLs turned into clickable links -- used for Apify's own error messages, which sometimes end with a one-time approval URL. */
+function LinkifiedText({ text }: { text: string }) {
+  const parts = text.split(URL_PATTERN);
+  return (
+    <>
+      {parts.map((part, index) =>
+        URL_PATTERN.test(part) ? (
+          <a key={index} href={part} target="_blank" rel="noreferrer noopener">
+            {part}
+          </a>
+        ) : (
+          <span key={index}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
 function RedditMonitoringPanel({
   monitoring,
   onUpdate,
+  runs,
+  onViewRun,
 }: {
   monitoring: RedditMonitoringStatus | null;
   onUpdate?: ProductDashboardProps["onUpdateMonitoring"];
+  runs?: RedditMonitorRunSummary[] | null;
+  onViewRun?: ProductDashboardProps["onViewMonitorRun"];
 }) {
   const [terms, setTerms] = useState(() =>
     monitoring?.watchTerms
@@ -103,6 +211,7 @@ function RedditMonitoringPanel({
       .join("\n") ?? "",
   );
   const [saving, setSaving] = useState(false);
+  const [viewingRunId, setViewingRunId] = useState<string | null>(null);
   if (!monitoring) return null;
 
   const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => [...new Set(
@@ -121,6 +230,16 @@ function RedditMonitoringPanel({
       await onUpdate(enabled, parsedTerms());
     } finally {
       setSaving(false);
+    }
+  };
+
+  const viewRun = async (scanId: string) => {
+    if (!onViewRun || viewingRunId) return;
+    setViewingRunId(scanId);
+    try {
+      await onViewRun(scanId);
+    } finally {
+      setViewingRunId((current) => (current === scanId ? null : current));
     }
   };
 
@@ -166,6 +285,44 @@ function RedditMonitoringPanel({
           {saving ? "Saving…" : "Save watch terms"}
         </button>
       </div>
+      <div className={styles.resultsBlock}>
+        <h3>Recent runs</h3>
+        {!runs || runs.length === 0 ? (
+          <p className={styles.resultsEmpty}>
+            No runs yet -- once monitoring finds unseen matches, each daily run will appear here with what it found.
+          </p>
+        ) : (
+          <ul className={styles.resultsList}>
+            {runs.map((run) => (
+              <li key={run.id} className={styles.resultsRow}>
+                <div className={styles.resultsRowHead}>
+                  <RunStatusBadge status={run.status} />
+                  <span>{relativeTime(run.createdAt)}</span>
+                </div>
+                <p className={styles.resultsMeta}>
+                  {run.fetched} fetched · {run.normalized} normalized · {run.unseen} unseen · {run.relevant} relevant conversation
+                  {run.relevant === 1 ? "" : "s"} · {run.opportunities} lead{run.opportunities === 1 ? "" : "s"}
+                </p>
+                {run.error && (
+                  <p className={styles.resultsError}>
+                    <LinkifiedText text={run.error} />
+                  </p>
+                )}
+                {run.scanId && onViewRun && (
+                  <button
+                    className={styles.textButton}
+                    type="button"
+                    disabled={viewingRunId === run.scanId}
+                    onClick={() => void viewRun(run.scanId as string)}
+                  >
+                    {viewingRunId === run.scanId ? "Loading…" : "View results"} <Icon name="arrow" size={12} />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   );
 }
@@ -173,9 +330,11 @@ function RedditMonitoringPanel({
 function AiVisibilityPanel({
   status,
   onUpdate,
+  scans,
 }: {
   status: AiVisibilityStatus | null;
   onUpdate?: ProductDashboardProps["onUpdateAiVisibility"];
+  scans?: AiVisibilityScanSummary[] | null;
 }) {
   const [saving, setSaving] = useState(false);
   if (!status) return null;
@@ -189,6 +348,13 @@ function AiVisibilityPanel({
       setSaving(false);
     }
   };
+
+  const latest = scans?.[0] ?? null;
+  const providerErrors = latest
+    ? (Object.entries(latest.providerErrors) as Array<[AiVisibilityProvider, string | null]>).filter(
+        ([, message]) => Boolean(message),
+      )
+    : [];
 
   return (
     <section className={`${styles.card} ${styles.monitoringCard}`}>
@@ -215,6 +381,75 @@ function AiVisibilityPanel({
             ? `Last successful check ${relativeTime(status.lastSuccessfulScanAt)}`
             : "No weekly check has completed yet."}
         </small>
+      </div>
+      <div className={styles.resultsBlock}>
+        <h3>Latest results</h3>
+        {!latest ? (
+          <p className={styles.resultsEmpty}>
+            No weekly check has completed yet. Once one runs, ChatGPT, Gemini and Perplexity&rsquo;s answers will appear here.
+          </p>
+        ) : (
+          <>
+            <div className={styles.resultsRowHead}>
+              <RunStatusBadge status={latest.status} />
+              <span>{relativeTime(latest.createdAt)}</span>
+            </div>
+            {latest.metrics && (
+              <p className={styles.resultsMeta}>
+                Mentioned in {latest.metrics.totalMentions} of {latest.metrics.totalAnswers} answers (
+                {Math.round(latest.metrics.mentionRate * 100)}%) · Recommended {latest.metrics.totalRecommendations} time
+                {latest.metrics.totalRecommendations === 1 ? "" : "s"}
+              </p>
+            )}
+            {latest.error && (
+              <p className={styles.resultsError}>
+                <LinkifiedText text={latest.error} />
+              </p>
+            )}
+            {providerErrors.map(([provider, message]) => (
+              <p key={provider} className={styles.resultsError}>
+                <strong>{aiVisibilityProviderLabel(provider)}: </strong>
+                <LinkifiedText text={message as string} />
+              </p>
+            ))}
+            {latest.answers.length > 0 && (
+              <ul className={styles.resultsList}>
+                {latest.answers.map((answer, index) => (
+                  <li key={`${answer.provider}-${index}`} className={styles.resultsRow}>
+                    <div className={styles.resultsRowHead}>
+                      <span className={styles.resultsProvider}>{aiVisibilityProviderLabel(answer.provider)}</span>
+                      {answer.brandMentioned && (
+                        <span className={`${styles.resultsStatus} ${styles.resultsStatusOk}`}>
+                          {answer.brandRecommended ? "Recommended" : "Mentioned"}
+                        </span>
+                      )}
+                    </div>
+                    <p className={styles.resultsMeta}>{answer.question}</p>
+                    {answer.answerText ? (
+                      <details className={styles.resultsAnswer}>
+                        <summary>View answer{answer.citations.length > 0 ? ` (${answer.citations.length} source${answer.citations.length === 1 ? "" : "s"})` : ""}</summary>
+                        <p>{answer.answerText}</p>
+                        {answer.citations.length > 0 && (
+                          <ul className={styles.resultsCitations}>
+                            {answer.citations.map((citation) => (
+                              <li key={citation.url}>
+                                <a href={citation.url} target="_blank" rel="noreferrer noopener">
+                                  {citation.title || citation.domain}
+                                </a>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </details>
+                    ) : (
+                      <p className={styles.resultsEmpty}>No answer was returned for this question.</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
       </div>
     </section>
   );
@@ -1240,8 +1475,11 @@ export function ProductDashboard({
   },
   monitoring = null,
   onUpdateMonitoring,
+  monitorRuns = null,
+  onViewMonitorRun,
   aiVisibility = null,
   onUpdateAiVisibility,
+  visibilityScans = null,
   onCreateReply,
   onFunnelEvent,
 }: ProductDashboardProps) {
@@ -1438,12 +1676,15 @@ export function ProductDashboard({
             : "monitoring-unavailable"}
           monitoring={monitoring}
           onUpdate={onUpdateMonitoring}
+          runs={monitorRuns}
+          onViewRun={onViewMonitorRun}
         />
 
         <AiVisibilityPanel
           key={aiVisibility ? `${aiVisibility.enabled}:${aiVisibility.nextRunAt}` : "ai-visibility-unavailable"}
           status={aiVisibility}
           onUpdate={onUpdateAiVisibility}
+          scans={visibilityScans}
         />
 
         <section className={styles.dashboardSection}>

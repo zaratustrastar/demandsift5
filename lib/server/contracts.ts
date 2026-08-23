@@ -720,6 +720,16 @@ export type AiVisibilityScanRecord = {
   answers: AiVisibilityAnswer[];
   metrics: AiVisibilityMetrics | null;
   error: string | null;
+  /**
+   * Per-Actor failure reason for a scan whose overall workflow still
+   * completed (see runAllVisibilityActors in ai-visibility-apify.server.ts
+   * -- one provider's Actor failing never fails the other two, or the
+   * scan). Null per provider that had no Actor-level failure; a scan can
+   * be "succeeded" with every provider's answers empty and every entry
+   * here populated, and the results view needs to say so honestly rather
+   * than show 3 silent blanks.
+   */
+  providerErrors: Record<AiVisibilityAiProvider, string | null>;
   createdAt: string;
   updatedAt: string;
 };

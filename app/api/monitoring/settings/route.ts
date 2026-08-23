@@ -4,6 +4,7 @@ import {
   defaultWatchTerms,
   getRedditMonitorSettings,
   latestRedditMonitorRun,
+  listRedditMonitorRuns,
   saveRedditMonitorSettings,
 } from "@/lib/server/reddit-monitor-repository";
 import { getStateRepository } from "@/lib/server/repository";
@@ -57,11 +58,12 @@ async function currentSettings(workspaceId: string) {
 export async function GET(request: Request) {
   try {
     const actor = await requireWorkspace(request);
-    const [settings, latestRun] = await Promise.all([
+    const [settings, latestRun, recentRuns] = await Promise.all([
       currentSettings(actor.workspaceId),
       latestRedditMonitorRun(actor.workspaceId),
+      listRedditMonitorRuns(actor.workspaceId, 10),
     ]);
-    return Response.json({ monitoring: settings, latestRun }, {
+    return Response.json({ monitoring: settings, latestRun, recentRuns }, {
       headers: { "cache-control": "no-store" },
     });
   } catch (error) {
@@ -94,9 +96,14 @@ export async function PUT(request: Request) {
       enabled: body.enabled,
       watchTerms,
     });
-    return Response.json({ monitoring: settings, latestRun: await latestRedditMonitorRun(actor.workspaceId) }, {
-      headers: { "cache-control": "no-store" },
-    });
+    return Response.json(
+      {
+        monitoring: settings,
+        latestRun: await latestRedditMonitorRun(actor.workspaceId),
+        recentRuns: await listRedditMonitorRuns(actor.workspaceId, 10),
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
   } catch (error) {
     return apiErrorResponse(error);
   }

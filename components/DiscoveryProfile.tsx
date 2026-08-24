@@ -43,15 +43,15 @@ export type DiscoveryProfileResponse = {
   /**
    * Competitor homepages analyzed on the earlier "Competitors & alternatives"
    * step (see CompetitorsSetup.tsx) -- already returned by this same GET
-   * endpoint, just not previously read here. Used only to build the
-   * read-only phrase subsection folded into the "Competitors & alternatives"
-   * card below (see `competitorLanguage`): these phrases are edited on that
-   * earlier step, not here, and already feed the actual Reddit search
-   * regardless of whether this subsection has anything to show (see
-   * competitorDiscoverySignals in scan-workflow.ts). A separate card for
-   * this used to sit right next to the editable "Competitors & alternatives"
-   * card and read as a duplicate of it, so it now lives inside that same
-   * card instead of as a second one.
+   * endpoint, just not previously read here. Used only to seed the initial
+   * "competitors" chip list (see the effect below) with the keyphrases and
+   * pain phrases those pages surfaced, so this card behaves exactly like
+   * Product / category and Customer problems -- one plain, fully editable,
+   * capped-at-3 list, not a second read-only section bolted onto it. These
+   * phrases already feed the actual Reddit search regardless of what a user
+   * does with this chip list (see competitorDiscoverySignals in
+   * scan-workflow.ts), so removing one here only changes this override, not
+   * whether that page's language gets searched.
    */
   competitorProfiles?: CompetitorProfileView[];
 };
@@ -148,15 +148,31 @@ export function DiscoveryProfile({
         setData(payload);
         const base = payload.derived;
         const overrides = payload.discoveryOverrides;
+        // Language pulled from the competitor pages analyzed on the earlier
+        // step, only used to pre-populate "competitors" below when there is
+        // no saved override yet -- once a user has edited/saved that list,
+        // their own saved override is shown as-is, never re-merged with it.
+        const competitorLanguagePool = dedupedPhrases(
+          (payload.competitorProfiles ?? [])
+            .filter((profile) => profile.status === "ready")
+            .flatMap((profile) => [...profile.keyphrases, ...profile.painPhrases]),
+          50,
+        );
         // Show the best `max` candidates per card, not however many the
         // crawl happened to return -- the AI already returns its strongest
         // candidates first, and this is the same cap the backend enforces
         // when compiling searches, so trimming here is display-only, never
-        // a change in what actually gets searched.
+        // a change in what actually gets searched. "competitors" additionally
+        // folds in the competitor-language pool above -- named competitors
+        // first, then language phrases filling any remaining slots -- so
+        // it's one flat, fully editable, capped-at-3 list exactly like the
+        // other two cards, not a second read-only section.
         const capped: Record<EditableKey, string[]> = {
           productTerms: (overrides?.productTerms ?? base?.productTerms ?? []).slice(0, MAX_TERMS.productTerms),
           customerProblems: (overrides?.customerProblems ?? base?.customerProblems ?? []).slice(0, MAX_TERMS.customerProblems),
-          competitors: (overrides?.competitors ?? base?.competitors ?? []).slice(0, MAX_TERMS.competitors),
+          competitors: overrides?.competitors
+            ? overrides.competitors.slice(0, MAX_TERMS.competitors)
+            : dedupedPhrases([...(base?.competitors ?? []), ...competitorLanguagePool], MAX_TERMS.competitors),
         };
         setTerms(capped);
         setBaselineTerms(capped);
@@ -223,13 +239,6 @@ export function DiscoveryProfile({
   }
 
   const derived = data?.derived;
-
-  const competitorLanguage = useMemo(() => {
-    const ready = (data?.competitorProfiles ?? []).filter((profile) => profile.status === "ready");
-    const keyphrases = dedupedPhrases(ready.flatMap((profile) => profile.keyphrases), 3);
-    const painPhrases = dedupedPhrases(ready.flatMap((profile) => profile.painPhrases), 3);
-    return { keyphrases, painPhrases, hasAny: keyphrases.length > 0 || painPhrases.length > 0 };
-  }, [data?.competitorProfiles]);
 
   return (
     <main className={styles.screen}>
@@ -310,42 +319,6 @@ export function DiscoveryProfile({
                       </button>
                     </div>
                   )
-                )}
-                {key === "competitors" && competitorLanguage.hasAny && (
-                  <div className={styles.subsection}>
-                    <p className={styles.hint}>
-                      From the competitor pages you analyzed on the previous step &mdash; already
-                      included in your Reddit search.
-                    </p>
-                    {competitorLanguage.keyphrases.length > 0 && (
-                      <>
-                        <p className={styles.hint}>
-                          What they sell ({competitorLanguage.keyphrases.length}/3)
-                        </p>
-                        <ul className={styles.chips}>
-                          {competitorLanguage.keyphrases.map((phrase) => (
-                            <li className={styles.chip} key={`keyphrase-${phrase}`}>
-                              <span>{phrase}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                    {competitorLanguage.painPhrases.length > 0 && (
-                      <>
-                        <p className={styles.hint}>
-                          Problems they speak to ({competitorLanguage.painPhrases.length}/3)
-                        </p>
-                        <ul className={styles.chips}>
-                          {competitorLanguage.painPhrases.map((phrase) => (
-                            <li className={styles.chip} key={`pain-${phrase}`}>
-                              <span>{phrase}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </div>
                 )}
               </div>
             );

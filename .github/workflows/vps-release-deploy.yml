@@ -261,3 +261,4 @@ jobs:
 # trigger: deploy competitor keyphrases shown once (2026-08-24T09:20:36Z)
 # trigger: deploy competitor language cap of 3 (2026-08-24T09:25:08Z)
 # trigger: deploy competitor card merge and continue-button fix (2026-08-24T10:16:59Z)
+# trigger: deploy remove named-competitor chip editor (2026-08-24T10:48:35Z)

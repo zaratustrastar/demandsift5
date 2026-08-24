@@ -304,12 +304,70 @@ export async function completeAiVisibilityScan(record: AiVisibilityScanRecord): 
   });
 }
 
+/**
+ * How long a terminally-failed scan blocks the next attempt. Deliberately
+ * short relative to the weekly cadence (unlike completeAiVisibilityScan's
+ * week-out watermark) so a real transient failure still recovers the same
+ * day -- but long enough that the scheduler poll (default every 5 min, see
+ * aiVisibilityConfiguration in scripts/background-worker.mjs) can't
+ * immediately re-enqueue a brand new scan (and a brand new, paid trio of
+ * Apify Actor runs) on its very next tick.
+ */
+const FAILURE_RETRY_DELAY_MS = 30 * 60 * 1_000;
+
+/**
+ * Marks the scan failed and pushes the workspace's watermark forward by
+ * FAILURE_RETRY_DELAY_MS, mirroring completeAiVisibilityScan's watermark
+ * advance on the success path. Without this, a scan that fails inside
+ * runAiVisibilityScan (e.g. the OpenAI analysis step, which runs after the
+ * Apify Actors already succeeded) leaves next_run_at stuck at whatever
+ * "now" the toggle/previous cycle set -- and because job-level retries are
+ * a no-op once scan.status is "failed" (see the claimedVisibilitySnapshot
+ * guard in app/api/internal/jobs/[jobId]/execute/route.ts, which only
+ * re-invokes ensureVisibilityExecution while status is neither "succeeded"
+ * nor "failed"), scheduleAiVisibilityScans's own poll would otherwise pick
+ * the stale next_run_at right back up and enqueue an entirely new scan --
+ * rerunning all 3 Actors from scratch -- every single poll, indefinitely,
+ * until one attempt happens to succeed.
+ */
 export async function failAiVisibilityScan(record: AiVisibilityScanRecord, error: unknown): Promise<void> {
-  await saveAiVisibilityScan({
+  const failedAt = new Date();
+  const failed: AiVisibilityScanRecord = {
     ...record,
     status: "failed",
     error: error instanceof Error ? error.message.slice(0, 2_000) : "AI visibility tracking failed.",
-    updatedAt: new Date().toISOString(),
+    updatedAt: failedAt.toISOString(),
+  };
+  const nextRunAt = new Date(failedAt.getTime() + FAILURE_RETRY_DELAY_MS);
+  if (isMemoryStore()) {
+    memoryScans.set(failed.id, failed);
+    const settings = memorySettings.get(failed.workspaceId);
+    if (settings) {
+      memorySettings.set(failed.workspaceId, {
+        ...settings,
+        nextRunAt: nextRunAt.toISOString(),
+        updatedAt: failedAt.toISOString(),
+      });
+    }
+    return;
+  }
+  await getDb().transaction(async (transaction) => {
+    await transaction
+      .update(runtimeAiVisibilityScans)
+      .set({
+        status: failed.status,
+        questions: failed.questions,
+        answers: failed.answers,
+        metrics: failed.metrics,
+        error: failed.error,
+        providerErrors: failed.providerErrors,
+        updatedAt: failedAt,
+      })
+      .where(eq(runtimeAiVisibilityScans.id, failed.id));
+    await transaction
+      .update(runtimeAiVisibilitySchedules)
+      .set({ nextRunAt, updatedAt: failedAt })
+      .where(eq(runtimeAiVisibilitySchedules.workspaceId, failed.workspaceId));
   });
 }
 

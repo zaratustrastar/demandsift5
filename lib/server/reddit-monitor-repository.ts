@@ -408,12 +408,69 @@ export async function completeRedditMonitorRun(record: RedditMonitorRunRecord): 
   });
 }
 
+/**
+ * How long a terminally-failed run blocks the next attempt. Deliberately
+ * short relative to the daily cadence (unlike completeRedditMonitorRun's
+ * 24h-out watermark) so a real transient failure still recovers the same
+ * day -- but long enough that the scheduler poll (default every 60s, see
+ * REDDIT_MONITOR_SCHEDULER_POLL_MS in scripts/background-worker.mjs) can't
+ * immediately re-enqueue a brand new run (and a brand new, paid Apify
+ * search) on its very next tick.
+ */
+const FAILURE_RETRY_DELAY_MS = 15 * 60 * 1_000;
+
+/**
+ * Marks the run failed and pushes the workspace's watermark forward by
+ * FAILURE_RETRY_DELAY_MS, mirroring completeRedditMonitorRun's watermark
+ * advance on the success path. Without this, a run that fails inside
+ * runRedditMonitorScan (e.g. anywhere in the full scan pipeline it kicks
+ * off once unseen matches are found) leaves next_run_at stuck at whatever
+ * "now" the toggle/previous cycle set -- and because job-level retries are
+ * a no-op once the run's status is "failed" (see the claimedMonitorSnapshot
+ * guard in app/api/internal/jobs/[jobId]/execute/route.ts, which only
+ * re-invokes ensureMonitorExecution while status is neither "succeeded" nor
+ * "failed"), scheduleRedditMonitorScans's own poll would otherwise pick the
+ * stale next_run_at right back up and enqueue an entirely new run --
+ * rerunning the Apify search (and possibly the whole scan pipeline) from
+ * scratch -- every single poll, indefinitely, until one attempt succeeds.
+ */
 export async function failRedditMonitorRun(record: RedditMonitorRunRecord, error: unknown) {
-  await saveRedditMonitorRun({
+  const failedAt = new Date();
+  const failed: RedditMonitorRunRecord = {
     ...record,
     status: "failed",
     error: error instanceof Error ? error.message.slice(0, 2_000) : "Reddit monitoring failed.",
-    updatedAt: new Date().toISOString(),
+    updatedAt: failedAt.toISOString(),
+  };
+  const nextRunAt = new Date(failedAt.getTime() + FAILURE_RETRY_DELAY_MS);
+  if (isMemoryStore()) {
+    await saveRedditMonitorRun(failed);
+    const settings = memorySettings.get(failed.workspaceId);
+    if (settings) {
+      memorySettings.set(failed.workspaceId, {
+        ...settings,
+        nextRunAt: nextRunAt.toISOString(),
+        updatedAt: failedAt.toISOString(),
+      });
+    }
+    return;
+  }
+  await getDb().transaction(async (transaction) => {
+    await transaction
+      .update(runtimeRedditMonitorRuns)
+      .set({
+        scanId: failed.scanId,
+        status: failed.status,
+        actorRunId: failed.actorRunId,
+        record: failed,
+        error: failed.error,
+        updatedAt: failedAt,
+      })
+      .where(eq(runtimeRedditMonitorRuns.id, failed.id));
+    await transaction
+      .update(runtimeRedditMonitors)
+      .set({ nextRunAt, updatedAt: failedAt })
+      .where(eq(runtimeRedditMonitors.workspaceId, failed.workspaceId));
   });
 }
 

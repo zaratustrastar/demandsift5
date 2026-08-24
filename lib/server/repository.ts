@@ -191,9 +191,25 @@ class MemoryStateRepository implements StateRepository {
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;
   }
 
+  /**
+   * The "latest scan" shown by default when the report page loads/refreshes
+   * (see GET /api/scans/latest) must stay pinned to the user's own primary
+   * Market Scan (scanKind "discovery", or absent on scans that predate this
+   * field) -- never a daily Reddit monitor's own scoped scan (scanKind
+   * "monitoring", see monitoringScan() in reddit-monitor-workflow.ts).
+   * Those are a fundamentally different kind of scan: the primary scan
+   * searches roughly a year of Reddit broadly, a monitor run only checks
+   * the fixed watch terms for one day. Without this filter, a monitor run
+   * that happens to be newer (even one that legitimately found 0 relevant
+   * matches that day) would silently replace the primary scan's results on
+   * every refresh, with no way back. Monitor-run scans stay reachable only
+   * through their own explicit "View results" action (viewMonitorRun in
+   * ThreadlineExperience.tsx), which fetches them by id, not through this
+   * "latest" lookup.
+   */
   async getLatestWorkspaceScan(workspaceId: string) {
     return [...getStore().scans.values()]
-      .filter((scan) => scan.workspaceId === workspaceId)
+      .filter((scan) => scan.workspaceId === workspaceId && scan.scanKind !== "monitoring")
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null;
   }
 
@@ -529,11 +545,17 @@ class PostgresStateRepository implements StateRepository {
     return row?.record ?? null;
   }
 
+  /** See the memory-store implementation above for why monitoring-kind scans are excluded. */
   async getLatestWorkspaceScan(workspaceId: string) {
     const [row] = await getDb()
       .select({ record: runtimeScans.record })
       .from(runtimeScans)
-      .where(eq(runtimeScans.workspaceId, workspaceId))
+      .where(
+        and(
+          eq(runtimeScans.workspaceId, workspaceId),
+          sql`(${runtimeScans.record} ->> 'scanKind') IS DISTINCT FROM 'monitoring'`,
+        ),
+      )
       .orderBy(desc(runtimeScans.createdAt))
       .limit(1);
     return row?.record ?? null;

@@ -136,6 +136,14 @@
 
 .addRow button:hover { border-color: var(--green); color: var(--green-dark); }
 
+.subsection {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.subsection .hint:first-child { margin-top: 0; }
+
 .competitors {
   width: 100%;
   max-width: 880px;

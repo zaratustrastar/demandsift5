@@ -157,14 +157,18 @@ export function CompetitorsSetup({
     }
   }
 
+  // Typing competitor.com fields and pressing Continue is the same action
+  // as the old separate "Analyze competitors" button used to be: analyze
+  // first, show the results for review, then a second press (URLs unchanged
+  // now) actually saves and moves on. The button label below reflects which
+  // of those two the next press will do, instead of always saying
+  // "Continue" and silently doing something else on the first click.
+  const pendingUrls = competitorUrls.map((url) => url.trim()).filter(Boolean);
+  const needsAnalysis = pendingUrls.length > 0 && pendingUrls.join("|") !== analyzedUrlsKey;
+
   async function saveAndContinue() {
     setError("");
-    const pendingUrls = competitorUrls.map((url) => url.trim()).filter(Boolean);
-    if (pendingUrls.length > 0 && pendingUrls.join("|") !== analyzedUrlsKey) {
-      // Typing competitor.com fields and pressing Continue is the same
-      // action as the old separate "Analyze competitors" button used to be:
-      // analyze first, show the results for review, then a second Continue
-      // (URLs unchanged now) actually saves and moves on.
+    if (needsAnalysis) {
       await analyzeCompetitors(pendingUrls);
       return;
     }
@@ -267,6 +271,12 @@ export function CompetitorsSetup({
             </div>
           ))}
         </div>
+        {needsAnalysis && !analyzing && (
+          <p className={styles.hint}>
+            Press Continue to analyze {pendingUrls.length === 1 ? "this competitor" : "these competitors"}
+            {" "}first &mdash; you&rsquo;ll see what we found, then press Continue again to move on.
+          </p>
+        )}
         {error && <p className={styles.error}>{error}</p>}
 
         {competitorProfiles.length > 0 && (
@@ -301,7 +311,13 @@ export function CompetitorsSetup({
           Skip
         </button>
         <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={analyzing || saving}>
-          {analyzing ? "Analyzing competitors…" : saving ? "Continuing…" : "Continue"}
+          {analyzing
+            ? "Analyzing competitors…"
+            : saving
+              ? "Continuing…"
+              : needsAnalysis
+                ? "Analyze competitors"
+                : "Continue"}
         </button>
       </footer>
     </main>

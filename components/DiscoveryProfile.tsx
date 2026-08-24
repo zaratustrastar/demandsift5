@@ -44,11 +44,14 @@ export type DiscoveryProfileResponse = {
    * Competitor homepages analyzed on the earlier "Competitors & alternatives"
    * step (see CompetitorsSetup.tsx) -- already returned by this same GET
    * endpoint, just not previously read here. Used only to build the
-   * read-only "Competitor language" card below: these phrases are edited on
-   * that earlier step, not here, and already feed the actual Reddit search
-   * regardless of whether this card is shown (see competitorDiscoverySignals
-   * in scan-workflow.ts) -- this card is a preview of language already in
-   * play, not a second place to edit it.
+   * read-only phrase subsection folded into the "Competitors & alternatives"
+   * card below (see `competitorLanguage`): these phrases are edited on that
+   * earlier step, not here, and already feed the actual Reddit search
+   * regardless of whether this subsection has anything to show (see
+   * competitorDiscoverySignals in scan-workflow.ts). A separate card for
+   * this used to sit right next to the editable "Competitors & alternatives"
+   * card and read as a duplicate of it, so it now lives inside that same
+   * card instead of as a second one.
    */
   competitorProfiles?: CompetitorProfileView[];
 };
@@ -308,42 +311,45 @@ export function DiscoveryProfile({
                     </div>
                   )
                 )}
+                {key === "competitors" && competitorLanguage.hasAny && (
+                  <div className={styles.subsection}>
+                    <p className={styles.hint}>
+                      From the competitor pages you analyzed on the previous step &mdash; already
+                      included in your Reddit search.
+                    </p>
+                    {competitorLanguage.keyphrases.length > 0 && (
+                      <>
+                        <p className={styles.hint}>
+                          What they sell ({competitorLanguage.keyphrases.length}/3)
+                        </p>
+                        <ul className={styles.chips}>
+                          {competitorLanguage.keyphrases.map((phrase) => (
+                            <li className={styles.chip} key={`keyphrase-${phrase}`}>
+                              <span>{phrase}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {competitorLanguage.painPhrases.length > 0 && (
+                      <>
+                        <p className={styles.hint}>
+                          Problems they speak to ({competitorLanguage.painPhrases.length}/3)
+                        </p>
+                        <ul className={styles.chips}>
+                          {competitorLanguage.painPhrases.map((phrase) => (
+                            <li className={styles.chip} key={`pain-${phrase}`}>
+                              <span>{phrase}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
-          {competitorLanguage.hasAny && (
-            <div className={styles.card}>
-              <h2 className={styles.cardTitle}>Competitor language</h2>
-              <p className={styles.hint}>
-                From the competitor pages you analyzed &mdash; already included in your Reddit search.
-                Edit these back on the Competitors &amp; alternatives step.
-              </p>
-              {competitorLanguage.keyphrases.length > 0 && (
-                <>
-                  <p className={styles.hint}>What they sell</p>
-                  <ul className={styles.chips}>
-                    {competitorLanguage.keyphrases.map((phrase) => (
-                      <li className={styles.chip} key={`keyphrase-${phrase}`}>
-                        <span>{phrase}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {competitorLanguage.painPhrases.length > 0 && (
-                <>
-                  <p className={styles.hint}>Problems they speak to</p>
-                  <ul className={styles.chips}>
-                    {competitorLanguage.painPhrases.map((phrase) => (
-                      <li className={styles.chip} key={`pain-${phrase}`}>
-                        <span>{phrase}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
-          )}
         </section>
       )}
 

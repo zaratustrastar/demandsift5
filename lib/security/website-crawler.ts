@@ -779,9 +779,16 @@ export async function crawlWebsite(
   let totalBytes = 0;
   let canonicalUrl = target.url.toString();
 
-  while (queue.length > 0 && pages.length < maxPages && totalBytes < maxTotalBytes) {
-    const next = queue.shift();
-    if (!next) break;
+  /**
+   * Fetches and processes exactly one queued URL, mutating the shared
+   * pages/failures/totalBytes/queue/queued state above. A failure here
+   * never throws out of crawlWebsite itself -- it is recorded in
+   * `failures` and the crawl continues, exactly as before this function
+   * was pulled out of an inline loop body. Callers are responsible for
+   * respecting maxPages/maxTotalBytes before invoking this (see below);
+   * this function does not re-check them itself.
+   */
+  async function fetchOnePage(next: URL): Promise<void> {
     try {
       const { response, finalUrl } = await fetchWithValidatedRedirects(next, {
         allowedHostname: target.url.hostname,
@@ -800,6 +807,14 @@ export async function crawlWebsite(
         await response.body?.cancel("Non-HTML response is not crawled.");
         throw new Error("Skipped a non-HTML page.");
       }
+      // Best-effort, not an exact global lock: with concurrent fetches (see
+      // the worker pool below), several pages can each read this snapshot
+      // of the remaining budget before any of them has actually updated
+      // totalBytes, so the true total can overshoot maxTotalBytes by up to
+      // (concurrency - 1) page-reads in the worst case. Concurrency is kept
+      // small (3) specifically to bound that overshoot; maxPages -- the
+      // more consequential budget for downstream AI cost -- is still
+      // enforced exactly (see the `reserved` counter below).
       const remainingBytes = Math.min(maxResponseBytes, maxTotalBytes - totalBytes);
       const loaded = await readLimitedText(response, remainingBytes);
       totalBytes += loaded.bytes;
@@ -848,7 +863,6 @@ export async function crawlWebsite(
         contentHash: sha256(extracted.text),
         retrievedAt,
       });
-      if (pages.length === 1) canonicalUrl = finalUrl.toString();
 
       for (const link of extractInternalLinks(pageHtml, finalUrl, target.url.hostname)) {
         const key = link.toString().replace(/\/$/, "");
@@ -864,6 +878,51 @@ export async function crawlWebsite(
       });
     }
   }
+
+  // The submitted URL is always fetched alone first, both because
+  // canonicalUrl must reflect it specifically (not whichever page a
+  // concurrent worker happens to finish first) and because every other
+  // page is only discovered by reading this one's links -- there is
+  // nothing to parallelize until it completes.
+  const first = queue.shift();
+  if (first) {
+    const beforePages = pages.length;
+    await fetchOnePage(first);
+    if (pages.length > beforePages) canonicalUrl = pages[0].url;
+  }
+
+  // Pages 2+ have no such ordering constraint -- once queued, several can
+  // be fetched at once instead of one at a time, which is where most of a
+  // multi-page crawl's wall-clock time previously went (this is the same
+  // crawlWebsite used for both a competitor's site and the primary
+  // business's own, at maxPages: 4). `reserved` tracks fetches currently
+  // in flight so pages.length can never exceed maxPages even though
+  // several workers may be racing to add to it -- a worker only dequeues
+  // a URL once it has "reserved" a slot within the budget.
+  const concurrency = Math.min(3, maxPages);
+  let reserved = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      if (pages.length + reserved >= maxPages || totalBytes >= maxTotalBytes) return;
+      const next = queue.shift();
+      if (!next) {
+        if (reserved === 0) return;
+        // Nothing queued right now, but another worker is still fetching
+        // and may discover new links shortly -- wait briefly rather than
+        // exiting early. Network fetches take orders of magnitude longer
+        // than this poll, so the added latency here is negligible.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+      reserved += 1;
+      try {
+        await fetchOnePage(next);
+      } finally {
+        reserved -= 1;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   if (pages.length === 0) {
     const detail = failures[0]?.reason ?? "No readable public HTML pages were found.";

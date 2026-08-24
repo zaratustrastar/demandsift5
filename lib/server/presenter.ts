@@ -1,5 +1,5 @@
 import { candidateReliabilityScore, dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
-import type { MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
+import type { EntitlementRecord, MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
 import { getEffectiveEntitlement, getStateRepository } from "./repository";
@@ -96,20 +96,24 @@ function publicReply(reply: ReplyRecord) {
   };
 }
 
+// websiteUrl kept in the signature so every call site keeps working
+// unchanged while the TEMPORARY FULL ACCESS OVERRIDE below is in effect.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function presentAccess(workspaceId: string, websiteUrl?: string) {
   const entitlement = await getEffectiveEntitlement(workspaceId);
-  const hasPinnedPaidAccess = Boolean(
-    entitlement.status === "active" &&
-    entitlement.plan !== "free" &&
-    entitlement.verifiedByEventId &&
-    entitlement.seedScanId &&
-    normalizedBusinessHostname(entitlement.websiteUrl),
-  );
-  const unlocked = websiteUrl
-    ? entitlementCoversWebsite(entitlement, websiteUrl)
-    : hasPinnedPaidAccess;
+  // TEMPORARY FULL ACCESS OVERRIDE (2026-08-24) -- see entitlementCoversWebsite's
+  // doc comment in business-access.ts for why. `unlocked` and `plan` are
+  // hardcoded to the highest tier for every workspace here too, since a
+  // "core"-unlocked-but-plan-reported-as-"free" response would leave the
+  // frontend's effectiveAccessLevel() (ThreadlineExperience.tsx) reading
+  // "free" anyway. Real per-workspace fields (status/accessUntil/
+  // businessWebsiteUrl/seedScanId/verifiedByWebhook) are left truthful for
+  // debugging -- only the gate itself is bypassed. Revert by restoring the
+  // real hasPinnedPaidAccess/unlocked/plan computation below.
+  const unlocked = true;
+  const plan: EntitlementRecord["plan"] = "core";
   return {
-    plan: entitlement.plan,
+    plan,
     status: entitlement.status,
     unlocked,
     accessUntil: entitlement.accessUntil,
@@ -120,8 +124,8 @@ export async function presentAccess(workspaceId: string, websiteUrl?: string) {
       allExistingFindings: unlocked,
       allSuggestedReplies: unlocked,
       sevenDayMonitoring: unlocked,
-      continuousMonitoring: unlocked && entitlement.plan === "core",
-      resultsTracking: unlocked && entitlement.plan === "core",
+      continuousMonitoring: unlocked && plan === "core",
+      resultsTracking: unlocked && plan === "core",
     },
   };
 }

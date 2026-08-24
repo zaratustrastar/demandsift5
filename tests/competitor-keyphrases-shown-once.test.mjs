@@ -40,10 +40,15 @@ test("the Competitors & alternatives step no longer shows or edits keyphrase/pai
   assert.equal(competitorsSetupSource.slice(continueStart, continueEnd).includes('"/api/competitors"'), false);
 });
 
-test("the competitor's name and summary still show, so analysis success/failure stays visible", () => {
+test("a competitor's name/summary are never shown to the user -- only a failed analysis surfaces, as something to fix", () => {
+  // A fully successful analysis is context for DemandSift's own query
+  // building, not something the user reviews (see competitors-continue-  // button-label.test.mjs for the auto-continue behavior this backs). Only
+  // a failed URL renders anything at all, and even then, just the domain
+  // and error -- never profile.summary.
+  assert.equal(codeOnly.includes("profile.summary"), false);
   assert.match(competitorsSetupSource, /profile\.name \|\| profile\.domain/);
-  assert.match(competitorsSetupSource, /profile\.summary && <p className=\{styles\.hint\}>\{profile\.summary\}<\/p>/);
   assert.match(competitorsSetupSource, /Could not analyze \{profile\.domain\}/);
+  assert.match(competitorsSetupSource, /profile\.status === "failed"/);
 });
 
 test("analysis still persists competitorProfiles on its own, so the next screen's card keeps working without the removed edit flow", () => {

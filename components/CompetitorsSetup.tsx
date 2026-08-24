@@ -72,7 +72,10 @@ export function CompetitorsSetup({
     setCompetitorUrls((current) => current.map((url, i) => (i === index ? value : url)));
   }
 
-  async function analyzeCompetitors(urls: string[]): Promise<boolean> {
+  // Returns the analyzed profiles (whatever their per-URL status), or null
+  // if the request itself failed outright (network/API error) -- the caller
+  // decides what a mix of ready/failed profiles means for navigation.
+  async function analyzeCompetitors(urls: string[]): Promise<CompetitorProfileView[] | null> {
     setAnalyzing(true);
     setError("");
     try {
@@ -88,31 +91,32 @@ export function CompetitorsSetup({
       if (!response.ok) {
         throw new Error(payload.error?.message ?? "We could not analyze those competitors.");
       }
-      setCompetitorProfiles(payload.competitorProfiles ?? []);
+      const profiles = payload.competitorProfiles ?? [];
+      setCompetitorProfiles(profiles);
       setAnalyzedUrlsKey(urls.join("|"));
-      return true;
+      return profiles;
     } catch (analyzeError) {
       setError(analyzeError instanceof Error ? analyzeError.message : "Something went wrong.");
-      return false;
+      return null;
     } finally {
       setAnalyzing(false);
     }
   }
 
-  // Typing competitor.com fields and pressing Continue is the same action
-  // as the old separate "Analyze competitors" button used to be: analyze
-  // first, show the results for review, then a second press (URLs unchanged
-  // now) actually saves and moves on. The button label below reflects which
-  // of those two the next press will do, instead of always saying
-  // "Continue" and silently doing something else on the first click.
   const pendingUrls = competitorUrls.map((url) => url.trim()).filter(Boolean);
   const needsAnalysis = pendingUrls.length > 0 && pendingUrls.join("|") !== analyzedUrlsKey;
 
-  function saveAndContinue() {
+  // Analysis output (name, summary, keyphrases, ...) is context DemandSift
+  // uses to build better Reddit searches, not something the user needs to
+  // review -- so a single Continue press analyzes (if there's anything new
+  // to analyze) and moves on by itself. The only time this stays on the
+  // page is if a URL actually failed to analyze, so the user can see what
+  // needs fixing instead of silently losing that competitor.
+  async function saveAndContinue() {
     setError("");
     if (needsAnalysis) {
-      void analyzeCompetitors(pendingUrls);
-      return;
+      const profiles = await analyzeCompetitors(pendingUrls);
+      if (!profiles || profiles.some((profile) => profile.status === "failed")) return;
     }
     onContinue();
   }
@@ -145,33 +149,29 @@ export function CompetitorsSetup({
             </div>
           ))}
         </div>
-        {needsAnalysis && !analyzing && (
-          <p className={styles.hint}>
-            Press Continue to analyze {pendingUrls.length === 1 ? "this competitor" : "these competitors"}
-            {" "}first &mdash; you&rsquo;ll see what we found, then press Continue again to move on.
-          </p>
-        )}
         {error && <p className={styles.error}>{error}</p>}
 
-        {competitorProfiles.length > 0 && (
+        {/*
+         * A competitor's name/summary/keyphrases are analysis output for
+         * DemandSift's own use (see the class doc above), not something the
+         * user reviews -- so only URLs that actually failed to analyze
+         * render here, as something the user needs to act on. A fully
+         * successful analysis never reaches this render at all: Continue
+         * moves on by itself.
+         */}
+        {competitorProfiles.some((profile) => profile.status === "failed") && (
           <div className={styles.competitorResults}>
-            {competitorProfiles.map((profile) => (
-              <div className={styles.card} key={profile.url}>
-                <h2 className={styles.cardTitle}>{profile.name || profile.domain}</h2>
-                {profile.status === "failed" ? (
+            {competitorProfiles
+              .filter((profile) => profile.status === "failed")
+              .map((profile) => (
+                <div className={styles.card} key={profile.url}>
+                  <h2 className={styles.cardTitle}>{profile.name || profile.domain}</h2>
                   <p className={styles.hint}>
                     Could not analyze {profile.domain}
                     {profile.error ? `: ${profile.error}` : "."}
                   </p>
-                ) : (
-                  // Keyphrases/pain phrases are intentionally not shown or edited
-                  // here anymore -- they now appear once, read-only, folded into
-                  // the "Competitors & alternatives" card on the next screen (see
-                  // DiscoveryProfile.tsx), instead of duplicated on this one.
-                  profile.summary && <p className={styles.hint}>{profile.summary}</p>
-                )}
-              </div>
-            ))}
+                </div>
+              ))}
           </div>
         )}
       </section>
@@ -184,7 +184,7 @@ export function CompetitorsSetup({
           Skip
         </button>
         <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={analyzing}>
-          {analyzing ? "Analyzing competitors…" : needsAnalysis ? "Analyze competitors" : "Continue"}
+          {analyzing ? "Analyzing competitors…" : "Continue"}
         </button>
       </footer>
     </main>

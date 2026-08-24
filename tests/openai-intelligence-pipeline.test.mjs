@@ -149,7 +149,13 @@ test("triage splits large candidate sets into bounded provider requests", async 
       return chatResponse({ triage: ids.map(triageItem) });
     },
   });
-  const candidates = Array.from({ length: 17 }, (_, index) => candidate(`batch-${index + 1}`));
+  // 57 candidates at the current TRIAGE_BATCH_SIZE (25) should chunk into
+  // [25, 25, 7] -- a real scan's few hundred credible candidates chunk the
+  // same way, just with more full-size batches. This pins the batch size
+  // itself (a deliberate speed lever: fewer, larger sequential round-trips
+  // for the same total candidates -- see TRIAGE_BATCH_SIZE's doc comment in
+  // openai.server.ts), not just "chunking happens".
+  const candidates = Array.from({ length: 57 }, (_, index) => candidate(`batch-${index + 1}`));
   const result = await provider.triageConversations({
     business,
     candidates,
@@ -157,7 +163,7 @@ test("triage splits large candidate sets into bounded provider requests", async 
     coverageRetries: 0,
   });
 
-  assert.deepEqual(calls.map((ids) => ids.length), [4, 4, 4, 4, 1]);
+  assert.deepEqual(calls.map((ids) => ids.length), [25, 25, 7]);
   assert.deepEqual(result.value.map((row) => row.externalId), candidates.map((row) => row.externalId));
 });
 

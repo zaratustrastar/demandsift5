@@ -926,7 +926,19 @@ type ChatTextResult =
 
 const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
 const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
-const TRIAGE_BATCH_SIZE = 4;
+// A full scan can have 100-300+ credible candidates awaiting triage, and
+// triageConversations() below processes batches sequentially (one fully
+// awaited before the next starts) -- so this size directly sets how many
+// round-trips a scan needs, not just how big each one is. 25 is chosen
+// because triageAttempt's own output-token budget
+// (max(4_000, min(12_000, candidates.length * 400))) already assumes up to
+// 30 candidates fit before hitting its 12_000 cap, so this stays comfortably
+// inside a budget the code already trusts, while cutting a 235-candidate
+// scan from ~59 sequential batches down to ~10. If a batch's structured
+// response is ever too large in practice, processBatch() below already
+// recursively bisects it on length-exhaustion and retries, so raising this
+// has a built-in safety net rather than a hard cliff.
+const TRIAGE_BATCH_SIZE = 25;
 // Marketplace gateways can temporarily have no seller for an otherwise valid
 // model. Retrying those responses over a short backoff window is cheaper and
 // safer than failing the entire scan after an immediate burst of requests.

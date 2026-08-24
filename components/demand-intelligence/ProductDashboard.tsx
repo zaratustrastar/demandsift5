@@ -1546,19 +1546,6 @@ function OpportunityCarousel({
         </button>
       </div>
 
-      <div className={styles.carouselDots}>
-        {items.map((dotItem, dotIndex) => (
-          <button
-            key={dotItem.id}
-            type="button"
-            className={`${styles.carouselDot} ${dotIndex === safeIndex ? styles.carouselDotActive : ""}`}
-            aria-label={`Go to conversation ${dotIndex + 1} of ${total}`}
-            aria-current={dotIndex === safeIndex ? "true" : undefined}
-            onClick={() => goTo(dotIndex)}
-          />
-        ))}
-      </div>
-
       <p className={styles.carouselCaption}>
         Ordered by AI reliability, highest first. Later conversations may be less reliable.
       </p>

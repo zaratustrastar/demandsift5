@@ -1293,35 +1293,6 @@
   font-weight: 800;
 }
 
-.carouselDots {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 7px;
-  max-width: 320px;
-}
-
-.carouselDot {
-  width: 9px;
-  height: 9px;
-  padding: 0;
-  background: #dbe2dd;
-  border: 0;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background 140ms ease, transform 140ms ease;
-}
-
-.carouselDot:hover {
-  background: #bfc9c2;
-}
-
-.carouselDotActive,
-.carouselDotActive:hover {
-  background: var(--green);
-  transform: scale(1.15);
-}
-
 .carouselCaption {
   margin: 0;
   color: var(--faint);

@@ -260,14 +260,6 @@ export function DiscoveryProfile({
 
       {!data && !error && <p className={styles.loading}>Reading the discovery profile&hellip;</p>}
 
-      {data?.profileStage === "fast" && (
-        <p className={styles.hint}>
-          Still refining a fuller pass over your site in the background &mdash; these are an early,
-          quicker-model preview and may read a little rough. The scan itself always waits for the
-          fuller analysis before searching Reddit, whether or not it finishes refining here first.
-        </p>
-      )}
-
       {derived && terms && (
         <section className={styles.grid}>
           {EDITABLE_FIELDS.map(({ key, label, hint, max }) => {

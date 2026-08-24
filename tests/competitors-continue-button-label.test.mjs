@@ -24,7 +24,7 @@ test("a 'needsAnalysis' flag distinguishes analyze-first from ready-to-continue,
     /const needsAnalysis = pendingUrls\.length > 0 && pendingUrls\.join\("\|"\) !== analyzedUrlsKey;/,
   );
   // saveAndContinue's branch reuses the same flag rather than recomputing it.
-  const fnStart = source.indexOf("async function saveAndContinue");
+  const fnStart = source.indexOf("function saveAndContinue");
   const fnBody = source.slice(fnStart, fnStart + 300);
   assert.match(fnBody, /if \(needsAnalysis\) \{/);
 });

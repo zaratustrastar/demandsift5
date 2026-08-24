@@ -156,11 +156,16 @@ test("POST \\/api\\/scans accepts contextText as an alternative to websiteUrl, w
   assert.match(scansRoute, /scanInput = \{ contextText: contextCandidate \};/);
 });
 
-test("the discovery-terms GET response splits named competitors into explicit vs suggested", () => {
-  assert.match(discoveryTermsRoute, /competitorSuggestions:/);
-  assert.match(discoveryTermsRoute, /"suggested" as const/);
-  assert.match(discoveryTermsRoute, /"explicit" as const/);
-  assert.match(discoveryTermsRoute, /competitor\.verification === "unverified_hypothesis"/);
+test("named competitors (explicit or suggested) are still exposed via `derived.competitors`, just without a dedicated explicit/suggested split", () => {
+  // The discovery-terms GET response used to also expose a separate
+  // competitorSuggestions field (name + explicit/suggested source), read
+  // only by CompetitorsSetup.tsx's now-removed named-competitor chip editor
+  // (see the "no longer shows a separate named-competitor chip editor" test
+  // below). `derived.competitors` already carried the same names -- both
+  // explicit and suggested -- so removing the dedicated field lost no data,
+  // only the source label a UI no longer renders.
+  assert.equal(discoveryTermsRoute.includes("competitorSuggestions"), false);
+  assert.match(discoveryTermsRoute, /competitors: business\.competitors\.value\.map\(\(competitor\) => competitor\.name\)/);
 });
 
 test("presentScan exposes inputMode/contextText for both the pre-result and completed shapes", () => {
@@ -189,12 +194,20 @@ test("the Competitors & alternatives step never requires competitors", () => {
   assert.equal(/skipLink[\s\S]*?disabled=\{saving \|\|/.test(footer), false, "Skip must only ever be disabled by the save-in-flight state, same as before");
 });
 
-test("context mode shows an editable, never-required competitor suggestion list with an empty state", () => {
+test("CompetitorsSetup no longer shows a separate named-competitor chip editor -- it duplicated the next screen's card", () => {
+  // isContextMode is still read (for the header copy), but the chip editor
+  // built on top of it -- and its own PUT to discovery-terms -- is gone.
   assert.match(competitorsSetup, /isContextMode = !websiteUrl/);
-  assert.match(competitorsSetup, /No competitors added yet\./);
-  assert.match(competitorsSetup, /didn't find a clear competitor in your description/);
-  assert.match(competitorsSetup, /addNamedCompetitor/);
-  assert.match(competitorsSetup, /removeNamedCompetitor/);
+  assert.equal(competitorsSetup.includes("namedCompetitors"), false);
+  assert.equal(competitorsSetup.includes("addNamedCompetitor"), false);
+  assert.equal(competitorsSetup.includes("removeNamedCompetitor"), false);
+  assert.equal(competitorsSetup.includes("No competitors added yet."), false);
+  assert.equal(competitorsSetup.includes("competitorSuggestions"), false);
+});
+
+test("named competitors from a context-mode description are still editable, just once -- on the DiscoveryProfile review screen", () => {
+  assert.match(discoveryProfile, /key: "competitors" as const/);
+  assert.match(discoveryProfile, /base\?\.competitors/);
 });
 
 test("the discovery profile screen's competitors field is relabeled consistently", () => {

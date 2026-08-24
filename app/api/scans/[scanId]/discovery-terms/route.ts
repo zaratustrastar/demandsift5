@@ -87,21 +87,6 @@ export async function GET(request: Request, context: RouteContext) {
         // Competitors tab. Empty until they add and analyze any -- see
         // POST /api/competitors/analyze.
         competitorProfiles: scan.competitorProfiles ?? [],
-        // Named competitors from the business understanding itself, split by
-        // how confident we are: "explicit" is a competitor the user (context
-        // mode) or the website literally named; "suggested" is a plausible
-        // one the AI proposed without an explicit source. Read by the
-        // Competitors & alternatives step so it can show these before the
-        // user even types a URL -- see CompetitorsSetup.tsx.
-        competitorSuggestions: business
-          ? business.competitors.value.map((competitor) => ({
-              name: competitor.name,
-              source:
-                competitor.verification === "unverified_hypothesis"
-                  ? ("suggested" as const)
-                  : ("explicit" as const),
-            }))
-          : [],
         // Derived terms are shown so the user edits from what was found rather
         // than from a blank form.
         derived: business

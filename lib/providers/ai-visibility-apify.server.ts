@@ -314,15 +314,28 @@ export async function runVisibilityActor(input: {
     }
 
     const failedQuestions = input.questions.filter((question) => !answeredQuestions.has(question));
-    // Only a soft, informational note -- not thrown -- since real answers
-    // did come back. Still surfaced as this provider's `error` (see
-    // providerErrors in ai-visibility-workflow.ts) so the results view
-    // shows why fewer than 3 answers exist instead of staying silent.
-    const partialTimeoutNote =
-      timedOutWithPartialResults && failedQuestions.length > 0
-        ? `The ${input.provider} visibility Actor timed out after ${Math.ceil(timeoutMs / 1_000)}s before finishing all ${input.questions.length} questions -- ${answers.length} answer${answers.length === 1 ? "" : "s"} completed before the cutoff, ${failedQuestions.length} did not.`
-        : null;
-    return { provider: input.provider, actorRunId: runId || null, answers, failedQuestions, error: partialTimeoutNote };
+    // Only a soft, informational note -- not thrown -- since the run itself
+    // did not fail (or, for a timed-out run, some real answers still came
+    // back). Still surfaced as this provider's `error` (see providerErrors
+    // in ai-visibility-workflow.ts) so the results view shows *why* fewer
+    // than `questions.length` answers exist instead of a bare, unexplained
+    // "no answer was returned". A SUCCEEDED run missing some or all
+    // answers is a real, observed case, not just a hypothetical: the Actor
+    // reports individually-failed queries in a separate `errors` dataset
+    // (see the "Failed queries" section of its own docs) that this caller
+    // does not fetch, so a query ChatGPT itself couldn't answer surfaces
+    // here as "missing", with no lower-level reason available to relay.
+    let partialResultNote: string | null = null;
+    if (failedQuestions.length > 0) {
+      if (timedOutWithPartialResults) {
+        partialResultNote = `The ${input.provider} visibility Actor timed out after ${Math.ceil(timeoutMs / 1_000)}s before finishing all ${input.questions.length} questions -- ${answers.length} answer${answers.length === 1 ? "" : "s"} completed before the cutoff, ${failedQuestions.length} did not.`;
+      } else if (answers.length === 0) {
+        partialResultNote = `The ${input.provider} visibility Actor run completed but did not return an answer for any of the ${input.questions.length} questions (Apify logs individually failed queries separately from this run's main results, so no further reason is available here).`;
+      } else {
+        partialResultNote = `The ${input.provider} visibility Actor run completed with ${answers.length} of ${input.questions.length} questions answered; ${failedQuestions.length} did not get an answer.`;
+      }
+    }
+    return { provider: input.provider, actorRunId: runId || null, answers, failedQuestions, error: partialResultNote };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ApifyTransientError(

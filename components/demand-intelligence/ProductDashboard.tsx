@@ -192,6 +192,113 @@ function LinkifiedText({ text }: { text: string }) {
   );
 }
 
+/**
+ * AI visibility answers come back as raw markdown-ish text straight from
+ * each provider (bold via **, GitHub-style tables via | cells |, numbered
+ * citation markers like [8][15]) -- rendered as a single <p> with
+ * white-space: pre-wrap, that reads as a wall of asterisks and pipes
+ * instead of the structured answer it actually is. No markdown library is
+ * added for this (the codebase has none, and every other block of AI text
+ * in the app is short enough not to need one); this is a small,
+ * dependency-free formatter for exactly the 2 constructs actually observed
+ * in real answers (tables, bold) plus citation markers, not a general
+ * markdown parser.
+ */
+type AnswerBlock = { type: "paragraph"; text: string } | { type: "table"; rows: string[][] };
+
+function isTableSeparatorRow(line: string): boolean {
+  return /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?$/.test(line);
+}
+
+function parseAnswerBlocks(text: string): AnswerBlock[] {
+  const lines = text.split(/\r?\n/);
+  const blocks: AnswerBlock[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (line.trim().startsWith("|")) {
+      const tableLines: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith("|")) {
+        tableLines.push(lines[index].trim());
+        index += 1;
+      }
+      const rows = tableLines
+        .filter((tableLine) => !isTableSeparatorRow(tableLine))
+        .map((tableLine) => tableLine.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()));
+      if (rows.length > 0) blocks.push({ type: "table", rows });
+      continue;
+    }
+    const paragraphLines: string[] = [];
+    while (index < lines.length && lines[index].trim() && !lines[index].trim().startsWith("|")) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+  }
+  return blocks;
+}
+
+const INLINE_MARKDOWN_PATTERN = /\*\*(.+?)\*\*|\[(\d+)\]/g;
+
+function renderInlineAnswerMarkdown(text: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let matchIndex = 0;
+  for (const match of text.matchAll(INLINE_MARKDOWN_PATTERN)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) nodes.push(text.slice(lastIndex, start));
+    if (match[1] !== undefined) {
+      nodes.push(<strong key={`${keyPrefix}-b-${matchIndex}`}>{match[1]}</strong>);
+    } else if (match[2] !== undefined) {
+      nodes.push(
+        <sup key={`${keyPrefix}-c-${matchIndex}`} className={styles.answerCitationMark}>
+          [{match[2]}]
+        </sup>,
+      );
+    }
+    lastIndex = start + match[0].length;
+    matchIndex += 1;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+function FormattedAnswerText({ text }: { text: string }) {
+  const blocks = parseAnswerBlocks(text);
+  return (
+    <div className={styles.answerBody}>
+      {blocks.map((block, blockIndex) =>
+        block.type === "table" ? (
+          <table key={blockIndex} className={styles.answerTable}>
+            <thead>
+              <tr>
+                {block.rows[0]?.map((cell, cellIndex) => (
+                  <th key={cellIndex}>{renderInlineAnswerMarkdown(cell, `${blockIndex}-h-${cellIndex}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.slice(1).map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={cellIndex}>{renderInlineAnswerMarkdown(cell, `${blockIndex}-${rowIndex}-${cellIndex}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p key={blockIndex}>{renderInlineAnswerMarkdown(block.text, `${blockIndex}`)}</p>
+        ),
+      )}
+    </div>
+  );
+}
+
 function RedditMonitoringPanel({
   monitoring,
   onUpdate,
@@ -428,7 +535,7 @@ function AiVisibilityPanel({
                     {answer.answerText ? (
                       <details className={styles.resultsAnswer}>
                         <summary>View answer{answer.citations.length > 0 ? ` (${answer.citations.length} source${answer.citations.length === 1 ? "" : "s"})` : ""}</summary>
-                        <p>{answer.answerText}</p>
+                        <FormattedAnswerText text={answer.answerText} />
                         {answer.citations.length > 0 && (
                           <ul className={styles.resultsCitations}>
                             {answer.citations.map((citation) => (

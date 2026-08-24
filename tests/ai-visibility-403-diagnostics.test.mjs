@@ -126,7 +126,13 @@ test("runAllVisibilityActors: one provider's approval failure never sinks the ot
       return fakeResponse(200, { data: { id: `run-${url.includes("gemini") ? "g" : "p"}`, status: "SUCCEEDED", defaultDatasetId: "ds1" } });
     }
     if (url.includes("/datasets/")) {
-      return fakeResponse(200, []);
+      // A real, fully successful run: all 3 questions answered, so gemini
+      // and perplexity must come back with no error at all.
+      return fakeResponse(200, [
+        { query: "q1", text: "answer 1", sources: [] },
+        { query: "q2", text: "answer 2", sources: [] },
+        { query: "q3", text: "answer 3", sources: [] },
+      ]);
     }
     throw new Error(`unexpected fetch in test: ${url}`);
   };

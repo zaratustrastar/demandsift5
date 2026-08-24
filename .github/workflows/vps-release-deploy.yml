@@ -270,3 +270,4 @@ jobs:
 # trigger: deploy temporary full-access override (2026-08-24T17:03:36Z)
 # trigger: deploy failure-backoff fix for runaway re-scans (2026-08-24T18:15:11Z)
 # trigger: deploy visibility index fix + live status polling (2026-08-24T18:28:47Z)
+# trigger: deploy latest-scan primary-scan pin (2026-08-24T18:54:39Z)

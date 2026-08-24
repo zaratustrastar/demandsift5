@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { CompetitorProfileView } from "./CompetitorsSetup";
 import styles from "./DiscoveryProfile.module.css";
 
 /**
@@ -39,7 +40,34 @@ export type DiscoveryProfileResponse = {
   derived: DiscoveryDerived | null;
   discoveryOverrides: Partial<DiscoveryDerived> | null;
   profileStage?: "fast" | "full" | null;
+  /**
+   * Competitor homepages analyzed on the earlier "Competitors & alternatives"
+   * step (see CompetitorsSetup.tsx) -- already returned by this same GET
+   * endpoint, just not previously read here. Used only to build the
+   * read-only "Competitor language" card below: these phrases are edited on
+   * that earlier step, not here, and already feed the actual Reddit search
+   * regardless of whether this card is shown (see competitorDiscoverySignals
+   * in scan-workflow.ts) -- this card is a preview of language already in
+   * play, not a second place to edit it.
+   */
+  competitorProfiles?: CompetitorProfileView[];
 };
+
+/** Deduplicated (case-insensitive), in first-seen order, capped -- multiple competitors routinely share near-identical phrasing. */
+function dedupedPhrases(values: string[], max: number): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLocaleLowerCase("en-US");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+    if (result.length >= max) break;
+  }
+  return result;
+}
 
 /**
  * Only these reach the backend as overrides; the rest are read-only context.
@@ -193,6 +221,13 @@ export function DiscoveryProfile({
 
   const derived = data?.derived;
 
+  const competitorLanguage = useMemo(() => {
+    const ready = (data?.competitorProfiles ?? []).filter((profile) => profile.status === "ready");
+    const keyphrases = dedupedPhrases(ready.flatMap((profile) => profile.keyphrases), 8);
+    const painPhrases = dedupedPhrases(ready.flatMap((profile) => profile.painPhrases), 8);
+    return { keyphrases, painPhrases, hasAny: keyphrases.length > 0 || painPhrases.length > 0 };
+  }, [data?.competitorProfiles]);
+
   return (
     <main className={styles.screen}>
       <header className={styles.head}>
@@ -276,6 +311,39 @@ export function DiscoveryProfile({
               </div>
             );
           })}
+          {competitorLanguage.hasAny && (
+            <div className={styles.card}>
+              <h2 className={styles.cardTitle}>Competitor language</h2>
+              <p className={styles.hint}>
+                From the competitor pages you analyzed &mdash; already included in your Reddit search.
+                Edit these back on the Competitors &amp; alternatives step.
+              </p>
+              {competitorLanguage.keyphrases.length > 0 && (
+                <>
+                  <p className={styles.hint}>What they sell</p>
+                  <ul className={styles.chips}>
+                    {competitorLanguage.keyphrases.map((phrase) => (
+                      <li className={styles.chip} key={`keyphrase-${phrase}`}>
+                        <span>{phrase}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {competitorLanguage.painPhrases.length > 0 && (
+                <>
+                  <p className={styles.hint}>Problems they speak to</p>
+                  <ul className={styles.chips}>
+                    {competitorLanguage.painPhrases.map((phrase) => (
+                      <li className={styles.chip} key={`pain-${phrase}`}>
+                        <span>{phrase}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
         </section>
       )}
 

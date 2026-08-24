@@ -39,16 +39,6 @@ export type CompetitorProfileView = {
 };
 
 const MAX_COMPETITOR_URLS = 3;
-const MAX_COMPETITOR_PHRASES = 5;
-type CompetitorPhraseField = "keyphrases" | "painPhrases";
-const COMPETITOR_PHRASE_FIELDS: Array<{
-  key: CompetitorPhraseField;
-  label: string;
-  hint: string;
-}> = [
-  { key: "keyphrases", label: "Keyphrases", hint: "What they sell, from their own homepage." },
-  { key: "painPhrases", label: "Pain phrases", hint: "Problems their homepage speaks to." },
-];
 
 export function CompetitorsSetup({
   scanId,
@@ -65,8 +55,6 @@ export function CompetitorsSetup({
     Array.from({ length: MAX_COMPETITOR_URLS }, () => ""),
   );
   const [competitorProfiles, setCompetitorProfiles] = useState<CompetitorProfileView[]>([]);
-  const [phraseEdited, setPhraseEdited] = useState(false);
-  const [competitorAdditions, setCompetitorAdditions] = useState<Record<string, string>>({});
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -159,7 +147,6 @@ export function CompetitorsSetup({
         throw new Error(payload.error?.message ?? "We could not analyze those competitors.");
       }
       setCompetitorProfiles(payload.competitorProfiles ?? []);
-      setPhraseEdited(false);
       setAnalyzedUrlsKey(urls.join("|"));
       return true;
     } catch (analyzeError) {
@@ -168,33 +155,6 @@ export function CompetitorsSetup({
     } finally {
       setAnalyzing(false);
     }
-  }
-
-  function removeCompetitorPhrase(url: string, field: CompetitorPhraseField, phrase: string) {
-    setCompetitorProfiles((current) =>
-      current.map((profile) =>
-        profile.url === url
-          ? { ...profile, [field]: profile[field].filter((value) => value !== phrase) }
-          : profile,
-      ),
-    );
-    setPhraseEdited(true);
-  }
-
-  function addCompetitorPhrase(url: string, field: CompetitorPhraseField) {
-    const additionKey = `${url}|${field}`;
-    const value = (competitorAdditions[additionKey] ?? "").trim();
-    if (!value) return;
-    setCompetitorProfiles((current) =>
-      current.map((profile) => {
-        if (profile.url !== url) return profile;
-        if (profile[field].length >= MAX_COMPETITOR_PHRASES) return profile;
-        const exists = profile[field].some((phrase) => phrase.toLowerCase() === value.toLowerCase());
-        return exists ? profile : { ...profile, [field]: [...profile[field], value] };
-      }),
-    );
-    setPhraseEdited(true);
-    setCompetitorAdditions((current) => ({ ...current, [additionKey]: "" }));
   }
 
   async function saveAndContinue() {
@@ -210,14 +170,6 @@ export function CompetitorsSetup({
     }
     setSaving(true);
     try {
-      if (phraseEdited && competitorProfiles.length > 0) {
-        const response = await fetch("/api/competitors", {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ scanId, competitorProfiles }),
-        });
-        if (!response.ok) throw new Error("We could not save your competitor edits.");
-      }
       if (isContextMode && namedCompetitorsEdited) {
         // Reuses the same override endpoint DiscoveryProfile.tsx's term
         // editor writes to -- a name kept from the AI-extracted list keeps
@@ -328,60 +280,12 @@ export function CompetitorsSetup({
                     {profile.error ? `: ${profile.error}` : "."}
                   </p>
                 ) : (
-                  <>
-                    {profile.summary && <p className={styles.hint}>{profile.summary}</p>}
-                    {COMPETITOR_PHRASE_FIELDS.map(({ key, label, hint }) => {
-                      const additionKey = `${profile.url}|${key}`;
-                      const atMax = profile[key].length >= MAX_COMPETITOR_PHRASES;
-                      return (
-                        <div key={key}>
-                          <p className={styles.hint}>
-                            {label} &mdash; {hint} ({profile[key].length}/{MAX_COMPETITOR_PHRASES})
-                          </p>
-                          <ul className={styles.chips}>
-                            {profile[key].length === 0 && (
-                              <li className={styles.empty}>Nothing here yet.</li>
-                            )}
-                            {profile[key].map((phrase) => (
-                              <li className={styles.chip} key={phrase}>
-                                <span>{phrase}</span>
-                                <button
-                                  type="button"
-                                  aria-label={`Remove ${phrase}`}
-                                  onClick={() => removeCompetitorPhrase(profile.url, key, phrase)}
-                                >
-                                  ×
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                          {!atMax && (
-                            <div className={styles.addRow}>
-                              <input
-                                value={competitorAdditions[additionKey] ?? ""}
-                                placeholder="Add a phrase"
-                                onChange={(event) =>
-                                  setCompetitorAdditions((current) => ({
-                                    ...current,
-                                    [additionKey]: event.target.value,
-                                  }))
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    addCompetitorPhrase(profile.url, key);
-                                  }
-                                }}
-                              />
-                              <button type="button" onClick={() => addCompetitorPhrase(profile.url, key)}>
-                                Add
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </>
+                  // Keyphrases/pain phrases are intentionally not shown or edited
+                  // here anymore -- they now appear once, read-only, on the next
+                  // screen's "Competitor language" card (see DiscoveryProfile.tsx),
+                  // alongside the other discovery categories instead of duplicated
+                  // on this one.
+                  profile.summary && <p className={styles.hint}>{profile.summary}</p>
                 )}
               </div>
             ))}

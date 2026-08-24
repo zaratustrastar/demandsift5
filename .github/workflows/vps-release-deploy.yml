@@ -259,3 +259,4 @@ jobs:
 # trigger: deploy zero-answer explanation + answer formatting (2026-08-24T08:15:45Z)
 # trigger: deploy competitor language on review screen (2026-08-24T09:11:04Z)
 # trigger: deploy competitor keyphrases shown once (2026-08-24T09:20:36Z)
+# trigger: deploy competitor language cap of 3 (2026-08-24T09:25:08Z)

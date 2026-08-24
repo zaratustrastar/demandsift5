@@ -223,23 +223,42 @@ export async function runAiVisibilityScan(visibilityScanId: string): Promise<AiV
       .filter(({ answer }) => answer.brandMentioned && answer.answerText.trim());
     const aiProvider = readableAiProvider();
     if (aiProvider && toClassify.length > 0) {
+      // The index sent to OpenAI is toClassify's own dense position
+      // (0..toClassify.length-1), never the sparse original draftAnswers
+      // position -- draftAnswers has up to 9 entries (3 providers x 3
+      // questions) but only some mention the brand, so the real positions
+      // being sent can be sparse (e.g. [1, 4, 8]). A low-reasoning-effort
+      // economy model asked to "echo back" a sparse, non-zero-based index
+      // set was observed in production re-numbering its own results
+      // positionally instead (0, 1, 2, ...), which then failed strict
+      // validation against the real sparse set with "OpenAI returned an
+      // unknown answer index". Sending a dense, zero-based index removes
+      // that whole failure mode -- position-in-request and index-in-result
+      // now always coincide by construction, and the mapping back to the
+      // real draftAnswers position happens locally below, never trusting
+      // the model to have preserved anything beyond "which of the N
+      // answers I sent is this".
       const analyzed = await aiProvider.analyzeVisibilityMentions({
         brandName: business.name.value,
-        answers: toClassify.map(({ answer, index }) => ({ index, question: answer.question, answerText: answer.answerText })),
+        answers: toClassify.map(({ answer }, position) => ({
+          index: position,
+          question: answer.question,
+          answerText: answer.answerText,
+        })),
         models: readableModels(),
         workspaceId: business.workspaceId,
         businessId: business.businessId,
       });
-      const byIndex = new Map(analyzed.value.map((item) => [item.index, item]));
-      for (const { index } of toClassify) {
-        const classification = byIndex.get(index);
-        if (!classification) continue;
+      const byPosition = new Map(analyzed.value.map((item) => [item.index, item]));
+      toClassify.forEach(({ index }, position) => {
+        const classification = byPosition.get(position);
+        if (!classification) return;
         draftAnswers[index] = {
           ...draftAnswers[index],
           brandRecommended: classification.brandRecommended,
           recommendationReasoning: classification.reasoning,
         };
-      }
+      });
     }
 
     const metrics = computeVisibilityMetrics(draftAnswers);

@@ -35,6 +35,19 @@ type View =
 type AccessLevel = "free" | "pass" | "core";
 
 const SCAN_POLL_INTERVAL_MS = 3_000;
+/**
+ * Daily Reddit monitoring and AI visibility tracking both run in the
+ * background (a Postgres-backed scheduler polling every 60s / 5min, see
+ * scripts/background-worker.mjs), completely independent of this
+ * component's lifecycle. Without a repeating refetch here, a run that
+ * finishes while the report tab is already open never becomes visible --
+ * "Recent runs" / "Latest results" only updated on the one-time load that
+ * fires when `view`/`accessLevel` change, so the only way to see a
+ * newly-finished run was a manual page reload. This is deliberately much
+ * slower than SCAN_POLL_INTERVAL_MS: these two panels change at most once
+ * every 15 minutes-to-a-week, not multiple times a second.
+ */
+const BACKGROUND_STATUS_POLL_INTERVAL_MS = 20_000;
 const SCAN_POLL_BACKOFF_BASE_MS = 1_500;
 const SCAN_POLL_BACKOFF_MAX_MS = 10_000;
 
@@ -737,8 +750,16 @@ export function ThreadlineExperience() {
     void loadRedditConnection();
     void loadRedditMonitoring();
     void loadAiVisibility();
+    // Reddit OAuth status changes only in response to a user action taken
+    // on this same page (connect/disconnect), so it does not need the same
+    // repeating refetch -- only the two background-scheduled panels do.
+    const backgroundStatusTimer = window.setInterval(() => {
+      void loadRedditMonitoring();
+      void loadAiVisibility();
+    }, BACKGROUND_STATUS_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
+      window.clearInterval(backgroundStatusTimer);
     };
   }, [view, accessLevel]);
 

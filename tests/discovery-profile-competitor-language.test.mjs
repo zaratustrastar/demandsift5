@@ -34,8 +34,8 @@ test("DiscoveryProfile.tsx now reads competitorProfiles from that same response 
 test("competitor language is deduplicated case-insensitively and capped, not a raw unbounded dump", () => {
   assert.match(discoveryProfileSource, /function dedupedPhrases/);
   assert.match(discoveryProfileSource, /toLocaleLowerCase\("en-US"\)/);
-  assert.match(discoveryProfileSource, /dedupedPhrases\(ready\.flatMap\(\(profile\) => profile\.keyphrases\), 8\)/);
-  assert.match(discoveryProfileSource, /dedupedPhrases\(ready\.flatMap\(\(profile\) => profile\.painPhrases\), 8\)/);
+  assert.match(discoveryProfileSource, /dedupedPhrases\(ready\.flatMap\(\(profile\) => profile\.keyphrases\), 3\)/);
+  assert.match(discoveryProfileSource, /dedupedPhrases\(ready\.flatMap\(\(profile\) => profile\.painPhrases\), 3\)/);
   // Only "ready" competitor analyses contribute -- a failed one has no phrases to show.
   assert.match(discoveryProfileSource, /profile\.status === "ready"/);
 });

@@ -223,8 +223,8 @@ export function DiscoveryProfile({
 
   const competitorLanguage = useMemo(() => {
     const ready = (data?.competitorProfiles ?? []).filter((profile) => profile.status === "ready");
-    const keyphrases = dedupedPhrases(ready.flatMap((profile) => profile.keyphrases), 8);
-    const painPhrases = dedupedPhrases(ready.flatMap((profile) => profile.painPhrases), 8);
+    const keyphrases = dedupedPhrases(ready.flatMap((profile) => profile.keyphrases), 3);
+    const painPhrases = dedupedPhrases(ready.flatMap((profile) => profile.painPhrases), 3);
     return { keyphrases, painPhrases, hasAny: keyphrases.length > 0 || painPhrases.length > 0 };
   }, [data?.competitorProfiles]);
 

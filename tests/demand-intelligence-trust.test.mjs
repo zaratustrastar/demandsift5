@@ -55,7 +55,11 @@ test("every displayed acquisition opportunity passes deterministic lead invarian
   assert.match(pipeline, /qualification\.evidenceQuality === "high"/);
   assert.match(pipeline, /qualification\.productFit === "medium" \|\| qualification\.productFit === "high"/);
   assert.match(pipeline, /qualification\.replyability === "medium" \|\| qualification\.replyability === "high"/);
-  assert.match(workflow, /for \(const opportunity of replyEligible\)/);
+  // Reply drafting runs replyEligible through mapConcurrently (bounded
+  // parallel, not a plain sequential for loop) but every item still goes
+  // through the same per-item function -- a throw for any one of them
+  // still fails the whole call, same as a for loop with no try/catch.
+  assert.match(workflow, /mapConcurrently\(replyEligible, REPLY_GENERATION_CONCURRENCY, async \(opportunity\) => \{/);
   assert.doesNotMatch(workflow, /Create empty placeholders only for additional reply-eligible paid results/);
   assert.match(workflow, /all qualified opportunities/);
 });

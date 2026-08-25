@@ -926,19 +926,30 @@ type ChatTextResult =
 
 const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
 const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
-// A full scan can have 100-300+ credible candidates awaiting triage, and
-// triageConversations() below processes batches sequentially (one fully
-// awaited before the next starts) -- so this size directly sets how many
-// round-trips a scan needs, not just how big each one is. 25 is chosen
-// because triageAttempt's own output-token budget
-// (max(4_000, min(12_000, candidates.length * 400))) already assumes up to
-// 30 candidates fit before hitting its 12_000 cap, so this stays comfortably
-// inside a budget the code already trusts, while cutting a 235-candidate
-// scan from ~59 sequential batches down to ~10. If a batch's structured
-// response is ever too large in practice, processBatch() below already
-// recursively bisects it on length-exhaustion and retries, so raising this
-// has a built-in safety net rather than a hard cliff.
+// A full scan can have 100-300+ credible candidates awaiting triage, split
+// into batches this size and fanned out across TRIAGE_CONCURRENCY workers
+// (see triageConversations() below) -- so this size sets how many batches
+// exist, not directly how many round-trips a scan waits through in
+// sequence anymore. 25 is chosen because triageAttempt's own output-token
+// budget (max(4_000, min(12_000, candidates.length * 400))) already
+// assumes up to 30 candidates fit before hitting its 12_000 cap, so this
+// stays comfortably inside a budget the code already trusts, while cutting
+// a 235-candidate scan to ~10 batches (down from ~59 at the original size
+// of 4). If a batch's structured response is ever too large in practice,
+// processBatch() below already recursively bisects it on length-exhaustion
+// and retries, so raising this has a built-in safety net rather than a
+// hard cliff.
 const TRIAGE_BATCH_SIZE = 25;
+// How many triage batches run at once. Batches are fully independent --
+// nothing in batch N depends on batch N-1 having finished -- so running
+// them one at a time was pure wasted wall-clock time; a 235-candidate scan
+// waited through ~10 sequential round-trips for no reason. Bounded (not
+// "all batches at once") for the same reason website-crawler.ts bounds its
+// own page-fetch concurrency: the provider's 429/5xx retry-with-backoff
+// (see post() above) absorbs occasional rate-limit contention from firing
+// several requests at once, but firing dozens simultaneously would just
+// shift that contention from "wasted time" to "wasted retries."
+const TRIAGE_CONCURRENCY = 4;
 // Marketplace gateways can temporarily have no seller for an otherwise valid
 // model. Retrying those responses over a short backoff window is cheaper and
 // safer than failing the entire scan after an immediate burst of requests.
@@ -1664,8 +1675,12 @@ export class OpenAiProvider implements AiProvider {
         if (isStructuredLengthExhaustion(error) && pending.size > 1) {
           const remaining = [...pending];
           const middle = Math.ceil(remaining.length / 2);
-          await processBatch(remaining.slice(0, middle));
-          await processBatch(remaining.slice(middle));
+          // Both halves are independent recoveries of the same oversized
+          // batch -- no reason to await one before starting the other.
+          await Promise.all([
+            processBatch(remaining.slice(0, middle)),
+            processBatch(remaining.slice(middle)),
+          ]);
           return;
         }
         throw error;
@@ -1677,9 +1692,27 @@ export class OpenAiProvider implements AiProvider {
       }
     };
 
+    const batches: string[][] = [];
     for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
-      await processBatch(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
+      batches.push(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
     }
+    // Fan out across a small worker pool instead of awaiting each batch in
+    // turn -- see TRIAGE_CONCURRENCY's doc comment above. Mirrors the same
+    // bounded worker-pool pattern already used for independent Reddit
+    // discovery query chunks (runChunkedDirectDiscovery in
+    // reddit-harshmaur.server.ts).
+    let nextBatchIndex = 0;
+    const runNextBatch = async (): Promise<void> => {
+      for (;;) {
+        const index = nextBatchIndex;
+        nextBatchIndex += 1;
+        if (index >= batches.length) return;
+        await processBatch(batches[index]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(TRIAGE_CONCURRENCY, batches.length) }, () => runNextBatch()),
+    );
     const usage = combineTokenUsage(attempts.map((attempt) => attempt.usage));
     return {
       value: expectedIds.map((id) => collected.get(id)!),

@@ -693,6 +693,46 @@ function usageRecord(
   };
 }
 
+// How many reply-generation AI calls run at once (see the "replies" stage
+// below). Each opportunity/conversation's reply is fully independent of
+// every other's, so drafting them one at a time in a loop was pure wasted
+// wall-clock time -- the same problem TRIAGE_CONCURRENCY (openai.server.ts)
+// fixed for triage batches. Bounded, not unlimited, for the same
+// rate-limit-contention reason as that constant's doc comment.
+const REPLY_GENERATION_CONCURRENCY = 4;
+
+/**
+ * Runs `fn` over every item in `items`, at most `concurrency` at a time,
+ * preserving each result at its original index. If `fn` throws for any
+ * item, the whole call rejects with that error (same fail-fast semantics
+ * as a plain `for` loop that doesn't catch), which is what the
+ * reply-eligible-opportunities loop below relies on for its "every
+ * opportunity must produce a grounded reply" invariant; callers that want
+ * per-item failure isolation instead (see the relevant-conversations loop
+ * below) must catch inside `fn` itself, exactly as they would inside a
+ * `for` loop's own try/catch.
+ */
+async function mapConcurrently<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker()),
+  );
+  return results;
+}
+
 function localMockTriage(candidate: RedditDiscoveryCandidate): ConversationTriage {
   const text = `${candidate.title ?? ""}\n${candidate.body}`.toLocaleLowerCase("en-US");
   if (/not buying right now|documenting how teams|weekly general discussion|hiring updates/.test(text)) {
@@ -2009,7 +2049,14 @@ export async function runScan(
     const replyEligible = [...opportunities]
       .filter((opportunity) => opportunity.shouldReply === true)
       .sort((left, right) => right.replyScore - left.replyScore);
-    for (const opportunity of replyEligible) {
+    // Every opportunity's reply is fully independent of every other's --
+    // drafting them one at a time in a plain loop was pure wasted
+    // wall-clock time for scans with several reply-eligible opportunities.
+    // mapConcurrently preserves the exact same per-item logic (including
+    // the "must produce a grounded reply or the scan fails" invariant,
+    // since a throw inside it still rejects the whole call) while running
+    // up to REPLY_GENERATION_CONCURRENCY of them at once.
+    const replyDrafts = await mapConcurrently(replyEligible, REPLY_GENERATION_CONCURRENCY, async (opportunity) => {
       const row = qualifiedOpportunities.find((qualified) => qualified.id === opportunity.id);
       let content = "";
       const previousOpportunity = previousBySource.get(opportunity.sourceId);
@@ -2040,7 +2087,7 @@ export async function runScan(
       if (!content) {
         throw new Error("A reply-eligible opportunity did not produce a grounded reply.");
       }
-      replies.push({
+      const draft: ReplyRecord = {
         id: opportunity.replyId,
         opportunityId: opportunity.id,
         workspaceId: scan.workspaceId,
@@ -2054,8 +2101,10 @@ export async function runScan(
         publishedUrl: null,
         publishedVia: null,
         redditCommentId: null,
-      });
-    }
+      };
+      return draft;
+    });
+    replies.push(...replyDrafts);
     // Relevant (non-lead) conversations classify shouldReply independently of
     // leadStatus: a conversation can be genuinely useful market signal -- and
     // deserve a helpful, disclosed reply -- without being a potential
@@ -2066,61 +2115,72 @@ export async function runScan(
     const relevantReplyEligible = marketIntelligence.filter(
       (intelligence) => intelligence.replyId && !leadSourceIds.has(intelligence.sourceId),
     );
-    for (const intelligence of relevantReplyEligible) {
-      const row = relevantDeepRows.find(
-        (candidate) => candidate.conversation.provenance.id === intelligence.sourceId,
-      );
-      if (!row) continue;
-      let content = "";
-      if (aiProvider) {
-        const qualifiedRow = {
-          id: intelligence.id,
-          workspaceId: scan.workspaceId,
-          businessId,
-          conversation: row.conversation,
-          qualification: row.qualification,
-          classification: legacyClassificationFromDeep(row.qualification),
-          rankScore: Math.max(0, Math.min(1, (intelligence.replyScore ?? 0) / 100)),
-          status: "new" as const,
-          provenanceIds: [intelligence.sourceId],
-          discoveredAt: row.conversation.createdAt,
-        };
-        try {
-          const generated = await aiProvider.generateReply({
-            business,
-            opportunity: qualifiedRow,
-            models,
-            instructions: row.qualification.replyAngle,
-          });
-          usage.push(usageRecord(generated, "reply-generation"));
-          content = generated.value.body.trim();
-        } catch (error) {
-          // A relevant conversation's reply is best-effort, not the strict
-          // per-lead invariant: it is still fully useful as research evidence
-          // without a drafted reply, so a generation failure here must not
-          // fail the scan.
-          console.error("Relevant-conversation reply generation failed", error);
+    // Same independence argument as replyEligible above -- these also run
+    // concurrently. Unlike that loop, a single conversation's generation
+    // failure must not fail the scan (see the comment inside), so each
+    // item's own try/catch returns null on failure instead of throwing;
+    // mapConcurrently preserves per-item results at their original index
+    // regardless of which ones resolve first.
+    const relevantReplyDrafts = await mapConcurrently(
+      relevantReplyEligible,
+      REPLY_GENERATION_CONCURRENCY,
+      async (intelligence): Promise<ReplyRecord | null> => {
+        const row = relevantDeepRows.find(
+          (candidate) => candidate.conversation.provenance.id === intelligence.sourceId,
+        );
+        if (!row) return null;
+        let content = "";
+        if (aiProvider) {
+          const qualifiedRow = {
+            id: intelligence.id,
+            workspaceId: scan.workspaceId,
+            businessId,
+            conversation: row.conversation,
+            qualification: row.qualification,
+            classification: legacyClassificationFromDeep(row.qualification),
+            rankScore: Math.max(0, Math.min(1, (intelligence.replyScore ?? 0) / 100)),
+            status: "new" as const,
+            provenanceIds: [intelligence.sourceId],
+            discoveredAt: row.conversation.createdAt,
+          };
+          try {
+            const generated = await aiProvider.generateReply({
+              business,
+              opportunity: qualifiedRow,
+              models,
+              instructions: row.qualification.replyAngle,
+            });
+            usage.push(usageRecord(generated, "reply-generation"));
+            content = generated.value.body.trim();
+          } catch (error) {
+            // A relevant conversation's reply is best-effort, not the strict
+            // per-lead invariant: it is still fully useful as research evidence
+            // without a drafted reply, so a generation failure here must not
+            // fail the scan.
+            console.error("Relevant-conversation reply generation failed", error);
+          }
+        } else if (discovery.sourceMode === "mock") {
+          content = fallbackReply(profile);
         }
-      } else if (discovery.sourceMode === "mock") {
-        content = fallbackReply(profile);
-      }
-      if (!content) continue;
-      replies.push({
-        id: intelligence.replyId!,
-        opportunityId: intelligence.id,
-        workspaceId: scan.workspaceId,
-        scanId: scan.id,
-        content,
-        status: "draft",
-        generation: 1,
-        createdAt: now,
-        updatedAt: now,
-        publishedAt: null,
-        publishedUrl: null,
-        publishedVia: null,
-        redditCommentId: null,
-      });
-    }
+        if (!content) return null;
+        return {
+          id: intelligence.replyId!,
+          opportunityId: intelligence.id,
+          workspaceId: scan.workspaceId,
+          scanId: scan.id,
+          content,
+          status: "draft",
+          generation: 1,
+          createdAt: now,
+          updatedAt: now,
+          publishedAt: null,
+          publishedUrl: null,
+          publishedVia: null,
+          redditCommentId: null,
+        };
+      },
+    );
+    replies.push(...relevantReplyDrafts.filter((reply): reply is ReplyRecord => reply !== null));
     await Promise.all(replies.map((reply) => repository.saveReply(reply)));
     await setStage(
       scan,

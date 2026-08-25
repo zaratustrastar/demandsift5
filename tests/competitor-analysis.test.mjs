@@ -72,7 +72,11 @@ test("CompetitorProfile is a distinct model, never folded into the business's ow
 
 test("competitor-derived query terms are appended after, never before, the primary business's own", () => {
   assert.match(workflow, /function competitorDiscoverySignals/);
-  const queriesStart = workflow.indexOf("const discovery = persistedDiscovery ?? await redditProvider.discover(");
+  // persistedDiscovery ?? was replaced by an always-call-discover() shape
+  // that passes persistedDiscovery in as resumeFrom instead (see
+  // scan-workflow.ts's discovery-checkpointing comment) -- the ordering
+  // guarantee this test pins is unchanged, only the call site's exact text.
+  const queriesStart = workflow.indexOf("const discovery = await redditProvider.discover(");
   const queriesBlock = workflow.slice(queriesStart, queriesStart + 1500);
 
   const competitorsFieldStart = queriesBlock.indexOf("competitors: [");

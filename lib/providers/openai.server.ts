@@ -1654,6 +1654,15 @@ export class OpenAiProvider implements AiProvider {
       throw new OpenAiProviderError("Triage input contains duplicate externalIds.");
     }
     const collected = new Map<string, TriagedConversation>();
+    // Seed with whatever an earlier, interrupted attempt already triaged
+    // successfully -- these are never resubmitted, see resumeFrom's doc
+    // comment. Only candidates missing from here go into `batches` below.
+    if (request.resumeFrom) {
+      for (const externalId of expectedIds) {
+        const triage = request.resumeFrom.get(externalId);
+        if (triage) collected.set(externalId, { externalId, triage });
+      }
+    }
     const attempts: AiProviderResult<TriagedConversation[]>[] = [];
     const retries = Math.max(0, Math.min(request.coverageRetries ?? 2, 3));
 
@@ -1690,11 +1699,26 @@ export class OpenAiProvider implements AiProvider {
           `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
         );
       }
+      if (request.onBatchSucceeded) {
+        // Reached only once every id in this batch (or bisected sub-batch)
+        // is present in `collected` -- see the pending.size check above.
+        const items = batchIds.map((id) => collected.get(id)!);
+        try {
+          await request.onBatchSucceeded(items);
+        } catch (error) {
+          // Best-effort persistence: a checkpoint write failing must never
+          // fail (or discard) this batch's own already-successful triage.
+          console.error("Failed to checkpoint a successfully triaged batch.", error);
+        }
+      }
     };
 
+    // Only candidates resumeFrom didn't already cover need to go to OpenAI
+    // at all.
+    const idsNeedingTriage = expectedIds.filter((id) => !collected.has(id));
     const batches: string[][] = [];
-    for (let offset = 0; offset < expectedIds.length; offset += TRIAGE_BATCH_SIZE) {
-      batches.push(expectedIds.slice(offset, offset + TRIAGE_BATCH_SIZE));
+    for (let offset = 0; offset < idsNeedingTriage.length; offset += TRIAGE_BATCH_SIZE) {
+      batches.push(idsNeedingTriage.slice(offset, offset + TRIAGE_BATCH_SIZE));
     }
     // Fan out across a small worker pool instead of awaiting each batch in
     // turn -- see TRIAGE_CONCURRENCY's doc comment above. Mirrors the same

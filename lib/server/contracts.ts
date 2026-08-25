@@ -536,6 +536,18 @@ export type ScanRecord = {
    */
   redditDiscovery?: RedditDiscoveryResponse | null;
   /**
+   * Triage results already obtained for a subset of this scan's candidates
+   * during an earlier, interrupted attempt, keyed by externalId. Exists for
+   * the same reason redditDiscovery does: triageConversations() only
+   * guarantees full coverage or throws, and a single concurrent batch that
+   * exhausts its own retries (e.g. an OpenAI request timing out) discards
+   * the *whole* triage call, not just that batch. Without this checkpoint,
+   * every job retry would resubmit every candidate to OpenAI again, even
+   * ones a sibling batch already classified successfully moments before the
+   * failing batch gave up.
+   */
+  triageCheckpoint?: Record<string, ConversationTriage> | null;
+  /**
    * Optional, user-supplied competitor URLs and what DemandSift understood
    * from each of their homepages. Fixed by the user before the Reddit scan
    * starts, same lifecycle as discoveryProfile/discoveryOverrides -- edited

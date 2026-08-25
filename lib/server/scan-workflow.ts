@@ -1277,8 +1277,16 @@ export async function runScan(
     // A checkpoint from a prior job attempt of this same scan is always safe
     // to reuse: discoveryProfile and discoveryOverrides are both fixed once
     // a scan starts, so discovery's inputs cannot have changed between
-    // attempts. Reusing it skips a real, paid Apify call entirely instead of
-    // re-running discovery from scratch on every retry.
+    // attempts. `persistedDiscovery` may be either a fully-complete result
+    // from an attempt that finished, or a partial one saved mid-discovery by
+    // onChunkSucceeded below (e.g. this process was restarted -- by a
+    // deploy, a job-level timeout, or a reclaim after the worker lost its
+    // heartbeat -- before discovery finished). Passing it as `resumeFrom`
+    // lets the provider itself work out what's still outstanding: nothing
+    // (zero new Apify calls) if it was already complete, or only the
+    // queries that never finished if it was partial. Either way this
+    // replaces the previous "reuse in full or redo from scratch" choice,
+    // which paid for and re-ran every query on any interruption mid-stage.
     const persistedDiscovery = scan.redditDiscovery;
     // Competitor-derived signals (see lib/server/competitor-analysis.ts) are
     // appended after, never in place of, the primary business's own terms
@@ -1287,7 +1295,7 @@ export async function runScan(
     // always get first claim on that budget; a competitor's own name or
     // pain phrases only occupy a slot the primary business left empty.
     const competitorSignals = competitorDiscoverySignals(scan.competitorProfiles);
-    const discovery = persistedDiscovery ?? await redditProvider.discover(
+    const discovery = await redditProvider.discover(
       {
         queries: {
           productTerms: business.productTerms.value,
@@ -1331,6 +1339,20 @@ export async function runScan(
               `(attempt ${Math.min(notice.attempt + 1, notice.maxAttempts)} of ${notice.maxAttempts})…`,
           );
         },
+        resumeFrom: persistedDiscovery ?? undefined,
+        // Persisted as soon as each query chunk succeeds, not only once the
+        // whole stage finishes -- see the discoveryProfile comment above.
+        // Best-effort: a save failing here must never fail discovery itself,
+        // it only means a subsequent interruption would redo a bit more work.
+        onChunkSucceeded: async (partial) => {
+          scan.redditDiscovery = partial;
+          scan.updatedAt = new Date().toISOString();
+          try {
+            await repository.saveScan(scan);
+          } catch (error) {
+            console.error("Failed to checkpoint partial Reddit discovery.", error);
+          }
+        },
       },
     ).catch((error) => {
       const message = error instanceof Error ? error.message : "Unknown Reddit discovery failure.";
@@ -1345,19 +1367,23 @@ export async function runScan(
       // "searched and found nothing" outcome. A degraded run means coverage
       // was lost to retries being exhausted, not that the search completed
       // cleanly with nothing to show -- that must never be reported as a
-      // successful empty scan. Never checkpointed either, so the next job
-      // attempt correctly retries discovery instead of reusing this failure.
+      // successful empty scan. This is intentionally not persisted as the
+      // scan's final redditDiscovery, so the next job attempt retries the
+      // still-missing queries (whatever onChunkSucceeded did manage to
+      // checkpoint along the way is reused; nothing usable was lost).
       throw new ApiError(
         "Reddit discovery timed out and returned no usable results after retrying.",
         503,
         "reddit_discovery_failed",
       );
     }
-    if (!persistedDiscovery) {
-      scan.redditDiscovery = discovery;
-      scan.updatedAt = new Date().toISOString();
-      await repository.saveScan(scan);
-    }
+    // Always persist the final result, even though onChunkSucceeded above
+    // already checkpointed along the way: this is the authoritative,
+    // fully-merged version with final diagnostics, and must be what a
+    // later stage or a future resume actually sees.
+    scan.redditDiscovery = discovery;
+    scan.updatedAt = new Date().toISOString();
+    await repository.saveScan(scan);
     /**
      * `now` here is the sanity-check ceiling deterministicReason() uses to
      * reject impossible future-dated records (bad actor output, clock skew).
@@ -1479,11 +1505,29 @@ export async function runScan(
     let triageReturned = 0;
     if (needsTriage.length > 0) {
       if (aiProvider) {
+        // See ScanRecord.triageCheckpoint's doc comment: reuses whatever an
+        // earlier, interrupted attempt of this same scan already triaged
+        // successfully, and persists each newly-triaged batch as it
+        // completes so a future interruption resumes from here too.
         const triaged = await aiProvider.triageConversations({
           business,
           candidates: needsTriage,
           models,
           coverageRetries: 2,
+          resumeFrom: scan.triageCheckpoint
+            ? new Map(Object.entries(scan.triageCheckpoint))
+            : undefined,
+          onBatchSucceeded: async (items) => {
+            const next = { ...(scan.triageCheckpoint ?? {}) };
+            for (const item of items) next[item.externalId] = item.triage;
+            scan.triageCheckpoint = next;
+            scan.updatedAt = new Date().toISOString();
+            try {
+              await repository.saveScan(scan);
+            } catch (error) {
+              console.error("Failed to checkpoint a successfully triaged batch.", error);
+            }
+          },
         });
         usage.push(usageRecord(triaged, "triage"));
         triageReturned = triaged.value.length;

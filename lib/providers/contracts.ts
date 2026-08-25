@@ -82,6 +82,22 @@ export interface TriageConversationsRequest {
   candidates: RedditDiscoveryCandidate[];
   models: ModelConfiguration;
   coverageRetries?: number;
+  /**
+   * Triage results already obtained for a subset of `candidates` during an
+   * earlier, interrupted attempt of this same scan (see the doc comment on
+   * ScanRecord.triageCheckpoint). Any candidate present here is returned
+   * directly and never resubmitted to OpenAI.
+   */
+  resumeFrom?: ReadonlyMap<string, ConversationTriage>;
+  /**
+   * Fired once a batch (or bisected sub-batch, see processBatch) achieves
+   * full coverage for its own candidates -- never on failure. A caller can
+   * persist these as they arrive so a scan interrupted mid-triage (e.g. one
+   * concurrent batch's OpenAI request timing out after exhausting its own
+   * retries, which currently fails the whole triageConversations() call)
+   * resumes from here instead of resubmitting every candidate again.
+   */
+  onBatchSucceeded?: (items: readonly TriagedConversation[]) => void | Promise<void>;
 }
 
 export interface TriagedConversation {
@@ -391,6 +407,25 @@ export interface RedditDiscoveryRetryNotice {
 
 export interface RedditDiscoverOptions {
   onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>;
+  /**
+   * A prior, possibly-incomplete discovery attempt for this same scan (see
+   * the discovery-checkpointing comment in scan-workflow.ts). When
+   * supplied, discover() skips re-querying any search-plan query already
+   * present in `resumeFrom.searchPlan` and merges its own new results into
+   * it before returning -- so a scan resumed after an interruption only
+   * pays for and waits on whatever never actually completed, instead of
+   * re-running every query from scratch.
+   */
+  resumeFrom?: RedditDiscoveryResponse;
+  /**
+   * Fired after each independently-run query chunk succeeds (never on
+   * failure -- a failed chunk has nothing new worth checkpointing). The
+   * value is the full running result so far (resumeFrom plus every chunk
+   * that has succeeded up to and including this one). A caller can persist
+   * this so a scan interrupted mid-discovery resumes from here on its next
+   * attempt rather than re-querying everything already covered.
+   */
+  onChunkSucceeded?: (partial: RedditDiscoveryResponse) => void | Promise<void>;
 }
 
 export interface RedditProvider {

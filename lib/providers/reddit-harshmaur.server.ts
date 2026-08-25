@@ -1180,9 +1180,28 @@ export class HarshmaurRedditProvider implements RedditProvider {
     const targetTotal = Math.min(this.maximumItems, Math.max(40, request.limit));
 
     if (this.discoveryMode === "direct-url") {
-      const families = redditQueryFamilies(request, { maxQueries: this.maxQueries });
-      if (families.length > 0) {
-        return this.runChunkedDirectDiscovery(request, families, options?.onRetry);
+      const allFamilies = redditQueryFamilies(request, { maxQueries: this.maxQueries });
+      if (allFamilies.length > 0) {
+        // Resuming after an interruption: only the queries not already
+        // present in the checkpoint are still outstanding. See
+        // RedditDiscoverOptions.resumeFrom's doc comment.
+        const covered = new Set((options?.resumeFrom?.searchPlan ?? []).map((entry) => entry.query));
+        const remaining = covered.size > 0
+          ? allFamilies.filter((family) => !covered.has(family.query))
+          : allFamilies;
+        if (remaining.length === 0 && options?.resumeFrom) {
+          // Every query this business would search for is already covered
+          // by the checkpoint -- nothing left to fetch, so this costs zero
+          // new Apify calls.
+          return options.resumeFrom;
+        }
+        return this.runChunkedDirectDiscovery(
+          request,
+          remaining,
+          options?.onRetry,
+          options?.resumeFrom,
+          options?.onChunkSucceeded,
+        );
       }
     }
 
@@ -1213,11 +1232,39 @@ export class HarshmaurRedditProvider implements RedditProvider {
     request: RedditSearchRequest,
     families: RedditQueryFamily[],
     onRetry?: (notice: RedditDiscoveryRetryNotice) => void,
+    resumeFrom?: RedditDiscoveryResponse,
+    onChunkSucceeded?: (partial: RedditDiscoveryResponse) => void | Promise<void>,
   ): Promise<RedditDiscoveryResponse> {
-    const chunkSize = Math.min(families.length, this.queriesPerRun);
+    // `families` here is already the remaining, not-yet-covered set (see
+    // discover()) -- chunking only ever splits genuinely outstanding work.
+    const chunkSize = Math.min(Math.max(families.length, 1), this.queriesPerRun);
     const chunks: RedditQueryFamily[][] = [];
     for (let index = 0; index < families.length; index += chunkSize) {
       chunks.push(families.slice(index, index + chunkSize));
+    }
+
+    // Running checkpoint: seeded from a prior interrupted attempt (if any)
+    // and folded into as each new chunk succeeds, regardless of which
+    // chunk finishes first in the concurrent worker pool below. This is
+    // what onChunkSucceeded persists, and what lets a scan resumed after an
+    // interruption skip every query that already completed rather than
+    // paying for and waiting on the whole discovery pass again.
+    let checkpoint = resumeFrom;
+    const checkpointNewChunk = async (result: RedditDiscoveryResponse) => {
+      checkpoint = checkpoint ? mergeDiscoveryResponses([checkpoint, result], this.sourceMode) : result;
+      try {
+        await onChunkSucceeded?.(checkpoint);
+      } catch (error) {
+        // Best-effort persistence: a checkpoint write failing must never
+        // fail (or duplicate) the chunk's own already-successful result.
+        console.error("Failed to checkpoint a successful Reddit discovery chunk.", error);
+      }
+    };
+
+    if (chunks.length === 0) {
+      // Nothing outstanding -- discover() already returns resumeFrom
+      // directly in the common case, but guard direct callers too.
+      return checkpoint ?? mergeDiscoveryResponses([], this.sourceMode);
     }
 
     const runChunk = (chunkFamilies: RedditQueryFamily[], chunkIndex: number) => {
@@ -1241,7 +1288,11 @@ export class HarshmaurRedditProvider implements RedditProvider {
       );
     };
 
-    if (chunks.length <= 1) return runChunk(families, 0);
+    if (chunks.length === 1) {
+      const result = await runChunk(families, 0);
+      await checkpointNewChunk(result);
+      return checkpoint!;
+    }
 
     // Worker pool bounded by maxConcurrentDiscoveryRuns (default: every
     // chunk at once). The pool itself is not what prevents duplicate runs
@@ -1256,7 +1307,9 @@ export class HarshmaurRedditProvider implements RedditProvider {
         const index = nextChunkIndex;
         nextChunkIndex += 1;
         try {
-          outcomes[index] = { status: "fulfilled", value: await runChunk(chunks[index], index) };
+          const value = await runChunk(chunks[index], index);
+          outcomes[index] = { status: "fulfilled", value };
+          await checkpointNewChunk(value);
         } catch (reason) {
           outcomes[index] = { status: "rejected", reason };
         }
@@ -1280,6 +1333,12 @@ export class HarshmaurRedditProvider implements RedditProvider {
     });
 
     if (succeeded.length === 0) {
+      if (resumeFrom) {
+        // Every chunk in this attempt failed, but a prior attempt's
+        // checkpointed results are still valid -- return those rather
+        // than discarding real, already-paid-for progress.
+        return resumeFrom;
+      }
       // Every batch exhausted its retries. Surface the first failure as-is
       // -- the caller classifies it by type (ApifyTransientError vs not),
       // not by this message text.
@@ -1288,7 +1347,14 @@ export class HarshmaurRedditProvider implements RedditProvider {
         : new Error("Reddit discovery failed for every query batch.");
     }
 
-    const merged = mergeDiscoveryResponses(succeeded, this.sourceMode);
+    // `checkpoint` already IS the fully-merged result -- every succeeded
+    // chunk (plus resumeFrom, if any) was folded into it as it completed,
+    // above. Recomputing from `succeeded` alone here would silently drop
+    // resumeFrom's candidates on a resumed attempt.
+    const merged = checkpoint ?? mergeDiscoveryResponses(succeeded, this.sourceMode);
+    // These two counts intentionally describe only this attempt's chunks,
+    // not the cumulative total across a resumed scan's earlier attempts --
+    // diagnostics-only, does not affect which candidates are returned.
     merged.diagnostics.queriesSucceeded = queriesSucceeded;
     merged.diagnostics.queriesFailed = queriesFailed;
     if (queriesFailed > 0) {

@@ -273,3 +273,4 @@ jobs:
 # trigger: deploy latest-scan primary-scan pin (2026-08-24T18:54:39Z)
 # trigger: deploy parallel crawl for competitor+primary analysis (2026-08-24T20:09:36Z)
 # trigger: deploy parallel triage + reply generation (2026-08-25T00:08:00Z)
+# trigger: checkpoint discovery/triage per-chunk fix (2026-08-25T16:16:24Z)

@@ -772,6 +772,28 @@ export function ThreadlineExperience() {
     [inputMode, url, contextText],
   );
 
+  /**
+   * Real production bug: the "scanning" phase effect below decides whether
+   * to reuse the scan already created (and started) during the review step,
+   * or to create a brand new one, by comparing the raw `url` the user typed
+   * against `created.scan.websiteUrl`. But by the time review has run, the
+   * website-crawl stage has already overwritten `scan.websiteUrl` with the
+   * *canonical* crawled URL (protocol added, trailing slash, etc. -- see
+   * `websiteUrl: websiteCrawl.canonicalUrl` in scan-workflow.ts). Those two
+   * strings essentially never match unless the user happened to type the
+   * exact canonical form, so the app treated nearly every scan as "input
+   * changed" and created a second, fully independent scan for the same
+   * business -- doubling every paid discovery/enrichment/AI call for one
+   * user action. This strips protocol/trailing-slash/case before comparing
+   * so cosmetic canonicalization differences no longer look like a real
+   * input change, while a genuinely different domain still correctly does.
+   */
+  const normalizedWebsiteForComparison = useCallback(
+    (value: string): string =>
+      value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, ""),
+    [],
+  );
+
   function startScan(submission: LandingSubmission) {
     if (submission.mode === "context") {
       setInputMode("context");
@@ -878,7 +900,7 @@ export function ThreadlineExperience() {
         const matchesCurrentInput = created
           ? inputMode === "context"
             ? created.scan.inputMode === "context" && created.scan.contextText === contextText
-            : created.scan.websiteUrl === url
+            : normalizedWebsiteForComparison(created.scan.websiteUrl) === normalizedWebsiteForComparison(url)
           : false;
         if (!created || !matchesCurrentInput || created.scan.status === "failed") {
           const createdResponse = await fetch("/api/scans", {
@@ -974,7 +996,7 @@ export function ThreadlineExperience() {
       cancelled = true;
       window.clearTimeout(pollTimer);
     };
-  }, [view, url, contextText, inputMode, reviewScanId, scanCreateBody]);
+  }, [view, url, contextText, inputMode, reviewScanId, scanCreateBody, normalizedWebsiteForComparison]);
 
   async function refreshScan(scanId: string) {
     const response = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });

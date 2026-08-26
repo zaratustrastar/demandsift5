@@ -920,9 +920,22 @@ function buildFallbackInsights(
  * Maximum candidates forwarded to LLM relevance classification. The embedding
  * prefilter keeps this bounded while acquisition volume grows.
  */
+/**
+ * Real production finding: discovery can retrieve up to 450 raw candidates
+ * (9 query families x 50 posts each, see postsPerQuery's default in
+ * reddit-harshmaur.server.ts), which regularly cleans down to 250-320
+ * credible survivors. Against the old default of 120, a real scan showed
+ * 285 credible candidates with only 2 dropped for genuinely low embedding
+ * similarity -- the other 163 were cut purely because the budget ran out,
+ * not because they were judged irrelevant. Raising the default to 300
+ * covers that realistic worst case without hitting the 400 ceiling, at the
+ * cost of roughly one extra round of triage batches (TRIAGE_CONCURRENCY is
+ * still what bounds how many run at once) -- more relevant candidates
+ * actually reach AI judgment instead of being discarded by volume alone.
+ */
 function triageCandidateBudget(): number {
-  const value = Number(process.env.REDDIT_TRIAGE_BUDGET ?? 120);
-  return Number.isFinite(value) ? Math.max(20, Math.min(Math.trunc(value), 400)) : 120;
+  const value = Number(process.env.REDDIT_TRIAGE_BUDGET ?? 300);
+  return Number.isFinite(value) ? Math.max(20, Math.min(Math.trunc(value), 400)) : 300;
 }
 
 function embeddingPrefilterFloor(): number {

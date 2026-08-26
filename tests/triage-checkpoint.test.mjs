@@ -344,6 +344,81 @@ test("tolerateUnrecoverableBatches: a batch OpenAI can never usably answer is sk
   assert.deepEqual(succeededBatches[1].sort(), candidates.slice(25).map((c) => c.externalId).sort());
 });
 
+test("tolerateUnrecoverableBatches: an empty structured response (finish_reason=stop, null content) is skipped too, not just malformed JSON", async () => {
+  // Real production finding: a second, distinct failure shape reached the
+  // same triageConversations() call and was NOT caught by
+  // tolerateUnrecoverableBatches -- OpenAI can also answer with finish_reason
+  // "stop" and null/empty content (no JSON at all to even attempt to
+  // parse), which openai.server.ts surfaces as "OpenAI returned no
+  // structured chat response text (...)" rather than "OpenAI returned
+  // malformed structured JSON." This must be tolerated the same way.
+  const succeededBatches = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      if (ids[0] === "c26") {
+        return new Response(JSON.stringify({
+          id: "chat_test",
+          choices: [{ message: { content: null }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 2652 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+    tolerateUnrecoverableBatches: true,
+    onBatchSucceeded: (items) => { succeededBatches.push(items.map((i) => i.externalId)); },
+  });
+
+  assert.equal(result.value.length, 50);
+  const byId = new Map(result.value.map((row) => [row.externalId, row]));
+  for (let index = 1; index <= 25; index += 1) {
+    assert.equal(byId.get(`c${index}`).triage.worthEnriching, true, `c${index} should carry its real triage verdict`);
+  }
+  for (let index = 26; index <= 50; index += 1) {
+    const triage = byId.get(`c${index}`).triage;
+    assert.equal(triage.worthEnriching, false, `c${index} should be skipped, not enriched`);
+    assert.match(triage.reason, /Skipped/);
+  }
+  assert.equal(succeededBatches.length, 2);
+});
+
+test("without tolerateUnrecoverableBatches, an empty structured response still fails the whole call", async () => {
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => new Response(JSON.stringify({
+      id: "chat_test",
+      choices: [{ message: { content: null }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 2652 },
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  const candidates = [candidate("c1"), candidate("c2")];
+
+  await assert.rejects(
+    provider.triageConversations({
+      business,
+      candidates,
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 0,
+    }),
+    /no structured chat response text/,
+  );
+});
+
 test("without tolerateUnrecoverableBatches, the exact same unparsable batch still fails the whole call (default behavior is unchanged)", async () => {
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",

@@ -1026,9 +1026,33 @@ function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderEr
     && /(?:finish_reason=length|incomplete response(?::|.*)\s*(?:max_tokens|max_output_tokens))/i.test(error.message);
 }
 
+// Real production finding: a batch can also fail with finish_reason=stop and
+// null/empty content (chatText()'s "empty" state above, after every retry
+// and model fallback is exhausted) -- a genuinely different failure shape
+// than malformed JSON or length exhaustion, but still content-specific to
+// this batch, not systemic (constructed without a `status`, same as the
+// other three checks below). Without this, that error shape fell through
+// isUnrecoverableStructuredOutputError entirely and failed the whole scan
+// even with tolerateUnrecoverableBatches enabled.
+function isEmptyStructuredChatResponse(error: unknown): error is OpenAiProviderError {
+  return error instanceof OpenAiProviderError
+    && error.status === undefined
+    && /^OpenAI returned no structured chat response text/.test(error.message);
+}
+
+// A content-moderation refusal is likewise specific to the candidates in
+// that one batch (their content tripped a policy check), not a systemic
+// OpenAI outage -- so it should be skippable the same way, rather than
+// aborting every other in-flight and remaining batch in the scan.
+function isRefusedStructuredChatResponse(error: unknown): error is OpenAiProviderError {
+  return error instanceof OpenAiProviderError
+    && error.status === undefined
+    && error.message === "OpenAI refused the structured chat request.";
+}
+
 /**
  * Whether a batch's failure is specific to that batch's own content rather
- * than systemic. All three underlying checks already require `status` to be
+ * than systemic. All underlying checks already require `status` to be
  * undefined -- a real HTTP/network/auth/rate-limit failure always carries a
  * status and is never matched here, so gating on this is safe: it can only
  * ever mean "OpenAI answered, but the content of that answer was unusable,"
@@ -1037,7 +1061,9 @@ function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderEr
 function isUnrecoverableStructuredOutputError(error: unknown): error is OpenAiProviderError {
   return isMalformedStructuredJson(error)
     || isRetryableStructuredOutputError(error)
-    || isStructuredLengthExhaustion(error);
+    || isStructuredLengthExhaustion(error)
+    || isEmptyStructuredChatResponse(error)
+    || isRefusedStructuredChatResponse(error);
 }
 
 /**

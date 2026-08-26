@@ -278,3 +278,4 @@ jobs:
 # trigger: raise triage candidate budget 120->300 (2026-08-26T11:37:31Z)
 # trigger: skip unrecoverable triage batches instead of failing scan (2026-08-26T13:24:38Z)
 # trigger: serialize scan checkpoint saves per scan id (2026-08-26T13:52:38Z)
+# trigger: remove automatic Trudax fallback from Harshmaur provider (2026-08-26T21:48:58Z)

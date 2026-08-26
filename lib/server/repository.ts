@@ -470,6 +470,28 @@ function toJob(row: {
 class PostgresStateRepository implements StateRepository {
   readonly kind = "postgres" as const;
 
+  /**
+   * Real production finding: discovery and triage both checkpoint progress
+   * from several concurrent chunks/batches (see onChunkSucceeded in
+   * reddit-harshmaur.server.ts's discover(), onBatchSucceeded in
+   * openai.server.ts's triageConversations()). Each completion mutates the
+   * same in-memory ScanRecord to a monotonically MORE complete checkpoint,
+   * then calls saveScan -- but with no ordering guarantee between them,
+   * two concurrent saveScan calls for the same scan can have their network
+   * round trips finish out of call order. One real scan's Reddit discovery
+   * lost 5 of 8 already-completed, already-paid-for query checkpoints this
+   * way: a later (more complete) write's round trip finished first, and an
+   * earlier (less complete) write's round trip landed after it, silently
+   * reverting the row to the smaller snapshot. The next job attempt then
+   * saw those 5 queries as not-yet-covered and resubmitted them to Apify.
+   * Queuing every write for a given scan id so it cannot start until the
+   * previous one for that same id has fully landed guarantees writes hit
+   * Postgres in the same order they were enqueued -- which is always
+   * call order, which is always monotonic here -- so a later, larger
+   * snapshot can never be clobbered by an earlier, smaller one again.
+   */
+  private readonly scanSaveQueues = new Map<string, Promise<unknown>>();
+
   async saveWorkspace(record: WorkspaceSessionRecord) {
     const now = new Date();
     await getDb()
@@ -508,6 +530,24 @@ class PostgresStateRepository implements StateRepository {
   }
 
   async saveScan(record: ScanRecord) {
+    // See scanSaveQueues's doc comment: chain onto whatever is already
+    // pending for this exact scan id so writes always land in call order,
+    // never in whatever order their network round trips happen to finish.
+    const previous = this.scanSaveQueues.get(record.id) ?? Promise.resolve();
+    const write = () => this.writeScan(record);
+    const next = previous.then(write, write);
+    this.scanSaveQueues.set(record.id, next);
+    try {
+      await next;
+    } finally {
+      // Only this exact write's own turn, not a newer one queued behind it
+      // in the meantime -- drop the entry so the map does not grow forever
+      // for scans that have finished checkpointing.
+      if (this.scanSaveQueues.get(record.id) === next) this.scanSaveQueues.delete(record.id);
+    }
+  }
+
+  private async writeScan(record: ScanRecord) {
     const now = new Date(record.updatedAt);
     await getDb()
       .insert(runtimeScans)

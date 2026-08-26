@@ -132,17 +132,16 @@ function stubApify(records, options = {}) {
   return impl;
 }
 
-test("the factory constructs Harshmaur (wrapped with a Trudax fallback) only when explicitly selected, no opt-in flag required", () => {
+test("the factory constructs Harshmaur directly when explicitly selected, no opt-in flag required and no automatic fallback", () => {
   const env = {
     REDDIT_PROVIDER: "harshmaur",
     APIFY_TOKEN: "test-token",
-    APIFY_REDDIT_ACTOR_ID: "trudax/reddit-scraper-lite",
     APP_RUNTIME_ENV: "production",
   };
   // No HARSHMAUR_RETRIEVAL_EVAL set: Harshmaur is the production default now,
   // not an opt-in retrieval comparison, so this must succeed without it.
   const provider = reddit.createRedditProviderFromEnv(env);
-  assert.equal(provider.name, "apify-harshmaur-reddit-with-trudax-fallback");
+  assert.equal(provider.name, "apify-harshmaur-reddit");
   assert.equal(provider.sourceMode, "live");
   assert.equal(provider.supportsThreadEnrichment, true);
 });
@@ -741,50 +740,30 @@ test("a failed run raises rather than returning an empty corpus", async () => {
   await assert.rejects(() => provider.discover(tvcp), /ended with status FAILED/);
 });
 
-test("harshmaur is production-ready without any opt-in flag, and falls back to Trudax only when Trudax credentials exist", () => {
-  const withFallback = reddit.createRedditProviderFromEnv({
+test("harshmaur is production-ready without any opt-in flag, and never automatically substitutes a different provider", () => {
+  // Removed by explicit request: an automatic Trudax fallback silently
+  // switched a scan to a materially different-quality Reddit provider
+  // whenever Harshmaur failed after retries, masking real failures instead
+  // of surfacing them. A configured APIFY_REDDIT_ACTOR_ID (still used by the
+  // standalone apify-test provider selection, see above) must have no
+  // effect on the harshmaur selection at all now.
+  const withActorIdSet = reddit.createRedditProviderFromEnv({
     REDDIT_PROVIDER: "harshmaur",
     APIFY_TOKEN: "t",
     APIFY_REDDIT_ACTOR_ID: "trudax/reddit-scraper-lite",
     APP_RUNTIME_ENV: "production",
   });
-  assert.equal(withFallback.name, "apify-harshmaur-reddit-with-trudax-fallback");
-  assert.equal(withFallback.supportsThreadEnrichment, true);
+  assert.equal(withActorIdSet.name, "apify-harshmaur-reddit");
+  assert.equal(withActorIdSet.supportsThreadEnrichment, true);
 
-  // Without a configured Trudax actor id, Harshmaur still runs -- it just has
-  // no fallback wired up, rather than failing provider construction over a
-  // safety net it may never need.
-  const withoutFallback = reddit.createRedditProviderFromEnv({
+  const withoutActorIdSet = reddit.createRedditProviderFromEnv({
     REDDIT_PROVIDER: "harshmaur",
     APIFY_TOKEN: "t",
     APP_RUNTIME_ENV: "production",
   });
-  assert.equal(withoutFallback.name, "apify-harshmaur-reddit-with-trudax-fallback");
+  assert.equal(withoutActorIdSet.name, "apify-harshmaur-reddit");
 });
 
-test("the Harshmaur wrapper falls back to Trudax only on an actual actor failure, not a partial mapping miss", async () => {
-  const primary = new HarshmaurRedditProvider({ token: "t", fetchImpl: stubApify([], { finalStatus: "FAILED" }) });
-  const fallbackCalls = [];
-  const fallback = {
-    name: "apify-reddit-test",
-    sourceMode: "apify-test",
-    async discover() {
-      fallbackCalls.push("discover");
-      return { candidates: [], searchPlan: [], sourceMode: "apify-test", diagnostics: {
-        queryCount: 0, fetchedCandidates: 0, normalizedCandidates: 0, verifiedRecentCandidates: 0,
-        rejectedByReason: {}, laneQueryCounts: {},
-      } };
-    },
-    async enrich() {
-      fallbackCalls.push("enrich");
-      return { conversations: [], sourceMode: "apify-test", diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 } };
-    },
-  };
-  const wrapper = new reddit.HarshmaurWithTrudaxFallbackProvider(primary, fallback);
-  const result = await wrapper.discover(tvcp);
-  assert.deepEqual(fallbackCalls, ["discover"]);
-  assert.equal(result.sourceMode, "apify-test");
-});
 
 
 test("the run URL uses Apify's tilde actor path, not a percent-encoded slash", async () => {

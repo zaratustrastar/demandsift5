@@ -11,8 +11,14 @@ import ts from "typescript";
  * dropped for genuinely low embedding similarity -- the other 163 were cut
  * purely because the budget ran out, not because they were irrelevant.
  * Raised the default to 300 so more credible candidates actually reach AI
- * triage instead of being discarded by a fixed budget alone. This pins the
- * new default and its bounds (still 20-400, unchanged) via the real,
+ * triage instead of being discarded by a fixed budget alone.
+ *
+ * Further finding: the same business produced 353 credible survivors on
+ * two separate scans -- already above the "250-320 typical" assumption
+ * behind the 300 default, so ~53 candidates would still have been cut on
+ * volume alone. Raised the default again, this time to match the 400 hard
+ * ceiling, so any scan up to that ceiling gets full coverage. This pins
+ * the new default and its bounds (still 20-400, unchanged) via the real,
  * compiled function -- not a reimplementation.
  */
 
@@ -63,9 +69,9 @@ async function compileTriageCandidateBudget(env) {
   };
 }
 
-test("defaults to 300 when REDDIT_TRIAGE_BUDGET is unset", async () => {
+test("defaults to 400 when REDDIT_TRIAGE_BUDGET is unset", async () => {
   const fn = await compileTriageCandidateBudget({});
-  assert.equal(fn(), 300);
+  assert.equal(fn(), 400);
 });
 
 test("still respects an explicit REDDIT_TRIAGE_BUDGET override", async () => {
@@ -80,7 +86,7 @@ test("the 20-400 bounds are unchanged", async () => {
   assert.equal(high(), 400);
 });
 
-test("falls back to 300 for a non-numeric override, not the old 120", async () => {
+test("falls back to 400 for a non-numeric override, not an older lower default", async () => {
   const fn = await compileTriageCandidateBudget({ REDDIT_TRIAGE_BUDGET: "not-a-number" });
-  assert.equal(fn(), 300);
+  assert.equal(fn(), 400);
 });

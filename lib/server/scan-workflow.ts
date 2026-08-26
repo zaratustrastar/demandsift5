@@ -928,14 +928,25 @@ function buildFallbackInsights(
  * 285 credible candidates with only 2 dropped for genuinely low embedding
  * similarity -- the other 163 were cut purely because the budget ran out,
  * not because they were judged irrelevant. Raising the default to 300
- * covers that realistic worst case without hitting the 400 ceiling, at the
- * cost of roughly one extra round of triage batches (TRIAGE_CONCURRENCY is
- * still what bounds how many run at once) -- more relevant candidates
- * actually reach AI judgment instead of being discarded by volume alone.
+ * was meant to cover that realistic worst case without hitting the 400
+ * ceiling.
+ *
+ * Further finding (same business, two separate scans, both producing 353
+ * credible survivors): the "250-320 typical, 300 covers it" assumption
+ * above was already too tight in practice -- 353 sat above the assumed
+ * range and above the 300 default, so ~53 embedding-ranked-lowest
+ * candidates would have been excluded from full AI triage purely on
+ * volume again, the exact failure mode this budget exists to prevent.
+ * Raising the default to match the 400 hard ceiling removes that gap
+ * entirely for any scan up to the ceiling (the only volume this budget was
+ * ever meant to bound), at the cost of one more triage batch round-trip
+ * on larger scans (TRIAGE_CONCURRENCY still bounds how many run at once).
+ * REDDIT_TRIAGE_BUDGET can still be set lower via env if cost/latency ever
+ * needs to be traded back against coverage.
  */
 function triageCandidateBudget(): number {
-  const value = Number(process.env.REDDIT_TRIAGE_BUDGET ?? 300);
-  return Number.isFinite(value) ? Math.max(20, Math.min(Math.trunc(value), 400)) : 300;
+  const value = Number(process.env.REDDIT_TRIAGE_BUDGET ?? 400);
+  return Number.isFinite(value) ? Math.max(20, Math.min(Math.trunc(value), 400)) : 400;
 }
 
 function embeddingPrefilterFloor(): number {

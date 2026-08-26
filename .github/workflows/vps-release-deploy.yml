@@ -280,3 +280,4 @@ jobs:
 # trigger: serialize scan checkpoint saves per scan id (2026-08-26T13:52:38Z)
 # trigger: remove automatic Trudax fallback from Harshmaur provider (2026-08-26T21:48:58Z)
 # trigger: extend tolerateUnrecoverableBatches to empty/refused chat responses (2026-08-26T22:30:21Z)
+# trigger: raise triage candidate budget default to 400 (2026-08-26T23:19:23Z)

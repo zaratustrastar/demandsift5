@@ -287,3 +287,83 @@ test("a checkpoint write that throws does not fail or discard the batch's own su
 
   assert.equal(result.value.length, 2);
 });
+
+test("tolerateUnrecoverableBatches: a batch OpenAI can never usably answer is skipped, not fatal -- the rest of the scan still completes", async () => {
+  const succeededBatches = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      // The second batch (c26-c50) always comes back as unparsable JSON,
+      // simulating the real production failure ("OpenAI returned malformed
+      // structured JSON.") that lost 150 good, already-checkpointed
+      // candidates from one real scan.
+      if (ids[0] === "c26") {
+        return new Response(JSON.stringify({
+          id: "chat_test",
+          choices: [{ message: { content: "not valid json {{{" } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+    tolerateUnrecoverableBatches: true,
+    onBatchSucceeded: (items) => { succeededBatches.push(items.map((i) => i.externalId)); },
+  });
+
+  // Full coverage is still guaranteed -- every candidate gets an entry --
+  // but the unresolved batch's entries are a safe, explicit "skip" verdict
+  // rather than the caller having to special-case a shorter array.
+  assert.equal(result.value.length, 50);
+  const byId = new Map(result.value.map((row) => [row.externalId, row]));
+  for (let index = 1; index <= 25; index += 1) {
+    assert.equal(byId.get(`c${index}`).triage.worthEnriching, true, `c${index} should carry its real triage verdict`);
+  }
+  for (let index = 26; index <= 50; index += 1) {
+    const triage = byId.get(`c${index}`).triage;
+    assert.equal(triage.worthEnriching, false, `c${index} should be skipped, not enriched`);
+    assert.match(triage.reason, /Skipped/);
+  }
+
+  // Both the real batch and the skipped batch get checkpointed -- a future
+  // retry of this same scan must not resubmit either one.
+  assert.equal(succeededBatches.length, 2);
+  assert.deepEqual(succeededBatches[0], candidates.slice(0, 25).map((c) => c.externalId));
+  assert.deepEqual(succeededBatches[1].sort(), candidates.slice(25).map((c) => c.externalId).sort());
+});
+
+test("without tolerateUnrecoverableBatches, the exact same unparsable batch still fails the whole call (default behavior is unchanged)", async () => {
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => new Response(JSON.stringify({
+      id: "chat_test",
+      choices: [{ message: { content: "not valid json {{{" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    }), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  const candidates = [candidate("c1"), candidate("c2")];
+
+  await assert.rejects(
+    provider.triageConversations({
+      business,
+      candidates,
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 0,
+    }),
+    /malformed structured JSON/,
+  );
+});

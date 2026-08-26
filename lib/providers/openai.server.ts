@@ -1026,6 +1026,46 @@ function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderEr
     && /(?:finish_reason=length|incomplete response(?::|.*)\s*(?:max_tokens|max_output_tokens))/i.test(error.message);
 }
 
+/**
+ * Whether a batch's failure is specific to that batch's own content rather
+ * than systemic. All three underlying checks already require `status` to be
+ * undefined -- a real HTTP/network/auth/rate-limit failure always carries a
+ * status and is never matched here, so gating on this is safe: it can only
+ * ever mean "OpenAI answered, but the content of that answer was unusable,"
+ * never "something is broadly broken with OpenAI right now."
+ */
+function isUnrecoverableStructuredOutputError(error: unknown): error is OpenAiProviderError {
+  return isMalformedStructuredJson(error)
+    || isRetryableStructuredOutputError(error)
+    || isStructuredLengthExhaustion(error);
+}
+
+/**
+ * A safe, permanent stand-in for a candidate whose batch could not be
+ * resolved by OpenAI after every retry and model fallback (see
+ * tolerateUnrecoverableBatches on TriageConversationsRequest). Always
+ * worthEnriching=false -- the candidate is simply never shown, enriched, or
+ * promoted as a lead, exactly like any other negative triage verdict.
+ */
+function unresolvedTriage(externalId: string, error: unknown): TriagedConversation {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    externalId,
+    triage: {
+      externalId,
+      relevant: false,
+      intent: "informational",
+      demandSignal: "none",
+      problem: undefined,
+      productFit: "unknown",
+      timing: "unknown",
+      replyability: "unknown",
+      worthEnriching: false,
+      reason: `Skipped: OpenAI could not return usable structured output for this candidate after every retry (${message}).`.slice(0, 500),
+    },
+  };
+}
+
 function apiErrorMessage(payload: unknown, status: number): string {
   try {
     const object = objectValue(payload, "error response");
@@ -1666,6 +1706,20 @@ export class OpenAiProvider implements AiProvider {
     const attempts: AiProviderResult<TriagedConversation[]>[] = [];
     const retries = Math.max(0, Math.min(request.coverageRetries ?? 2, 3));
 
+    const finalizeBatch = async (batchIds: readonly string[]): Promise<void> => {
+      if (!request.onBatchSucceeded) return;
+      // Reached only once every id in this batch (or bisected sub-batch, or
+      // skipped-as-unrecoverable batch) has a final verdict in `collected`.
+      const items = batchIds.map((id) => collected.get(id)!);
+      try {
+        await request.onBatchSucceeded(items);
+      } catch (error) {
+        // Best-effort persistence: a checkpoint write failing must never
+        // fail (or discard) this batch's own already-resolved triage.
+        console.error("Failed to checkpoint a successfully triaged batch.", error);
+      }
+    };
+
     // Keep marketplace requests small. If even a bounded structured response
     // exhausts the gateway's output budget, recursively split only that batch.
     // One oversized provider response must never discard the rest of a scan.
@@ -1692,6 +1746,24 @@ export class OpenAiProvider implements AiProvider {
           ]);
           return;
         }
+        if (request.tolerateUnrecoverableBatches && isUnrecoverableStructuredOutputError(error)) {
+          // See tolerateUnrecoverableBatches's doc comment: this batch's
+          // remaining candidates could not be triaged by OpenAI at all, but
+          // that failure is specific to this batch's content, not systemic
+          // -- so the rest of the scan (everything already collected, and
+          // every other batch still running concurrently) is left intact
+          // instead of failing the entire triage stage over it.
+          const skippedIds = [...pending];
+          for (const externalId of skippedIds) {
+            collected.set(externalId, unresolvedTriage(externalId, error));
+          }
+          pending.clear();
+          console.warn(
+            `Triage batch unresolved after every retry; ${skippedIds.length} candidate(s) marked not worth enriching: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          await finalizeBatch(skippedIds);
+          return;
+        }
         throw error;
       }
       if (pending.size > 0) {
@@ -1699,18 +1771,7 @@ export class OpenAiProvider implements AiProvider {
           `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
         );
       }
-      if (request.onBatchSucceeded) {
-        // Reached only once every id in this batch (or bisected sub-batch)
-        // is present in `collected` -- see the pending.size check above.
-        const items = batchIds.map((id) => collected.get(id)!);
-        try {
-          await request.onBatchSucceeded(items);
-        } catch (error) {
-          // Best-effort persistence: a checkpoint write failing must never
-          // fail (or discard) this batch's own already-successful triage.
-          console.error("Failed to checkpoint a successfully triaged batch.", error);
-        }
-      }
+      await finalizeBatch(batchIds);
     };
 
     // Only candidates resumeFrom didn't already cover need to go to OpenAI

@@ -90,14 +90,34 @@ export interface TriageConversationsRequest {
    */
   resumeFrom?: ReadonlyMap<string, ConversationTriage>;
   /**
-   * Fired once a batch (or bisected sub-batch, see processBatch) achieves
-   * full coverage for its own candidates -- never on failure. A caller can
-   * persist these as they arrive so a scan interrupted mid-triage (e.g. one
-   * concurrent batch's OpenAI request timing out after exhausting its own
-   * retries, which currently fails the whole triageConversations() call)
-   * resumes from here instead of resubmitting every candidate again.
+   * Fired once a batch (or bisected sub-batch, see processBatch) reaches a
+   * final verdict for every one of its own candidates -- either a real
+   * OpenAI judgment, or (only when tolerateUnrecoverableBatches is set) a
+   * synthetic worthEnriching=false verdict for a batch OpenAI could never
+   * usably respond to. Never fired for a batch that is still going to be
+   * retried. A caller can persist these as they arrive so a scan
+   * interrupted mid-triage (e.g. one concurrent batch's OpenAI request
+   * timing out after exhausting its own retries) resumes from here instead
+   * of resubmitting every candidate again.
    */
   onBatchSucceeded?: (items: readonly TriagedConversation[]) => void | Promise<void>;
+  /**
+   * Real production finding: raising triageCandidateBudget's default
+   * (120 -> 300, see scan-workflow.ts) means a single scan now fans out to
+   * roughly 2.5x more batches, so a batch whose OpenAI response is not
+   * usable JSON even after every retry and model fallback this provider
+   * offers (previously a rare event) became common enough to fail whole
+   * scans outright -- one real scan lost 150 already-checkpointed, good
+   * triage judgments this way. These errors are content-specific to one
+   * batch, not systemic (OpenAI's own status is always absent from them,
+   * unlike a real network/auth/rate-limit failure), so when this is set,
+   * such a batch's candidates are marked worthEnriching=false and skipped
+   * instead of failing the whole call -- they are simply never shown,
+   * enriched, or promoted as leads, exactly like any other negative
+   * verdict. Off by default so every other caller (and existing tests)
+   * keeps the original all-or-throw coverage guarantee.
+   */
+  tolerateUnrecoverableBatches?: boolean;
 }
 
 export interface TriagedConversation {

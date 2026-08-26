@@ -1527,6 +1527,13 @@ export async function runScan(
           candidates: needsTriage,
           models,
           coverageRetries: 2,
+          // See tolerateUnrecoverableBatches's doc comment on
+          // TriageConversationsRequest: raising triageCandidateBudget's
+          // default means a scan now fans out to ~2.5x more triage
+          // batches, so one batch that OpenAI can never usably answer
+          // (previously rare) must not fail the whole scan and discard
+          // every other, already-good batch's checkpointed work.
+          tolerateUnrecoverableBatches: true,
           resumeFrom: scan.triageCheckpoint
             ? new Map(Object.entries(scan.triageCheckpoint))
             : undefined,

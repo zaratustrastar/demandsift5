@@ -276,3 +276,4 @@ jobs:
 # trigger: checkpoint discovery/triage per-chunk fix (2026-08-25T16:16:24Z)
 # trigger: fix duplicate scan creation (2026-08-25T23:26:11Z)
 # trigger: raise triage candidate budget 120->300 (2026-08-26T11:37:31Z)
+# trigger: skip unrecoverable triage batches instead of failing scan (2026-08-26T13:24:38Z)

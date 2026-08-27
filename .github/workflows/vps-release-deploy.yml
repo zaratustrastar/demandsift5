@@ -283,3 +283,4 @@ jobs:
 # trigger: raise triage candidate budget default to 400 (2026-08-26T23:19:23Z)
 # trigger: delete fast business-understanding tier, always run full analysis (2026-08-27T12:40:14Z)
 # trigger: query planning now matches review screen exactly (2026-08-27T16:12:09Z)
+# trigger: retry triage/qualification on transient network failures (2026-08-27T18:40:08Z)

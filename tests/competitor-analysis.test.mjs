@@ -49,13 +49,12 @@ test("each competitor URL is analyzed independently so one failure never sinks t
 test("CompetitorProfile is a distinct model, never folded into the business's own understanding", () => {
   assert.match(contracts, /export type CompetitorProfile = \{/);
   assert.match(contracts, /competitorProfiles\?: CompetitorProfile\[\] \| null;/);
-  // The primary business's own analysis pipeline (runFastUnderstanding /
-  // businessUnderstandingFromFastAnalysis / the full analyzeBusiness call)
-  // must never read scan.competitorProfiles as an input.
+  // The primary business's own analysis pipeline (runFullWebsiteUnderstanding,
+  // the same full analyzeBusiness call competitor analysis also uses -- the
+  // separate fast/preview tier and its helpers were removed entirely) must
+  // never read scan.competitorProfiles as an input.
   const understandingFns = [
-    "async function runFastUnderstanding",
-    "function businessUnderstandingFromFastAnalysis",
-    "function scanProfileFromFastAnalysis",
+    "async function runFullWebsiteUnderstanding",
   ];
   for (const marker of understandingFns) {
     const start = workflow.indexOf(marker);

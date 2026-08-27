@@ -3,24 +3,31 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 /**
- * The fast first-pass profile only makes the setup screen feel instant
- * without also making Reddit discovery worse if a handful of invariants
- * hold together:
+ * The homepage-only "fast" preview tier (runFastUnderstanding,
+ * refineDiscoveryProfile, analyzeBusinessFast) was deliberately removed: it
+ * let a user review and approve terms from a quick, cheap-model pass, then
+ * had runScan's own canReusePersistedAnalysis rule discard everything not
+ * explicitly overridden and regenerate it from a second, independent AI
+ * call once the real scan started -- producing different keyphrases than
+ * the ones just reviewed. By explicit request, website scans now always run
+ * the full, multi-page analysis before the review screen ever renders, so
+ * the terms a user reviews are guaranteed to be the terms actually
+ * searched, at the cost of the review screen taking as long as the full
+ * analysis instead of a couple of seconds.
  *
- *  - the fast pass reads the homepage through the same SSRF/DNS-protected
- *    crawlWebsite() as everything else, just with maxPages: 1 -- it must
- *    never bypass that protection with a separate fetch path;
- *  - a "fast" profileStage is never treated as good enough to plan Reddit
- *    queries from -- the full pipeline always redoes the full analysis
- *    first, whether or not the background refinement won the race;
- *  - the background refinement never clobbers a scan that has moved on
- *    (started, or already upgraded) while it was in flight;
- *  - the background refinement is truly fire-and-forget, so /analyze never
- *    waits on it.
+ * These tests pin the invariants that keep that guarantee true and keep the
+ * old fast tier from quietly creeping back in:
  *
- * Any one of these regressing silently reintroduces either the original
- * 1-2 minute wait, or a scan that searches Reddit from a thin, unverified
- * homepage-only understanding of the business.
+ *  - the website understanding step crawls through the same SSRF/DNS-protected
+ *    crawlWebsite() as everything else, with the full page budget, not a
+ *    homepage-only one;
+ *  - a website scan's persisted analysis is always "full" -- "fast" is never
+ *    produced, and is therefore always safe to reuse verbatim;
+ *  - stopAfterUnderstanding runs that full analysis synchronously and
+ *    returns, rather than deferring the real analysis to a background job;
+ *  - the removed fast-tier provider surface (analyzeBusinessFast,
+ *    FastBusinessProfile, the fast schema) stays gone, so a future edit
+ *    can't silently wire a fast path back in through the provider.
  */
 
 const read = async (path) => readFile(new URL(path, import.meta.url), "utf8");
@@ -33,96 +40,57 @@ const termsRoute = await read("../app/api/scans/[scanId]/discovery-terms/route.t
 const profileUi = await read("../components/DiscoveryProfile.tsx");
 const experience = await read("../components/ThreadlineExperience.tsx");
 
-test("the fast pass crawls through the same SSRF-protected crawler, homepage only", () => {
-  assert.match(workflow, /async function runFastUnderstanding/);
-  const fastFn = workflow.slice(workflow.indexOf("async function runFastUnderstanding"));
-  const fastFnBody = fastFn.slice(0, fastFn.indexOf("\nasync function refineDiscoveryProfile"));
-  assert.match(fastFnBody, /crawlWebsite\(scan\.websiteUrl, \{ maxPages: 1/);
+test("the fast tier is fully gone: no runFastUnderstanding, refineDiscoveryProfile, or fast-analysis provider method remain", () => {
+  for (const removed of [
+    "async function runFastUnderstanding",
+    "async function refineDiscoveryProfile",
+    "function scanProfileFromFastAnalysis",
+    "function businessUnderstandingFromFastAnalysis",
+    "analyzeBusinessFast",
+    "FastBusinessProfile",
+    "FAST_BUSINESS_SCHEMA",
+    "parseFastBusiness",
+  ]) {
+    assert.equal(workflow.includes(removed), false, `scan-workflow.ts must not reference ${removed}`);
+    assert.equal(providerContracts.includes(removed), false, `providers/contracts.ts must not reference ${removed}`);
+    assert.equal(openaiProvider.includes(removed), false, `openai.server.ts must not reference ${removed}`);
+  }
+});
+
+test("website understanding crawls through the same SSRF-protected crawler, with the full page budget", () => {
+  assert.match(workflow, /async function runFullWebsiteUnderstanding/);
+  const fnStart = workflow.indexOf("async function runFullWebsiteUnderstanding");
+  const fnBody = workflow.slice(fnStart, workflow.indexOf("\n/**", fnStart));
+  assert.match(fnBody, /crawlWebsite\(scan\.websiteUrl, \{ maxPages: 4 \}\)/);
+  assert.equal(/maxPages: 1/.test(fnBody), false, "the full understanding pass must not use the old homepage-only page budget");
   // No second, unprotected fetch/http/https import or call anywhere in this
   // file -- crawlWebsite is the only network entry point website analysis uses.
   assert.equal(/\bfetch\(/.test(workflow), false, "scan-workflow.ts must not fetch directly");
 });
 
-test("a fast profileStage is persisted, never treated as a complete analysis", () => {
-  assert.match(workflow, /profileStage: "fast"/);
-  assert.match(workflow, /const canReusePersistedAnalysis =\s*\n?\s*Boolean\(persistedAnalysis\) && persistedAnalysis\?\.profileStage !== "fast";/);
+test("a website scan's persisted profileStage is always full, and is therefore always safe to reuse", () => {
+  assert.match(workflow, /profileStage: "full"/);
+  assert.match(workflow, /const canReusePersistedAnalysis = Boolean\(persistedAnalysis\);/);
   assert.match(workflow, /if \(canReusePersistedAnalysis && persistedAnalysis\) \{/);
-  // Both places a full analysis is saved must explicitly mark it "full",
-  // so a stale "fast" flag can never survive an upgrade.
-  const fullSaves = workflow.match(/profileStage: "full"/g) ?? [];
-  assert.ok(fullSaves.length >= 2, "expected profileStage: \"full\" at both the main-pipeline save and refineDiscoveryProfile");
 });
 
-test("stopAfterUnderstanding always takes the fast path and returns before the 4-page crawl", () => {
+test("stopAfterUnderstanding runs the full analysis synchronously and returns, with no background job fired", () => {
   const tryBlock = workflow.slice(workflow.indexOf("try {\n    await setStage(scan, \"website\", \"active\");"));
-  const fastBranch = tryBlock.indexOf("if (options.stopAfterUnderstanding) {");
-  const fullCrawl = tryBlock.indexOf('crawlWebsite(scan.websiteUrl, { maxPages: 4 });');
-  assert.ok(fastBranch > -1 && fullCrawl > -1, "expected both the fast branch and the full crawl in runScan");
-  assert.ok(fastBranch < fullCrawl, "the fast branch must be checked before the full 4-page crawl runs");
-  const fastBranchBody = tryBlock.slice(fastBranch, fullCrawl);
-  assert.match(fastBranchBody, /return scan;/);
+  const stopBranch = tryBlock.indexOf("if (options.stopAfterUnderstanding) {");
+  const afterStopBranch = tryBlock.indexOf("\n    const models = openAiModelsFromEnv();", stopBranch);
+  assert.ok(stopBranch > -1 && afterStopBranch > stopBranch, "expected the stopAfterUnderstanding branch in runScan");
+  const stopBranchBody = tryBlock.slice(stopBranch, afterStopBranch);
+  assert.match(stopBranchBody, /runFullWebsiteUnderstanding\(scan\)/);
+  assert.match(stopBranchBody, /return scan;/);
+  // No fire-and-forget background continuation left to race against.
+  assert.equal(/void \w+\(/.test(stopBranchBody), false, "no background job should be fired from the understanding step anymore");
 });
 
-test("background refinement is fire-and-forget and never blocks the fast return", () => {
-  assert.match(workflow, /void refineDiscoveryProfile\(scan\.id\)\.catch\(/);
-  const callSite = workflow.indexOf("void refineDiscoveryProfile(scan.id).catch(");
-  const fastReturn = workflow.indexOf("return scan;", callSite);
-  assert.ok(fastReturn > callSite, "the fast path must return after firing the background refinement, not await it");
-});
-
-test("background refinement re-reads the scan before writing, so it cannot clobber a scan that moved on", () => {
-  assert.match(workflow, /async function refineDiscoveryProfile/);
-  const fn = workflow.slice(workflow.indexOf("async function refineDiscoveryProfile"));
-  const body = fn.slice(0, fn.indexOf("\nfunction usageRecord"));
-  const getScanCalls = [...body.matchAll(/repository\.getScan\(scanId\)/g)];
-  assert.equal(getScanCalls.length, 2, "expected an initial guard read and a pre-write re-read");
-  const saveCall = body.indexOf("await repository.saveScan(latest);");
-  const secondRead = body.lastIndexOf("repository.getScan(scanId)");
-  assert.ok(secondRead < saveCall, "the re-read must happen before the write");
-  assert.match(body, /latest\.status !== "queued" \|\| latest\.discoveryProfile\?\.profileStage !== "fast"\) return;/);
-});
-
-test("analyzeBusinessFast is on the provider contract and uses the economy model", () => {
-  assert.match(providerContracts, /analyzeBusinessFast\(/);
-  assert.match(providerContracts, /interface FastBusinessProfile/);
-  assert.match(openaiProvider, /async analyzeBusinessFast\(request: AnalyzeBusinessRequest\)/);
-  const fn = openaiProvider.slice(openaiProvider.indexOf("async analyzeBusinessFast"));
-  const body = fn.slice(0, fn.indexOf("\n\n  "));
-  assert.match(body, /model: request\.models\.economyModel/);
-  assert.match(body, /reasoningEffort: "low"/);
-});
-
-test("the review screen and its API expose profileStage without disturbing existing fields", () => {
+test("the review screen and its API still expose profileStage, always reporting full for a persisted analysis", () => {
   assert.match(termsRoute, /profileStage: analysis\?\.profileStage \?\? \(analysis \? "full" : null\)/);
   assert.match(profileUi, /profileStage\?: "fast" \| "full" \| null;/);
-  // The review screen (DiscoveryProfile.tsx) itself no longer polls for or
-  // swaps in the fast profile -- that responsibility moved upstream to the
-  // dedicated "refining" wait screen (RefiningProfile, in
-  // ThreadlineExperience.tsx), which never transitions to the review screen
-  // until profileStage is "full". The fast/preliminary profile is never
-  // rendered to the user at all now, so DiscoveryProfile.tsx has no need to
-  // guard against overwriting a user's in-progress edits with it.
   assert.match(experience, /function RefiningProfile/);
   assert.match(experience, /payload\.profileStage === "full"/);
-  assert.equal(
-    /profileStage/.test(profileUi.slice(profileUi.indexOf("useEffect(() => {"), profileUi.indexOf("const edited"))),
-    false,
-    "DiscoveryProfile's data-loading effect must not itself branch on profileStage anymore",
-  );
-});
-
-test("the fast-profile schema never leaks Boolean search syntax either", () => {
-  assert.match(openaiProvider, /FAST_BUSINESS_SCHEMA/);
-  const schemaStart = openaiProvider.indexOf("const FAST_BUSINESS_SCHEMA");
-  const schemaEnd = openaiProvider.indexOf("const TRIAGE_SCHEMA");
-  const schemaSection = openaiProvider.slice(schemaStart, schemaEnd);
-  for (const token of ["AND", "OR", "NOT"]) {
-    assert.equal(
-      new RegExp('"[^"]*\\b' + token + '\\b[^"]*"').test(schemaSection),
-      false,
-      `the fast schema section must not reference Boolean token ${token}`,
-    );
-  }
 });
 
 test("discoveryProfile's stored shape documents profileStage for future readers", () => {

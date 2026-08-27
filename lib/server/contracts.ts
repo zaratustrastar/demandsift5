@@ -508,12 +508,11 @@ export type ScanRecord = {
     analysisMode: ScanResult["analysisMode"];
     analyzedAt: string;
     /**
-     * "fast" is a homepage-only preview built to render the editable setup
-     * screen in seconds; it is never sufficient input for Reddit query
-     * planning. Absent (older records) or "full" both mean a complete,
-     * multi-page analysis -- see lib/server/scan-workflow.ts's
-     * `runFastUnderstanding` / `refineDiscoveryProfile` / the
-     * `canReusePersistedAnalysis` check in `runScan`.
+     * Always "full" now: a homepage-only "fast" preview tier used to be
+     * built first and upgraded in the background (see
+     * runFullWebsiteUnderstanding's doc comment in scan-workflow.ts for why
+     * that was removed). The field stays so older persisted records and the
+     * review screen's polling logic keep working without a migration.
      */
     profileStage?: "fast" | "full";
   } | null;

@@ -133,16 +133,25 @@ test("context mode never crawls a website", () => {
   assert.match(fnBody, /conservativeProfileFromContext/, "the no-AI-configured fallback stays context-shaped too");
 });
 
-test("the fast/refine split (website-only) is never triggered for context scans", () => {
+test("the context branch of stopAfterUnderstanding never touches website understanding or crawling", () => {
   const stopAfterIndex = scanWorkflow.indexOf("if (options.stopAfterUnderstanding) {");
-  const stopAfterBlock = scanWorkflow.slice(stopAfterIndex, scanWorkflow.indexOf("\n    const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });"));
-  assert.match(stopAfterBlock, /if \(scan\.inputMode === "context"\) \{/);
-  assert.match(stopAfterBlock, /profileStage: "full"/);
-  // refineDiscoveryProfile (the background website refine) must appear only
-  // in the website branch, i.e. after the context branch's early return.
-  const contextBranchEnd = stopAfterBlock.indexOf("return scan;\n      }");
+  const afterBlock = scanWorkflow.indexOf("\n    const models = openAiModelsFromEnv();", stopAfterIndex);
+  const stopAfterBlock = scanWorkflow.slice(stopAfterIndex, afterBlock);
+  const contextBranchIndex = stopAfterBlock.indexOf('if (scan.inputMode === "context") {');
+  assert.ok(contextBranchIndex > -1, "expected a context-mode branch inside stopAfterUnderstanding");
+  const contextBranchEnd = stopAfterBlock.indexOf("return scan;\n      }", contextBranchIndex);
+  assert.ok(contextBranchEnd > -1, "expected the context branch to return early");
+  const contextBranch = stopAfterBlock.slice(contextBranchIndex, contextBranchEnd);
+  assert.match(contextBranch, /runContextUnderstanding\(scan\)/);
+  assert.match(contextBranch, /profileStage: "full"/);
+  assert.equal(/crawlWebsite/.test(contextBranch), false, "context mode must never crawl a website");
+
+  // The website branch that follows must run its own, separate full
+  // understanding pass, never the context-mode function -- the only branch
+  // point between the two sources is which understanding function runs.
   const websiteBranch = stopAfterBlock.slice(contextBranchEnd);
-  assert.match(websiteBranch, /refineDiscoveryProfile\(scan\.id\)/);
+  assert.match(websiteBranch, /runFullWebsiteUnderstanding\(scan\)/);
+  assert.equal(/runContextUnderstanding/.test(websiteBranch), false);
 });
 
 test("the context source id is deterministic per scan, so reused citations stay valid", () => {

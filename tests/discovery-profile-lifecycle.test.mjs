@@ -38,10 +38,10 @@ test("analysis is persisted before retrieval and reused afterwards", () => {
   assert.match(workflow, /scan\.discoveryProfile = \{/);
   assert.match(workflow, /const persistedAnalysis = scan\.discoveryProfile;/);
   // Re-deriving would hand the user different terms from the ones approved.
-  // A "fast" (homepage-only) profile is the one exception: it is deliberately
-  // never reused for query planning, only redone in full -- see
-  // canReusePersistedAnalysis.
-  assert.match(workflow, /const canReusePersistedAnalysis =/);
+  // The understanding step always persists a complete analysis now (the old
+  // homepage-only "fast" tier that used to be excluded here is gone), so any
+  // persisted profile is always safe to reuse -- see canReusePersistedAnalysis.
+  assert.match(workflow, /const canReusePersistedAnalysis = Boolean\(persistedAnalysis\);/);
   assert.match(workflow, /if \(canReusePersistedAnalysis && persistedAnalysis\) \{/);
   const persistPoint = workflow.indexOf("scan.discoveryProfile = {");
   const discovery = workflow.indexOf('setStage(scan, "discovery", "active")');

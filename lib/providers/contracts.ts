@@ -59,24 +59,6 @@ export interface AnalyzeBusinessFromContextRequest {
   models: ModelConfiguration;
 }
 
-/**
- * A much smaller, uncited business summary produced from homepage-only
- * evidence by a fast/cheap model. It exists purely to let the editable
- * setup screen render in a few seconds; it is never treated as good enough
- * to plan Reddit discovery queries from -- the full `analyzeBusiness` pass
- * always runs before retrieval, either in the background while the user
- * reviews this, or synchronously if they start the scan before that
- * finishes. See lib/server/scan-workflow.ts's `profileStage` handling.
- */
-export interface FastBusinessProfile {
-  name: string;
-  summary: string;
-  productCategory: string;
-  productTerms: string[];
-  customerProblemLanguage: string[];
-  competitors: string[];
-}
-
 export interface TriageConversationsRequest {
   business: BusinessUnderstanding;
   candidates: RedditDiscoveryCandidate[];
@@ -237,10 +219,6 @@ export interface AiProvider {
   analyzeBusiness(
     request: AnalyzeBusinessRequest,
   ): Promise<AiProviderResult<BusinessUnderstanding>>;
-  /** Fast first-pass analysis from homepage-only evidence. See `FastBusinessProfile`. */
-  analyzeBusinessFast(
-    request: AnalyzeBusinessRequest,
-  ): Promise<AiProviderResult<FastBusinessProfile>>;
   /**
    * The context-mode counterpart to `analyzeBusiness`: builds the same
    * `BusinessUnderstanding` shape from a user's freeform description rather

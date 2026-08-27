@@ -10,9 +10,11 @@ import styles from "./DiscoveryProfile.module.css";
  *
  * This is a sidecar to the business-profile pipeline, not part of it: the
  * competitors analyzed here are stored completely separately
- * (CompetitorProfile, not BusinessUnderstanding) and only ever supplement
- * Reddit query planning after the fact -- see scan-workflow.ts's
- * competitorDiscoverySignals.
+ * (CompetitorProfile, not BusinessUnderstanding). Their keyphrases/pain
+ * phrases seed the editable "Competitors & alternatives" chip list on the
+ * next screen (DiscoveryProfile.tsx), and that reviewed chip list -- not
+ * this raw analysis -- is what scan-workflow.ts's reviewCompetitorTerms
+ * actually searches.
  *
  * Named competitors the AI already extracted from a context-mode
  * description (BusinessUnderstanding.competitors) used to have their own

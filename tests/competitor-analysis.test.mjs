@@ -69,30 +69,35 @@ test("CompetitorProfile is a distinct model, never folded into the business's ow
   }
 });
 
-test("competitor-derived query terms are appended after, never before, the primary business's own", () => {
-  assert.match(workflow, /function competitorDiscoverySignals/);
-  // persistedDiscovery ?? was replaced by an always-call-discover() shape
-  // that passes persistedDiscovery in as resumeFrom instead (see
-  // scan-workflow.ts's discovery-checkpointing comment) -- the ordering
-  // guarantee this test pins is unchanged, only the call site's exact text.
+test("competitor query terms are exactly reviewCompetitorTerms's output -- the same named-then-language-pool merge the review screen shows, capped at REVIEW_TERM_CAP", () => {
+  assert.match(workflow, /function reviewCompetitorTerms/);
+  assert.equal(workflow.includes("function competitorDiscoverySignals"), false,
+    "the old always-append-competitor-signals helper must be gone");
+
+  const fnStart = workflow.indexOf("function reviewCompetitorTerms");
+  const fnBody = workflow.slice(fnStart, workflow.indexOf("\n}", fnStart));
+  assert.match(fnBody, /business\.competitors\.value\.map\(\(competitor\) => competitor\.name\)/);
+  assert.match(fnBody, /competitor\.keyphrases, \.\.\.competitor\.painPhrases/);
+  assert.match(fnBody, /dedupedTerms\(\[\.\.\.named, \.\.\.languagePool\], REVIEW_TERM_CAP\)/);
+
   const queriesStart = workflow.indexOf("const discovery = await redditProvider.discover(");
   const queriesBlock = workflow.slice(queriesStart, queriesStart + 1500);
+  assert.match(queriesBlock, /competitors: reviewCompetitors/);
+  assert.match(queriesBlock, /productTerms: reviewProductTerms/);
+  assert.match(queriesBlock, /customerProblems: reviewCustomerProblems/);
+  // productCategory used to silently consume a product-lane query slot the
+  // review screen never showed as a chip -- it must never be reintroduced.
+  assert.match(queriesBlock, /productCategories: \[\]/);
+});
 
-  const competitorsFieldStart = queriesBlock.indexOf("competitors: [");
-  const competitorsFieldEnd = queriesBlock.indexOf("],", competitorsFieldStart);
-  const competitorsField = queriesBlock.slice(competitorsFieldStart, competitorsFieldEnd);
-  const primaryIdx = competitorsField.indexOf("business.competitors.value");
-  const signalsIdx = competitorsField.indexOf("competitorSignals.names");
-  assert.ok(primaryIdx > -1 && signalsIdx > -1, "expected both sources in the competitors query array");
-  assert.ok(primaryIdx < signalsIdx, "the business's own competitors must be listed first");
-
-  const problemsFieldStart = queriesBlock.indexOf("customerProblems: [");
-  const problemsFieldEnd = queriesBlock.indexOf("],", problemsFieldStart);
-  const problemsField = queriesBlock.slice(problemsFieldStart, problemsFieldEnd);
-  const primaryProblemsIdx = problemsField.indexOf("business.customerProblemLanguage.value");
-  const signalsProblemsIdx = problemsField.indexOf("competitorSignals.painPhrases");
-  assert.ok(primaryProblemsIdx > -1 && signalsProblemsIdx > -1);
-  assert.ok(primaryProblemsIdx < signalsProblemsIdx, "the business's own pain phrases must be listed first");
+test("reviewProductTerms/reviewCustomerProblems are capped to what the review screen actually displays, never falling through to hidden extra AI-generated entries", () => {
+  assert.match(workflow, /const REVIEW_TERM_CAP = 3;/);
+  assert.match(workflow, /function dedupedTerms\(/);
+  assert.match(workflow, /reviewProductTerms = dedupedTerms\(business\.productTerms\.value, REVIEW_TERM_CAP\)/);
+  assert.match(
+    workflow,
+    /reviewCustomerProblems = dedupedTerms\(\s*business\.customerProblemLanguage\.value\.length > 0[\s\S]{0,200}REVIEW_TERM_CAP,\s*\)/,
+  );
 });
 
 test("redditQueryFamilies.ts itself is untouched by the competitor feature", async () => {

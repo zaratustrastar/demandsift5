@@ -536,27 +536,77 @@ async function runContextUnderstanding(scan: ScanRecord): Promise<{
 }
 
 /**
- * Turns analyzed competitor profiles into extra Reddit query material,
- * kept structurally separate from the primary business's own
- * BusinessUnderstanding the whole way through (see CompetitorProfile's doc
- * comment in contracts.ts) -- these are never merged into `business`, only
- * appended to the query arrays built from it, and only for competitors that
- * analyzed successfully. Skipped competitors (no URLs submitted, or every
- * submission failed) simply contribute nothing, which is exactly today's
- * behavior with no competitorProfiles.
+ * Real production bug: this scan's actual Reddit search queries did not
+ * match what the user reviewed and approved on the "What we'll look for"
+ * screen (DiscoveryProfile.tsx), for three separate reasons, all fixed
+ * together here:
+ *
+ *  1. business.productCategory.value (a single AI-generated descriptor,
+ *     never shown as a chip anywhere) used to be injected as the *first*
+ *     product-lane query ahead of the reviewed terms, silently bumping one
+ *     of the three reviewed product chips out of redditQueryFamilies' cap.
+ *  2. business.productTerms.value and business.customerProblemLanguage.value
+ *     can legitimately hold more entries than the review screen displays
+ *     (it caps display at REVIEW_TERM_CAP, same as DiscoveryProfile.tsx's
+ *     MAX_TERMS) -- when a displayed/reviewed term got filtered out
+ *     downstream (e.g. redditQueryFamilies' youtube+tv collision guard),
+ *     the query builder used to fall through to one of these hidden,
+ *     never-shown extra entries instead of simply running one fewer query
+ *     for that lane.
+ *  3. The competitor lane never read what the user reviewed at all: it
+ *     read business.competitors.value filtered down to only "verified"
+ *     entries (routinely empty) plus an always-auto-generated
+ *     "<name> alternative" pair per analyzed competitor -- so editing or
+ *     removing a chip on the "Competitors & alternatives" card had zero
+ *     effect on what actually got searched.
+ *
+ * reviewCompetitorTerms below (used together with the REVIEW_TERM_CAP
+ * slices at the discover() call site) reproduces exactly what
+ * DiscoveryProfile.tsx shows and lets the user edit -- same cap, same
+ * named-competitors-then-competitor-language-pool merge, see that file's
+ * MAX_TERMS and competitorLanguagePool -- so query planning can never use a
+ * term the user never had a chance to see or remove.
  */
-function competitorDiscoverySignals(
+const REVIEW_TERM_CAP = 3;
+
+/** Case-insensitive de-duplication, first-seen order, capped -- mirrors
+ * DiscoveryProfile.tsx's dedupedPhrases() exactly, so the server computes
+ * the identical default the review screen shows when there is no saved
+ * override yet. */
+function dedupedTerms(values: readonly string[], max: number): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLocaleLowerCase("en-US");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+    if (result.length >= max) break;
+  }
+  return result;
+}
+
+/**
+ * The same "competitors" seed DiscoveryProfile.tsx shows and lets the user
+ * edit: named competitors first, then keyphrases/pain phrases from every
+ * successfully analyzed competitor page, deduplicated and capped. Query
+ * planning uses this directly -- not a verification/relationship-filtered
+ * subset of business.competitors.value -- because that filter exists to
+ * gate what DemandSift *claims* about a business, not what is safe to type
+ * into a Reddit search; a user-approved or user-typed competitor term is a
+ * search hint either way.
+ */
+function reviewCompetitorTerms(
+  business: BusinessUnderstanding,
   competitorProfiles: readonly CompetitorProfile[] | null | undefined,
-): { names: string[]; painPhrases: string[] } {
-  const ready = (competitorProfiles ?? []).filter((competitor) => competitor.status === "ready");
-  const names = ready
-    .flatMap((competitor) => [competitor.name, `${competitor.name} alternative`])
-    .filter(isUsefulSearchPhrase);
-  // A couple of phrases per competitor, not every one they found: this is a
-  // supplementary signal filling any budget the primary business's own pain
-  // phrases left, not a second full query family of its own.
-  const painPhrases = ready.flatMap((competitor) => competitor.painPhrases.slice(0, 2));
-  return { names, painPhrases };
+): string[] {
+  const named = business.competitors.value.map((competitor) => competitor.name);
+  const languagePool = (competitorProfiles ?? [])
+    .filter((competitor) => competitor.status === "ready")
+    .flatMap((competitor) => [...competitor.keyphrases, ...competitor.painPhrases]);
+  return dedupedTerms([...named, ...languagePool], REVIEW_TERM_CAP);
 }
 
 function usageRecord(
@@ -1184,39 +1234,31 @@ export async function runScan(
     // replaces the previous "reuse in full or redo from scratch" choice,
     // which paid for and re-ran every query on any interruption mid-stage.
     const persistedDiscovery = scan.redditDiscovery;
-    // Competitor-derived signals (see lib/server/competitor-analysis.ts) are
-    // appended after, never in place of, the primary business's own terms
-    // below. redditQueryFamilies() caps each lane at 3 queries and fills it
-    // in array order, so the user's own product/pain/competitor terms
-    // always get first claim on that budget; a competitor's own name or
-    // pain phrases only occupy a slot the primary business left empty.
-    const competitorSignals = competitorDiscoverySignals(scan.competitorProfiles);
+    // What gets searched here must be exactly what the review screen showed
+    // and let the user edit (DiscoveryProfile.tsx's MAX_TERMS-capped chips)
+    // -- not a superset that includes AI-generated terms the user never saw
+    // a chance to see or remove. See REVIEW_TERM_CAP / dedupedTerms /
+    // reviewCompetitorTerms above for the full history of why this matters.
+    const reviewProductTerms = dedupedTerms(business.productTerms.value, REVIEW_TERM_CAP);
+    const reviewCustomerProblems = dedupedTerms(
+      business.customerProblemLanguage.value.length > 0
+        ? business.customerProblemLanguage.value
+        : business.problemsSolved.value,
+      REVIEW_TERM_CAP,
+    );
+    const reviewCompetitors = reviewCompetitorTerms(business, scan.competitorProfiles);
     const discovery = await redditProvider.discover(
       {
         queries: {
-          productTerms: business.productTerms.value,
+          productTerms: reviewProductTerms,
           brandTerms: business.brandTerms.value,
-          productCategories: [business.productCategory.value],
-          customerProblems: [
-            ...(business.customerProblemLanguage.value.length > 0
-              ? business.customerProblemLanguage.value
-              : business.problemsSolved.value),
-            ...competitorSignals.painPhrases,
-          ],
+          productCategories: [],
+          customerProblems: reviewCustomerProblems,
           jobsToBeDone: business.jobsToBeDone?.value ?? [],
           workarounds: business.likelyWorkarounds?.value ?? [],
           triggerEvents: business.triggerEvents?.value ?? [],
           buyerIntent: ["recommendations", "alternative", "comparing tools", "need a tool"],
-          competitors: [
-            ...business.competitors.value
-              .filter(
-                (competitor) =>
-                  competitor.verification !== "unverified_hypothesis" &&
-                  (competitor.relationship === "direct" || competitor.relationship === "alternative"),
-              )
-              .map((competitor) => competitor.name),
-            ...competitorSignals.names,
-          ],
+          competitors: reviewCompetitors,
           excludedTerms: business.irrelevantTopics.value,
           ambiguityRisks: business.ambiguityRisks.value,
         },

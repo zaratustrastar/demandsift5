@@ -48,10 +48,10 @@ export type DiscoveryProfileResponse = {
    * pain phrases those pages surfaced, so this card behaves exactly like
    * Product / category and Customer problems -- one plain, fully editable,
    * capped-at-3 list, not a second read-only section bolted onto it. These
-   * phrases already feed the actual Reddit search regardless of what a user
-   * does with this chip list (see competitorDiscoverySignals in
-   * scan-workflow.ts), so removing one here only changes this override, not
-   * whether that page's language gets searched.
+   * phrases seed this same chip list, and the chip list itself -- after any
+   * edits saved here -- is exactly what scan-workflow.ts's
+   * reviewCompetitorTerms searches, so removing one here does change what
+   * gets searched.
    */
   competitorProfiles?: CompetitorProfileView[];
 };

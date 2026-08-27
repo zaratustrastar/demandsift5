@@ -7,8 +7,9 @@ import test from "node:test";
  * "Competitors & alternatives" onboarding step (CompetitorsSetup.tsx) --
  * the very next screen, "What we'll look for" (DiscoveryProfile.tsx),
  * showed nothing about them at all, even though they already silently feed
- * the actual Reddit search (see competitorDiscoverySignals in
- * scan-workflow.ts). The user wanted them visible on that next screen too,
+ * the actual Reddit search (see reviewCompetitorTerms in
+ * scan-workflow.ts, which now mirrors this same card exactly). The user
+ * wanted them visible on that next screen too,
  * alongside the other categories.
  *
  * Two earlier passes at this were both corrected by the user:

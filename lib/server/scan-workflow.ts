@@ -1451,7 +1451,12 @@ export async function runScan(
           business,
           candidates: needsTriage,
           models,
-          coverageRetries: 2,
+          // Raised to the max coverageRetries allows (see
+          // isNetworkTransportError in openai.server.ts): this budget is
+          // now also what absorbs a transient network stall inside triage's
+          // batch workers, not just incomplete-coverage responses, and
+          // extra attempts cost nothing unless something actually failed.
+          coverageRetries: 3,
           // See tolerateUnrecoverableBatches's doc comment on
           // TriageConversationsRequest: raising triageCandidateBudget's
           // default means a scan now fans out to ~2.5x more triage
@@ -1708,7 +1713,8 @@ export async function runScan(
           business,
           conversations: conversationsNeedingDeep,
           models,
-          coverageRetries: 2,
+          // Same reasoning as the triageConversations call above.
+          coverageRetries: 3,
         });
         usage.push(usageRecord(qualified, "deep-qualification"));
         deepReturned = qualified.value.length;

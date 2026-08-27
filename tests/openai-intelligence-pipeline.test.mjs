@@ -757,3 +757,94 @@ test("website provenance cannot masquerade as observed customer demand", async (
   assert.equal(result.value.demandInsights[0].title, "Observed workflow pain");
   assert.deepEqual(result.value.demandInsights[0].provenanceIds, ["source_a"]);
 });
+
+test("qualifyConversations: a pure transport failure (fetch itself throws) recovers via retry instead of failing the whole call", async () => {
+  let attempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts <= 2) throw new Error("The operation was aborted due to timeout");
+      return chatResponse({
+        qualifications: [{
+          externalId: "a",
+          leadStatus: "potential_customer",
+          demandSignals: ["pain"],
+          intelligenceTags: ["problem_signal"],
+          productFit: "high",
+          painSeverity: "high",
+          intent: "switching",
+          timing: "current",
+          evidenceQuality: "high",
+          replyability: "low",
+          communityRisk: "low",
+          problemSummary: "Current workflow is failing",
+          competitorMentioned: null,
+          whyItMatters: "The author is actively looking to replace their workflow.",
+          shouldReply: false,
+          autoReplyAllowed: false,
+          requiresHumanReview: true,
+          replyAngle: null,
+          mentionProduct: false,
+          disclosureRequired: false,
+        }],
+      });
+    },
+  });
+  const base = candidate("a");
+  const matched = {
+    externalId: base.externalId,
+    kind: base.kind,
+    author: base.author,
+    body: base.body,
+    createdAt: base.createdAt,
+  };
+  const result = await provider.qualifyConversations({
+    business,
+    conversations: [{
+      ...base,
+      structuredContext: { originalPost: matched, matched, parentChain: [], replies: [], surroundingComments: [] },
+    }],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 2,
+  });
+
+  assert.equal(result.value.length, 1);
+  assert.equal(attempts, 3, "expected exactly 2 failed attempts then 1 successful attempt");
+});
+
+test("qualifyConversations: transport failures persisting through every retry still fail the whole call", async () => {
+  let attempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      throw new Error("The operation was aborted due to timeout");
+    },
+  });
+  const base = candidate("a");
+  const matched = {
+    externalId: base.externalId,
+    kind: base.kind,
+    author: base.author,
+    body: base.body,
+    createdAt: base.createdAt,
+  };
+  await assert.rejects(
+    provider.qualifyConversations({
+      business,
+      conversations: [{
+        ...base,
+        structuredContext: { originalPost: matched, matched, parentChain: [], replies: [], surroundingComments: [] },
+      }],
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 2,
+    }),
+    /OpenAI network request failed/,
+  );
+  assert.equal(attempts, 3);
+});

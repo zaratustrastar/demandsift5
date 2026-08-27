@@ -1027,6 +1027,25 @@ function isUnrecoverableStructuredOutputError(error: unknown): error is OpenAiPr
     || isRefusedStructuredChatResponse(error);
 }
 
+// Real production finding: a pure transport failure (fetch itself never got
+// a response -- DNS, connection reset, or the client-side AbortSignal.timeout
+// firing) already survived post()'s own short internal retry budget (a
+// couple of seconds of backoff) before reaching here, which is exactly the
+// shape of a transient stall rather than "OpenAI is fundamentally
+// unreachable." Unlike isUnrecoverableStructuredOutputError, this is not
+// content-specific to one batch -- it is systemic in the sense that it could
+// mean OpenAI (or the network path to it) is broadly degraded right now --
+// but a stall lasting a couple of minutes is common enough, and retrying the
+// exact same pending ids costs nothing extra (no new candidates, same
+// prompt), that it is still worth a few batch-level attempts with real
+// backoff before giving up and failing the whole scan attempt. See
+// processBatch's and qualifyConversations' use of this below.
+function isNetworkTransportError(error: unknown): error is OpenAiProviderError {
+  return error instanceof OpenAiProviderError
+    && error.status === undefined
+    && /^OpenAI network request failed/.test(error.message);
+}
+
 /**
  * A safe, permanent stand-in for a candidate whose batch could not be
  * resolved by OpenAI after every retry and model fallback (see
@@ -1677,7 +1696,25 @@ export class OpenAiProvider implements AiProvider {
       const pending = new Set(batchIds);
       try {
         for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
-          const result = await this.triageAttempt(request, pending);
+          let result: AiProviderResult<TriagedConversation[]>;
+          try {
+            result = await this.triageAttempt(request, pending);
+          } catch (error) {
+            // See isNetworkTransportError's doc comment: a pure transport
+            // stall gets a real retry (same pending ids, same prompt, with
+            // backoff) out of the same budget coverageRetries already
+            // grants for incomplete-coverage responses, instead of
+            // immediately falling through to the catch below and killing
+            // every other batch still running concurrently. Once that
+            // budget is truly exhausted it still surfaces as a real
+            // failure exactly as before -- a stall outlasting several
+            // backed-off attempts is exactly when the caller should know.
+            if (isNetworkTransportError(error) && attempt < retries) {
+              await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
+              continue;
+            }
+            throw error;
+          }
           attempts.push(result);
           for (const item of result.value) {
             collected.set(item.externalId, item);
@@ -1828,7 +1865,21 @@ export class OpenAiProvider implements AiProvider {
     const retries = Math.max(0, Math.min(request.coverageRetries ?? 2, 3));
 
     for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
-      const result = await this.qualifyAttempt(request, pending);
+      let result: AiProviderResult<DeepQualifiedConversation[]>;
+      try {
+        result = await this.qualifyAttempt(request, pending);
+      } catch (error) {
+        // Same reasoning as triageConversations' processBatch: a pure
+        // transport stall (see isNetworkTransportError) gets a real retry
+        // out of this same coverage-retry budget instead of immediately
+        // failing the whole scan attempt over what is often just a
+        // transient network hiccup.
+        if (isNetworkTransportError(error) && attempt < retries) {
+          await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
+          continue;
+        }
+        throw error;
+      }
       attempts.push(result);
       for (const item of result.value) {
         collected.set(item.externalId, item);

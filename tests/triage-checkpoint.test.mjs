@@ -442,3 +442,111 @@ test("without tolerateUnrecoverableBatches, the exact same unparsable batch stil
     /malformed structured JSON/,
   );
 });
+
+test("a batch hit by a transient network/transport failure (fetch itself throws, e.g. a client-side timeout) recovers via retry instead of failing the whole call", async () => {
+  // maxRetries: 0 isolates this from post()'s own internal retry loop --
+  // every failure here is caught and retried purely by the coverageRetries
+  // budget this test is exercising.
+  let batchTwoAttempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      if (ids[0] === "c26") {
+        batchTwoAttempts += 1;
+        // Fails the first two attempts exactly like the production
+        // incident ("OpenAI network request failed: The operation was
+        // aborted due to timeout") -- fetch itself never resolves with a
+        // Response, it throws.
+        if (batchTwoAttempts <= 2) throw new Error("The operation was aborted due to timeout");
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 2,
+  });
+
+  assert.equal(result.value.length, 50);
+  assert.equal(batchTwoAttempts, 3, "expected exactly 2 failed attempts then 1 successful attempt");
+});
+
+test("a batch whose transport failures persist through every retry still fails the whole call (coverage guarantee unchanged)", async () => {
+  let batchTwoAttempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      if (ids[0] === "c26") {
+        batchTwoAttempts += 1;
+        throw new Error("The operation was aborted due to timeout");
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  await assert.rejects(
+    provider.triageConversations({
+      business,
+      candidates,
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 2,
+    }),
+    /OpenAI network request failed/,
+  );
+
+  // 1 initial attempt + 2 retries = 3, matching coverageRetries: 2 -- proves
+  // the retry budget is bounded, not unlimited.
+  assert.equal(batchTwoAttempts, 3);
+});
+
+test("a genuine HTTP error (status set) is never retried by the network-transport path -- only pure transport failures are", async () => {
+  let batchTwoAttempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      if (ids[0] === "c26") {
+        batchTwoAttempts += 1;
+        return new Response(JSON.stringify({ error: { message: "upstream failure" } }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  await assert.rejects(
+    provider.triageConversations({
+      business,
+      candidates,
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 2,
+    }),
+  );
+
+  // A real HTTP error carries a status and is deliberately excluded from
+  // the network-transport retry path -- it fails on the very first attempt,
+  // exactly as before this change.
+  assert.equal(batchTwoAttempts, 1);
+});

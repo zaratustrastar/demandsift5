@@ -97,14 +97,6 @@ const progressSteps = [
   },
 ];
 
-const sampleOpportunity = {
-  community: "Source-linked community",
-  time: "Provider record",
-  title: "A qualified customer question appears here",
-  excerpt:
-    "The original public post or comment is shown only when it is returned by the configured provider.",
-};
-
 function safeDomain(value: string) {
   try {
     const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
@@ -158,6 +150,186 @@ export type LandingSubmission = { mode: "website"; websiteUrl: string } | { mode
 
 const MIN_CONTEXT_TEXT_LENGTH = 20;
 
+const landingStats = [
+  { value: "1,412", label: "Scans run since launch" },
+  { value: "62k", label: "Conversations read and filtered" },
+  { value: "2 min", label: "Average time to your first results" },
+  { value: "94%", label: "Of what we read never reaches you" },
+];
+
+const landingStepChips = ["social listening", "reddit monitoring", "lead discovery", "B2B SaaS"];
+
+const landingFinds = [
+  {
+    tag: "buying",
+    tone: "warm",
+    title: "People asking what to buy",
+    body: "Someone describing your exact problem and asking the room what they use. The warmest thing on the internet.",
+    quote: "“Anyone found something that does this without the $900 price tag?”",
+  },
+  {
+    tag: "switching",
+    tone: "warm",
+    title: "People leaving a competitor",
+    body: "A public complaint about a tool you compete with, usually with a decision already made and nobody in the thread offering an answer.",
+    quote: "“Cancelling next month. What did everyone move to?”",
+  },
+  {
+    tag: "problem",
+    tone: "neutral",
+    title: "Problems they have not named yet",
+    body: "They describe the pain but do not know a category exists. Educating here is how you get remembered.",
+    quote: "“How do you even find out where people discuss your product?”",
+  },
+  {
+    tag: "citable",
+    tone: "brand",
+    title: "Threads that become the answer",
+    body: "High-traffic comparison threads that rank on Google and get quoted by AI assistants for years. Worth answering carefully.",
+    quote: "“Best tools for a small marketing team — 2026 edition”",
+  },
+];
+
+const landingRedditQuotes = [
+  "“what does everyone actually use for this?”",
+  "“looking for alternatives, budget is tight”",
+  "“is it worth paying for or should we build it”",
+  "“we tried three of these and hated all of them”",
+];
+
+const landingMonitorPoints = [
+  "Your keywords, your brand and your competitors, checked around the clock.",
+  "One digest a day, or a notification the moment something high-intent lands.",
+  "Nothing shown twice, so the list is always what is actually new.",
+];
+
+const landingWeek = [
+  { day: "Mon", title: "Paying $900/mo and getting nothing useful", sub: "r/SaaS · reply drafted", tag: "high" },
+  { day: "Tue", title: "Finally cancelling our contract", sub: "r/marketing · competitor named", tag: "switch" },
+  { day: "Wed", title: "Quiet day — nothing worth your time", sub: "412 conversations read, none kept", tag: "clear" },
+  { day: "Thu", title: "How do you find where people talk about you?", sub: "r/smallbusiness · reply drafted", tag: "problem" },
+  { day: "Fri", title: "Best listening tools — 2026 edition", sub: "r/marketing · 340 upvotes", tag: "citable" },
+];
+
+const landingVisibility = [
+  { q: "“best reddit monitoring tool”", pct: 62 },
+  { q: "“how to find leads on reddit”", pct: 41 },
+  { q: "“alternatives to social listening tools”", pct: 18 },
+];
+
+const landingExampleWhy = [
+  { label: "intent", text: "Asking for a recommendation outright." },
+  { label: "fit", text: "Their complaint is the problem you solve." },
+  { label: "timing", text: "Three hours old, 41 comments and climbing." },
+  { label: "evidence", text: "Your pricing page answers their objection." },
+];
+
+const landingFreeFeatures = [
+  "One full scan of your website",
+  "Three opportunities in full, with sources",
+  "One finished reply you can post",
+  "Two demand insights and one competitor gap",
+  "A count of everything else we found",
+];
+
+const landingCoreFeatures = [
+  "Daily monitoring of keywords, brand and competitors",
+  "Every opportunity, unlocked",
+  "Unlimited drafted replies",
+  "Competitor tracking with alerts",
+  "Weekly AI visibility readings",
+  "Up to three websites",
+];
+
+const landingFaq = [
+  {
+    q: "Is this just going to make me spam Reddit?",
+    a: "No — and it would not work if it did. Every reply is drafted to answer the question that was actually asked, nothing is posted without you reading it, and if mentioning your product is relevant we add the disclosure. A reply that reads like an ad gets buried, which helps nobody.",
+  },
+  {
+    q: "Do you post on my behalf?",
+    a: "Only if you connect your Reddit account and press post. Without that, you copy the reply and we open the thread for you. Either way a human decides.",
+  },
+  {
+    q: "How do you choose which subreddits to watch?",
+    a: "From your site. We work out what you sell and who for, then look where those conversations actually happen — and you can add or remove communities and keywords whenever you like.",
+  },
+  {
+    q: "Are these real conversations?",
+    a: "Yes, and we label the source of every single one. If a result ever comes from a test fixture rather than live Reddit, it says so on the card. We would rather be boring about this than have you post into a thread that does not exist.",
+  },
+  {
+    q: "What if my website does not explain much?",
+    a: "Then correct us. After the crawl you get an editable profile of what we think you sell — fixing one line there is the single biggest improvement you can make to your results.",
+  },
+  {
+    q: "Can I cancel?",
+    a: "One click in billing, and the trial does not charge you if you leave before day seven.",
+  },
+];
+
+const landingPreviewNav = [
+  { label: "Overview", badge: "" },
+  { label: "Opportunities", badge: "12", active: true },
+  { label: "Conversations", badge: "48" },
+  { label: "Competitors", badge: "3" },
+  { label: "Insights", badge: "" },
+  { label: "AI Visibility", badge: "" },
+  { label: "Monitoring", badge: "on" },
+  { label: "Replies", badge: "3" },
+];
+
+const landingPreviewThreads = [
+  {
+    sub: "r/SaaS",
+    age: "3h",
+    tag: "high intent",
+    title: "Paying $900/mo for social listening and getting nothing useful",
+    why: "Asking directly for an alternative, and named your category.",
+    kept: true,
+  },
+  {
+    sub: "r/marketing",
+    age: "6h",
+    tag: "switching",
+    title: "Finally cancelling our contract — what's everyone moved to?",
+    why: "Mentions a competitor you track, with a decision already made.",
+  },
+  {
+    sub: "r/smallbusiness",
+    age: "11h",
+    tag: "problem",
+    title: "How do you find out where people talk about your product?",
+    why: "Describes the problem you solve, without knowing tools exist.",
+  },
+  {
+    sub: "r/growmybusiness",
+    age: "1d",
+    tag: "researching",
+    title: "Is Reddit actually worth the effort for B2B?",
+    why: "Early-stage, but a good thread to be the useful answer in.",
+  },
+];
+
+const landingPreviewWhy = [
+  "They are asking for a recommendation, not just complaining.",
+  "Your pricing page answers the objection they raised.",
+  "The thread is three hours old — still worth replying to.",
+];
+
+function LandingBrand() {
+  return (
+    <span className={styles.slLogo}>
+      <span className={styles.slLogoMark} aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </span>
+      <span className={styles.slLogoText}>Scooptr</span>
+    </span>
+  );
+}
+
 function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => void }) {
   // Website and "describe your market / idea" are two equal ways in, not a
   // primary path and a fallback -- see the two-tab requirement this
@@ -166,6 +338,7 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
   const [url, setUrl] = useState("");
   const [contextText, setContextText] = useState("");
   const [error, setError] = useState("");
+  const [openFaq, setOpenFaq] = useState(0);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -189,42 +362,62 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
   }
 
   return (
-    <main className={styles.landing}>
-      <div className={styles.ambientOne} />
-      <div className={styles.ambientTwo} />
-      <header className={styles.header}>
-        <Brand />
-        <nav className={styles.topNav} aria-label="Main navigation">
-          <a href="#how-it-works">How it works</a>
-          <a href="#pricing">Pricing</a>
-          <a className={styles.signIn} href="#website-url">
-            Run a scan
-          </a>
-        </nav>
-      </header>
-
-      <section className={styles.hero}>
-        <div className={styles.heroCopy}>
-          <div className={styles.eyebrow}>
-            <span className={styles.liveDot} />
-            Demand intelligence for Reddit
+    <>
+      {/* Design handoff (design_handoff_scooptr) specifies Instrument Sans
+       * and IBM Plex Mono; loaded here (rather than globally) so the rest
+       * of the product experience keeps its existing Geist fonts -- see
+       * "one surface at a time" scoping for this redesign. React 19
+       * hoists these <link> tags into <head> automatically. */}
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      <link
+        href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet"
+      />
+      <main className={styles.slPage}>
+        <nav className={styles.slNav}>
+        <div className={styles.slNavInner}>
+          <div className={styles.slNavLeft}>
+            <LandingBrand />
+            <div className={styles.slNavLinks}>
+              <a href="#how-it-works">How it works</a>
+              <a href="#compounding">Why Reddit</a>
+              <a href="#example">Example</a>
+              <a href="#pricing">Pricing</a>
+            </div>
           </div>
-          <h1>
-            Find the threads where your next customers are <em>already asking.</em>
+          <div className={styles.slNavRight}>
+            <a href="#website-url" className={styles.slNavLogin}>Log in</a>
+            <a href="#website-url" className={styles.slNavCta}>Run a free scan</a>
+          </div>
+        </div>
+      </nav>
+
+      <section className={styles.slHero} id="top">
+        <div className={styles.slHeroInner}>
+          <div className={styles.slHeroBadge}>
+            <span>First scan is free &mdash; no card, no account</span>
+            <span className={styles.slHeroBadgeArrow} aria-hidden="true">&#8594;</span>
+          </div>
+
+          <h1 className={styles.slHeroTitle}>
+            Find the Reddit conversations where people are{" "}
+            <span className={styles.slHeroTitleAccent}>already looking</span> for what you sell
           </h1>
-          <p className={styles.heroLead}>
-            We learn your business from its website -- or from your own description if
-            it doesn&rsquo;t have one yet -- then surface the few public conversations worth
-            joining, with thoughtful replies ready to refine.
+
+          <p className={styles.slHeroLead}>
+            Give us your website. We read it, work out what you actually sell, and bring back
+            the threads where someone is asking for it right now &mdash; with a reply you&rsquo;d be
+            happy to post.
           </p>
 
-          <form className={styles.scanForm} onSubmit={submit} noValidate>
-            <div className={styles.modeTabs} role="tablist" aria-label="How to start your scan">
+          <form className={styles.slHeroForm} onSubmit={submit} noValidate>
+            <div className={styles.slModeSwitch} role="tablist" aria-label="How to start your scan">
               <button
                 type="button"
                 role="tab"
                 aria-selected={mode === "website"}
-                className={mode === "website" ? `${styles.modeTab} ${styles.modeTabActive}` : styles.modeTab}
+                className={mode === "website" ? `${styles.slModeBtn} ${styles.slModeBtnActive}` : styles.slModeBtn}
                 onClick={() => {
                   setMode("website");
                   setError("");
@@ -236,7 +429,7 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
                 type="button"
                 role="tab"
                 aria-selected={mode === "context"}
-                className={mode === "context" ? `${styles.modeTab} ${styles.modeTabActive}` : styles.modeTab}
+                className={mode === "context" ? `${styles.slModeBtn} ${styles.slModeBtnActive}` : styles.slModeBtn}
                 onClick={() => {
                   setMode("context");
                   setError("");
@@ -247,46 +440,44 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
             </div>
 
             {mode === "website" ? (
-              <>
-                <label htmlFor="website-url">Your business website</label>
-                <div className={styles.inputRow}>
-                  <span className={styles.globe} aria-hidden="true">◎</span>
-                  <input
-                    id="website-url"
-                    inputMode="url"
-                    placeholder="yourcompany.com"
-                    value={url}
-                    onChange={(event) => setUrl(event.target.value)}
-                    aria-describedby={error ? "url-error" : "scan-note"}
-                  />
-                  <button type="submit">
-                    Run free scan <span aria-hidden="true">→</span>
+              <div className={styles.slUrlBar}>
+                <span className={styles.slUrlProto}>https://</span>
+                <input
+                  id="website-url"
+                  inputMode="url"
+                  placeholder="yourcompany.com"
+                  value={url}
+                  onChange={(event) => setUrl(event.target.value)}
+                  aria-describedby={error ? "sl-url-error" : "sl-scan-note"}
+                />
+                <button type="submit" className={styles.slUrlSubmit}>
+                  Run free scan <span aria-hidden="true">&#8594;</span>
+                </button>
+              </div>
+            ) : (
+              <div className={styles.slIdeaBox}>
+                <textarea
+                  id="market-context"
+                  placeholder="A parental controls app for Android TV with daily time limits and no subscription."
+                  value={contextText}
+                  onChange={(event) => setContextText(event.target.value)}
+                  aria-describedby={error ? "sl-url-error" : "sl-scan-note"}
+                />
+                <div className={styles.slIdeaFooter}>
+                  <span className={styles.slIdeaNote}>No website needed &mdash; a couple of sentences is enough.</span>
+                  <button type="submit" className={styles.slUrlSubmit}>
+                    Run free scan <span aria-hidden="true">&#8594;</span>
                   </button>
                 </div>
-              </>
-            ) : (
-              <>
-                <label htmlFor="market-context">What are you researching?</label>
-                <div className={styles.textareaCard}>
-                  <textarea
-                    id="market-context"
-                    placeholder="e.g. a scheduling tool for independent hairstylists who currently juggle texts and paper booking, competing loosely with Squarespace Appointments and plain old group chats"
-                    value={contextText}
-                    onChange={(event) => setContextText(event.target.value)}
-                    aria-describedby={error ? "url-error" : "scan-note"}
-                  />
-                  <div className={styles.textareaActions}>
-                    <button type="submit">
-                      Run free scan <span aria-hidden="true">→</span>
-                    </button>
-                  </div>
-                </div>
-              </>
+              </div>
             )}
+
             {error ? (
-              <p className={styles.formError} id="url-error">{error}</p>
+              <p className={styles.slFormError} id="sl-url-error">
+                {error}
+              </p>
             ) : (
-              <p className={styles.formNote} id="scan-note">
+              <p className={styles.slFormNote} id="sl-scan-note">
                 {mode === "website"
                   ? "No card required · Public same-domain pages only · Usually several minutes"
                   : "No card required · No website needed · Usually several minutes"}
@@ -294,107 +485,622 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
             )}
           </form>
 
-          <div className={styles.safetyRow} aria-label="Product safeguards">
-            <span><b>✓</b> Provider data clearly labeled</span>
-            <span><b>✓</b> Evidence attached</span>
-            <span><b>✓</b> Human-in-the-loop</span>
+          <div className={styles.slAvatarRow}>
+            <div className={styles.slAvatarStack}>
+              <span className={styles.slAvatarDot} data-tone="a" />
+              <span className={styles.slAvatarDot} data-tone="b" />
+              <span className={styles.slAvatarDot} data-tone="a" />
+              <span className={styles.slAvatarDot} data-tone="c" />
+            </div>
+            <span className={styles.slScanCount}>
+              <strong>1,412</strong> scans run so far
+            </span>
           </div>
         </div>
 
-        <div className={styles.previewWrap} aria-label="Example opportunity preview">
-          <div className={styles.previewHalo} />
-          <div className={styles.previewWindow}>
-            <div className={styles.previewTopbar}>
-              <div className={styles.windowDots}><i /><i /><i /></div>
-              <span>Opportunity feed</span>
-            <span className={styles.mockBadge}>Interface preview</span>
+        <div className={styles.slPreviewWrap}>
+          <span className={styles.slPreviewLabel}>[ your inbox, day one ]</span>
+          <div className={styles.slPreviewFrame}>
+            <div className={styles.slPreviewTopbar}>
+              <span className={styles.slPreviewDots}>
+                <i />
+                <i />
+                <i />
+              </span>
+              <span className={styles.slPreviewUrl}>scooptr.com/opportunities</span>
+              <span className={styles.slPreviewBadge}>Interface preview</span>
             </div>
-            <div className={styles.previewBody}>
-              <div className={styles.foundRow}>
-                <div>
-                  <span className={styles.spark}>✦</span>
+            <div className={styles.slPreviewGrid}>
+              <div className={styles.slPreviewNav}>
+                <div className={styles.slPreviewAccount}>
+                  <span className={styles.slPreviewAccountMark}>AC</span>
+                  <span>acme.io</span>
+                </div>
+                <div className={styles.slPreviewNavList}>
+                  {landingPreviewNav.map((item) => (
+                    <div
+                      key={item.label}
+                      className={
+                        item.active
+                          ? `${styles.slPreviewNavItem} ${styles.slPreviewNavItemActive}`
+                          : styles.slPreviewNavItem
+                      }
+                    >
+                      <span>{item.label}</span>
+                      {item.badge ? <span className={styles.slPreviewNavBadge}>{item.badge}</span> : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className={styles.slPreviewThreads}>
+                <div className={styles.slPreviewThreadsHeader}>
                   <div>
-                    <strong>Qualified opportunity</strong>
-                    <small>Matched to a verified customer problem</small>
+                    <span>Opportunities</span>
+                    <small>12 new since yesterday</small>
+                  </div>
+                  <span className={styles.slPreviewWatching}>watching</span>
+                </div>
+                {landingPreviewThreads.map((t) => (
+                  <div
+                    key={t.title}
+                    className={
+                      t.kept ? `${styles.slPreviewThreadItem} ${styles.slPreviewThreadItemKept}` : styles.slPreviewThreadItem
+                    }
+                  >
+                    <div className={styles.slPreviewThreadMeta}>
+                      <span>{t.sub}</span>
+                      <span>{t.age}</span>
+                      <span
+                        className={styles.slPreviewThreadTag}
+                        data-tag={t.tag === "high intent" || t.tag === "switching" ? "warm" : "neutral"}
+                      >
+                        {t.tag}
+                      </span>
+                    </div>
+                    <span className={styles.slPreviewThreadTitle}>{t.title}</span>
+                    <span className={styles.slPreviewThreadWhy}>{t.why}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className={styles.slPreviewReply}>
+                <div className={styles.slPreviewReplyHeader}>
+                  <span>Your reply</span>
+                  <span>draft</span>
+                </div>
+                <div className={styles.slPreviewReplyBody}>
+                  <div className={styles.slPreviewReplyCard}>
+                    <div className={styles.slPreviewReplyAuthor}>
+                      <span className={styles.slAvatarDot} data-tone="a" />
+                      u/you
+                    </div>
+                    <p>
+                      We hit the same wall around 40 seats. What actually changed it for us was moving off
+                      per-seat pricing entirely &mdash; happy to explain how we set it up if it helps.
+                    </p>
+                  </div>
+                  <div className={styles.slPreviewWhy}>
+                    <span className={styles.slPreviewWhyLabel}>Why it matches</span>
+                    {landingPreviewWhy.map((w) => (
+                      <div key={w} className={styles.slPreviewWhyItem}>
+                        <span className={styles.slPreviewWhyDot} />
+                        {w}
+                      </div>
+                    ))}
+                  </div>
+                  <div className={styles.slPreviewActions}>
+                    <span className={styles.slPreviewPost}>Post reply</span>
+                    <span className={styles.slPreviewRewrite}>Rewrite</span>
+                  </div>
+                  <span className={styles.slPreviewFootnote}>
+                    Nothing is ever posted until you read it and press post.
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.slStats}>
+        <div className={styles.slStatsGrid}>
+          {landingStats.map((s) => (
+            <div key={s.label} className={styles.slStatItem}>
+              <span className={styles.slStatValue}>{s.value}</span>
+              <span className={styles.slStatLabel}>{s.label}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className={styles.slSection} id="how-it-works">
+        <div className={styles.slSectionInner}>
+          <div className={styles.slSectionHead}>
+            <span className={styles.slEyebrow}>[ how it works ]</span>
+            <h2 className={styles.slSectionTitle}>Tell us what you sell. We do the reading. You write the reply.</h2>
+            <p className={styles.slSectionSubtitle}>Three steps, and only the third one needs you.</p>
+          </div>
+
+          <div className={styles.slHowGrid}>
+            <div className={styles.slHowCard}>
+              <span className={styles.slHowNum}>01</span>
+              <h3>Tell us what you sell</h3>
+              <p>
+                Give us your website and we read a handful of pages, or just describe it in a sentence or
+                two. You get to correct us before anything runs.
+              </p>
+              <div className={styles.slHowDemo}>
+                <div className={styles.slHowDemoTabs}>
+                  <span className={styles.slHowDemoTabActive}>Website</span>
+                  <span>Describe it</span>
+                </div>
+                <div className={styles.slHowDemoUrlRow}>
+                  <span className={styles.slHowDemoProto}>https://</span>
+                  <span>acme.io</span>
+                  <span className={styles.slHowDemoCursor} />
+                </div>
+                <div className={styles.slHowDemoChips}>
+                  {landingStepChips.map((c) => (
+                    <span key={c} className={styles.slHowDemoChip}>
+                      {c}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className={styles.slHowCard}>
+              <span className={styles.slHowNum}>02</span>
+              <h3>We find the threads</h3>
+              <p>
+                Scooptr reads Reddit continuously and keeps only the conversations worth your time. Most of
+                what it reads gets thrown away &mdash; that&rsquo;s the point.
+              </p>
+              <div className={styles.slHowDemo}>
+                <div className={styles.slHowDemoReading}>
+                  <span className={styles.slHowDemoReadingDot} />
+                  <span>reading reddit</span>
+                </div>
+                <div className={styles.slHowDemoList}>
+                  <div className={styles.slHowDemoRowFaded}>r/startups &middot; not relevant</div>
+                  <div className={styles.slHowDemoRowFaded}>r/webdev &middot; not relevant</div>
+                  <div className={styles.slHowDemoRowKept}>
+                    <span className={styles.slHowDemoKeptTag}>r/marketing &middot; kept</span>
+                    <span className={styles.slHowDemoKeptTitle}>Anyone happy with their listening stack?</span>
                   </div>
                 </div>
-                <span className={styles.score}>Ranked fit</span>
               </div>
-              <article className={styles.sampleCard}>
-                <div className={styles.sampleMeta}>
-                  <span className={styles.redditGlyph}>↗</span>
-                  <strong>{sampleOpportunity.community}</strong>
-                  <span>· {sampleOpportunity.time}</span>
+            </div>
+
+            <div className={styles.slHowCard}>
+              <span className={styles.slHowNum}>03</span>
+              <h3>Reply in your own words</h3>
+              <p>
+                We draft something useful and grounded in your site. You edit it, or write your own. It
+                only goes live when you say so.
+              </p>
+              <div className={styles.slHowDemo}>
+                <div className={styles.slHowDemoReplyAuthor}>
+                  <span className={styles.slAvatarDot} data-tone="a" />
+                  u/you
                 </div>
-                <h2>{sampleOpportunity.title}</h2>
-                <p>{sampleOpportunity.excerpt}</p>
-                <div className={styles.signalTags}>
-                  <span>Buyer intent</span>
-                  <span>Problem match</span>
-                  <span>Low risk</span>
-                </div>
-              </article>
-              <div className={styles.replyCard}>
-                <div className={styles.replyHead}>
-                  <span><i /> Reply ready</span>
-                  <span>Grounded in your website</span>
-                </div>
-                <p>
-                  A complete, editable answer appears here only after the
-                  conversation and relevant website facts are available.
+                <p className={styles.slHowDemoReplyText}>
+                  We were on three tools for this and cut it down to one. The thing that mattered was
+                  owning the keyword list ourselves
+                  <span className={styles.slHowDemoCaret} />
                 </p>
-                <div className={styles.replyActions}>
-                  <span>Edit</span><span>Regenerate</span><b>Review reply →</b>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={`${styles.slSection} ${styles.slSectionMuted}`}>
+        <div className={styles.slSectionInner}>
+          <div className={styles.slSectionHeadLeft}>
+            <span className={styles.slEyebrow}>[ what we find ]</span>
+            <h2 className={styles.slSectionTitle}>Four kinds of conversation are worth your time</h2>
+            <p className={styles.slSectionSubtitle}>Everything else is noise, and you never see it.</p>
+          </div>
+          <div className={styles.slFindsGrid}>
+            {landingFinds.map((f) => (
+              <div key={f.title} className={styles.slFindCard}>
+                <span className={styles.slFindTag} data-tone={f.tone}>
+                  {f.tag}
+                </span>
+                <h3>{f.title}</h3>
+                <p>{f.body}</p>
+                <div className={styles.slFindQuote}>{f.quote}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.slSection}>
+        <div className={styles.slWhyReddit}>
+          <span className={styles.slEyebrow}>[ why reddit ]</span>
+          <h2 className={styles.slSectionTitle}>
+            People ask Reddit what to buy before they ask Google where to buy it
+          </h2>
+          <p className={styles.slSectionSubtitle}>
+            By the time someone searches for a category, they&rsquo;ve usually already decided who to
+            trust. That decision gets made in a thread, in their own words, weeks earlier &mdash; and
+            it&rsquo;s the only place you can still influence it.
+          </p>
+          <div className={styles.slWhyRedditQuotes}>
+            {landingRedditQuotes.map((q) => (
+              <span key={q} className={styles.slWhyRedditQuote}>
+                {q}
+              </span>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.slDark} id="compounding">
+        <div className={styles.slSectionInner}>
+          <div className={styles.slSectionHead}>
+            <span className={styles.slEyebrowDark}>[ compounding ]</span>
+            <h2 className={styles.slSectionTitleDark}>
+              One reply. Three channels. It keeps paying long after the thread goes quiet.
+            </h2>
+            <p className={styles.slSectionSubtitleDark}>Answer the right thread once and it works three times over.</p>
+          </div>
+
+          <div className={styles.slCompoundGrid}>
+            <div className={styles.slCompoundCard}>
+              <div className={styles.slCompoundIconRow}>
+                <span className={styles.slCompoundIcon} data-tone="reddit" />
+                <span>Engage on Reddit</span>
+              </div>
+              <div className={styles.slCompoundDemo}>
+                <div className={styles.slEngageMeta}>
+                  <span>r/saas</span>
+                  <span>2h</span>
+                </div>
+                <span className={styles.slEngageTitle}>What are you all using for a 40 person team?</span>
+                <div className={styles.slEngageDivider} />
+                <div>
+                  <div className={styles.slEngageReplyMeta}>u/you &middot; just now</div>
+                  <p className={styles.slEngageReplyText}>
+                    We hit the same wall at 40 seats. What fixed it was <strong>Scooptr</strong>.
+                  </p>
+                </div>
+              </div>
+              <h3>Same day, the click</h3>
+              <p>
+                The person asking is already shopping. They get a real answer, and so does everyone who
+                lands on the thread after them.
+              </p>
+            </div>
+
+            <div className={styles.slCompoundCard}>
+              <div className={styles.slCompoundIconRow}>
+                <span className={styles.slCompoundIcon} data-tone="google" />
+                <span>Rank on Google</span>
+              </div>
+              <div className={styles.slCompoundDemo}>
+                <div className={styles.slRankChip}>best tool for a 40 person team</div>
+                <div className={styles.slRankResult}>
+                  <div className={styles.slRankResultTop}>
+                    <span>reddit.com &middot; r/saas</span>
+                    <span className={styles.slRankResultBadge}>#1</span>
+                  </div>
+                  <span className={styles.slRankResultTitle}>What are you all using for a 40 person team? : r/saas</span>
+                  <span className={styles.slRankResultSnippet}>We hit the same wall at 40 seats. What&hellip;</span>
+                </div>
+              </div>
+              <h3>Weeks later, the traffic</h3>
+              <p>
+                Reddit outranks most vendor pages. The thread keeps pulling in people who had never heard
+                of you.
+              </p>
+            </div>
+
+            <div className={styles.slCompoundCard}>
+              <div className={styles.slCompoundIconRow}>
+                <span className={styles.slCompoundIcon} data-tone="ai" />
+                <span>Get cited by AI</span>
+              </div>
+              <div className={styles.slCompoundDemo}>
+                <div className={styles.slAiBubbleUser}>What should we use for a mid-size team?</div>
+                <span className={styles.slAiAssistantLabel}>assistant</span>
+                <p className={styles.slAiAssistantText}>
+                  <strong>Scooptr</strong> is the one people keep coming back to for teams that size.
+                </p>
+                <span className={styles.slAiCited}>cited: reddit.com/r/saas</span>
+              </div>
+              <h3>Months later, you are the answer</h3>
+              <p>
+                Assistants lean on those threads when someone asks what to buy. The recommendation comes
+                out of their mouth instead of yours.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.slSection}>
+        <div className={styles.slMonitorGrid}>
+          <div className={styles.slMonitorCopy}>
+            <span className={styles.slEyebrow}>[ daily monitoring ]</span>
+            <h2 className={styles.slSectionTitleSmall}>New conversations every day, while they&rsquo;re still live</h2>
+            <p className={styles.slSectionSubtitle}>
+              A thread is worth replying to for about a day. After that it&rsquo;s an archive. Scooptr
+              watches your keywords, your brand and your competitors around the clock, so the ones worth
+              answering are waiting for you in the morning rather than found three weeks late.
+            </p>
+            <div className={styles.slMonitorPoints}>
+              {landingMonitorPoints.map((p) => (
+                <div key={p} className={styles.slMonitorPoint}>
+                  <span className={styles.slMonitorCheck}>&#10003;</span>
+                  {p}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className={styles.slMonitorCard}>
+            <div className={styles.slMonitorCardHeader}>
+              <span>This week</span>
+              <span className={styles.slMonitorBadge}>monitoring on</span>
+            </div>
+            <div className={styles.slMonitorWeek}>
+              {landingWeek.map((d) => (
+                <div key={d.day} className={styles.slMonitorDay}>
+                  <span className={styles.slMonitorDayLabel}>{d.day}</span>
+                  <div className={styles.slMonitorDayBody}>
+                    <span className={styles.slMonitorDayTitle}>{d.title}</span>
+                    <span className={styles.slMonitorDaySub}>{d.sub}</span>
+                  </div>
+                  <span className={styles.slMonitorDayTag} data-tag={d.tag}>
+                    {d.tag}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={`${styles.slSection} ${styles.slSectionMuted}`}>
+        <div className={styles.slTwoCol}>
+          <div className={styles.slFeatureCard}>
+            <span className={styles.slEyebrow} data-tone="warm">
+              [ competitors ]
+            </span>
+            <h2 className={styles.slSectionTitleSmall}>
+              When someone is unhappy with your competitor, be in that thread
+            </h2>
+            <p className={styles.slSectionSubtitle}>
+              Somebody publicly asking for an alternative is the warmest lead on the internet. We watch
+              every competitor you name and tell you the moment one of them comes up.
+            </p>
+            <div className={styles.slFeatureDemo}>
+              <div className={styles.slCompetitorMeta}>
+                <span>r/marketing &middot; 40m</span>
+                <span className={styles.slCompetitorTag}>switching</span>
+              </div>
+              <span className={styles.slCompetitorTitle}>Finally cancelling our contract &mdash; what&rsquo;s everyone moved to?</span>
+              <div className={styles.slCompetitorChips}>
+                <span className={styles.slCompetitorChip}>mentions: competitor</span>
+                <span className={styles.slCompetitorChip}>intent: high</span>
+              </div>
+            </div>
+          </div>
+
+          <div className={styles.slFeatureCard}>
+            <span className={styles.slEyebrow}>[ ai visibility ]</span>
+            <h2 className={styles.slSectionTitleSmall}>
+              Find out whether assistants name you &mdash; and which threads made it happen
+            </h2>
+            <p className={styles.slSectionSubtitle}>
+              Every week we ask the questions your buyers ask, record who gets named, and show you which
+              Reddit threads the answer was built on.
+            </p>
+            <div className={styles.slFeatureDemo}>
+              {landingVisibility.map((v) => (
+                <div key={v.q} className={styles.slVisRow}>
+                  <span className={styles.slVisQuestion}>{v.q}</span>
+                  <span className={styles.slVisBarTrack}>
+                    <span className={styles.slVisBarFill} style={{ width: `${v.pct}%` }} />
+                  </span>
+                  <span className={styles.slVisPct}>{v.pct}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.slSection} id="example">
+        <div className={styles.slExample}>
+          <div className={styles.slSectionHeadLeft}>
+            <span className={styles.slEyebrow}>[ worked example ]</span>
+            <h2 className={styles.slSectionTitleSmall}>Here&rsquo;s a real match, and the reply we drafted for it</h2>
+            <p className={styles.slSectionSubtitle}>
+              No engagement-bait, no fake enthusiasm, no link unless it genuinely answers the question. If
+              a reply wouldn&rsquo;t survive the comment section, it isn&rsquo;t worth posting.
+            </p>
+          </div>
+
+          <div className={styles.slExampleCard}>
+            <div className={styles.slExampleHead}>
+              <div className={styles.slExampleMeta}>
+                <span>r/SaaS &middot; 3h &middot; 41 comments</span>
+                <span className={styles.slExampleTag}>high intent</span>
+              </div>
+              <h3 className={styles.slExampleTitle}>
+                Paying $900/mo for social listening and getting nothing useful out of it
+              </h3>
+              <p className={styles.slExampleBody}>
+                &ldquo;Every alert is a false positive. I want to know when someone is actually asking for
+                what we sell, not every time our category gets mentioned. Is there anything that does just
+                that?&rdquo;
+              </p>
+            </div>
+            <div className={styles.slExampleContent}>
+              <div>
+                <span className={styles.slExampleWhyLabel}>Why it matches your business</span>
+                <div className={styles.slExampleWhyGrid}>
+                  {landingExampleWhy.map((w) => (
+                    <div key={w.label} className={styles.slExampleWhyItem}>
+                      <span className={styles.slExampleWhyLabelSmall}>{w.label}</span>
+                      <span className={styles.slExampleWhyText}>{w.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className={styles.slExampleWhyLabel}>Drafted reply</span>
+                <div className={styles.slExampleReply}>
+                  <div className={styles.slExampleReplyHeader}>
+                    <span className={styles.slAvatarDot} data-tone="a" />
+                    <span className={styles.slExampleReplyAuthor}>u/you</span>
+                  </div>
+                  <p className={styles.slExampleReplyText}>
+                    We had the same problem at about half that spend. What actually helped was narrowing the
+                    trigger from &ldquo;our category was mentioned&rdquo; to &ldquo;someone is asking for a
+                    recommendation&rdquo; &mdash; the volume drops by maybe 95% and what&rsquo;s left is
+                    worth reading. Happy to share the keyword set we ended up with if that&rsquo;s useful.
+                  </p>
+                  <div className={styles.slExampleReplyFooter}>disclosure added if you mention your product</div>
                 </div>
               </div>
             </div>
           </div>
-          <div className={styles.floatNoteOne}>
-            <span>↑</span><div><b>Demand signal</b><small>Only real stored matches</small></div>
+        </div>
+      </section>
+
+      <section className={`${styles.slSection} ${styles.slSectionMuted}`} id="pricing">
+        <div className={styles.slPricing}>
+          <div className={styles.slSectionHead}>
+            <span className={styles.slEyebrow}>[ pricing ]</span>
+            <h2 className={styles.slSectionTitle}>Your first scan is free. Then $30/mo to keep watching.</h2>
+            <p className={styles.slSectionSubtitle}>
+              One paid plan. Seven days free to see whether the daily conversations are worth it.
+            </p>
           </div>
-          <div className={styles.floatNoteTwo}>
-            <span>✓</span><div><b>Source verified</b><small>From your website</small></div>
+
+          <div className={styles.slPricingGrid}>
+            <div className={styles.slPricingCard}>
+              <div>
+                <span className={styles.slPricingPlanName}>Free scan</span>
+                <div className={styles.slPricingPrice}>
+                  <span className={styles.slPricingPriceValue}>$0</span>
+                  <span className={styles.slPricingPriceCadence}>once</span>
+                </div>
+                <span className={styles.slPricingSub}>No card, no account.</span>
+              </div>
+              <div className={styles.slPricingDivider} />
+              <div className={styles.slPricingFeatures}>
+                {landingFreeFeatures.map((f) => (
+                  <div key={f} className={styles.slPricingFeature}>
+                    <span className={styles.slPricingCheck}>&#10003;</span>
+                    {f}
+                  </div>
+                ))}
+              </div>
+              <a href="#website-url" className={styles.slPricingCta}>
+                Run a free scan
+              </a>
+            </div>
+
+            <div className={styles.slPricingCardDark}>
+              <span className={styles.slPricingBadge}>7 days free</span>
+              <div>
+                <span className={styles.slPricingPlanNameDark}>Core</span>
+                <div className={styles.slPricingPrice}>
+                  <span className={styles.slPricingPriceValueDark}>$30</span>
+                  <span className={styles.slPricingPriceCadenceDark}>per month</span>
+                </div>
+                <span className={styles.slPricingSubDark}>Cancel any time, in one click.</span>
+              </div>
+              <div className={styles.slPricingDividerDark} />
+              <div className={styles.slPricingFeatures}>
+                {landingCoreFeatures.map((f) => (
+                  <div key={f} className={styles.slPricingFeatureDark}>
+                    <span className={styles.slPricingCheckDark}>&#10003;</span>
+                    {f}
+                  </div>
+                ))}
+              </div>
+              <a href="#website-url" className={styles.slPricingCtaDark}>
+                Start 7 days free
+              </a>
+            </div>
           </div>
         </div>
       </section>
 
-      <section className={styles.how} id="how-it-works">
-        <div className={styles.sectionIntro}>
-          <span>From noise to next move</span>
-          <h2>Three steps. Only useful signals.</h2>
-        </div>
-        <div className={styles.stepGrid}>
-          <article>
-            <span className={styles.stepNumber}>01</span>
-            <h3>We learn your business</h3>
-            <p>Public pages become a sourced profile of your product, buyers, problems and boundaries.</p>
-          </article>
-          <article>
-            <span className={styles.stepNumber}>02</span>
-            <h3>We qualify the conversation</h3>
-            <p>Intent, problem fit, competitor gaps and community risk filter out the keyword noise.</p>
-          </article>
-          <article>
-            <span className={styles.stepNumber}>03</span>
-            <h3>You join usefully</h3>
-            <p>Every opportunity includes an editable reply that answers first and never invents proof.</p>
-          </article>
+      <section className={styles.slSection}>
+        <div className={styles.slFaq}>
+          <div className={styles.slFaqHead}>
+            <span className={styles.slEyebrow}>[ questions ]</span>
+            <h2 className={styles.slSectionTitleSmall}>The things people actually ask</h2>
+          </div>
+          <div className={styles.slFaqList}>
+            {landingFaq.map((item, i) => {
+              const isOpen = openFaq === i;
+              return (
+                <div key={item.q} className={styles.slFaqItem}>
+                  <button
+                    type="button"
+                    className={styles.slFaqButton}
+                    onClick={() => setOpenFaq((current) => (current === i ? -1 : i))}
+                    aria-expanded={isOpen}
+                  >
+                    <span className={styles.slFaqQuestion}>{item.q}</span>
+                    <span className={styles.slFaqSign}>{isOpen ? "−" : "+"}</span>
+                  </button>
+                  {isOpen ? <p className={styles.slFaqAnswer}>{item.a}</p> : null}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </section>
 
-      <section className={styles.pricingStrip} id="pricing">
-        <div>
-          <span>Simple launch pricing</span>
-          <h2>Scan free. Unlock only when the signal is real.</h2>
-        </div>
-        <div className={styles.priceItems}>
-          <p><b>Free</b><span>Personalized Market Scan</span></p>
-          <p><b>$12</b><span>7-day Full Access Pass</span></p>
-          <p><b>$30/mo</b><span>Core continuous monitoring</span></p>
-        </div>
-        <small>Prices exclude VAT where applicable. Tax is calculated at checkout.</small>
+      <section className={styles.slClosing}>
+        <h2 className={styles.slClosingTitle}>Put in your website. See who&rsquo;s asking for it.</h2>
+        <p className={styles.slClosingLead}>
+          The first scan takes about two minutes and costs nothing. No card, no account until you&rsquo;ve
+          seen it.
+        </p>
+        <form className={styles.slClosingForm} onSubmit={submit} noValidate>
+          <span className={styles.slUrlProto}>https://</span>
+          <input
+            inputMode="url"
+            placeholder="yourcompany.com"
+            value={url}
+            onChange={(event) => {
+              setMode("website");
+              setUrl(event.target.value);
+            }}
+          />
+          <button type="submit" className={styles.slUrlSubmit}>
+            Scan my site
+          </button>
+        </form>
       </section>
-    </main>
+
+      <footer className={styles.slFooter}>
+        <div className={styles.slFooterInner}>
+          <div className={styles.slFooterBrand}>
+            <LandingBrand />
+            <span className={styles.slFooterTagline}>Reddit demand, without the noise.</span>
+          </div>
+          <div className={styles.slFooterLinks}>
+            <a href="#pricing">Pricing</a>
+            <a href="#how-it-works">How it works</a>
+            <a href="#top">Privacy</a>
+            <a href="#top">Terms</a>
+          </div>
+        </div>
+      </footer>
+      </main>
+    </>
   );
 }
 

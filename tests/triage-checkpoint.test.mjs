@@ -550,3 +550,129 @@ test("a genuine HTTP error (status set) is never retried by the network-transpor
   // exactly as before this change.
   assert.equal(batchTwoAttempts, 1);
 });
+
+test("when Surplus's own retries are exhausted, a configured directFallback provider is tried once before the whole call fails", async () => {
+  let primaryAttempts = 0;
+  let fallbackAttempts = 0;
+  const fallback = new openai.OpenAiProvider({
+    apiKey: "fallback-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      fallbackAttempts += 1;
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    directFallback: fallback,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      if (ids[0] === "c26") {
+        primaryAttempts += 1;
+        throw new Error("The operation was aborted due to timeout");
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 2,
+  });
+
+  assert.equal(result.value.length, 50);
+  // 1 initial attempt + 2 retries against Surplus (all failing), then
+  // exactly one call to the direct fallback, which succeeds.
+  assert.equal(primaryAttempts, 3);
+  assert.equal(fallbackAttempts, 1);
+});
+
+test("if the directFallback provider also fails, its error surfaces -- not the original Surplus error", async () => {
+  const fallback = new openai.OpenAiProvider({
+    apiKey: "fallback-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => {
+      throw new Error("direct OpenAI is also down");
+    },
+  });
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    directFallback: fallback,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      if (ids[0] === "c26") {
+        throw new Error("The operation was aborted due to timeout");
+      }
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 50 }, (_, index) => candidate(`c${index + 1}`));
+
+  await assert.rejects(
+    provider.triageConversations({
+      business,
+      candidates,
+      models: openai.DEFAULT_OPENAI_MODELS,
+      coverageRetries: 2,
+    }),
+    /direct OpenAI is also down/,
+  );
+});
+
+test("maxTokensField: useMaxCompletionTokens opts a provider into max_completion_tokens; the default keeps max_tokens unchanged", async () => {
+  let directBody;
+  let surplusBody;
+  const direct = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    useMaxCompletionTokens: true,
+    fetchImpl: async (_url, init) => {
+      directBody = JSON.parse(init.body);
+      return chatResponse({ triage: [triageItem("c1")] });
+    },
+  });
+  const surplus = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      surplusBody = JSON.parse(init.body);
+      return chatResponse({ triage: [triageItem("c1")] });
+    },
+  });
+
+  await direct.triageConversations({
+    business,
+    candidates: [candidate("c1")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+  await surplus.triageConversations({
+    business,
+    candidates: [candidate("c1")],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 0,
+  });
+
+  assert.ok("max_completion_tokens" in directBody, "useMaxCompletionTokens: true should send max_completion_tokens");
+  assert.ok(!("max_tokens" in directBody), "useMaxCompletionTokens: true should not send max_tokens");
+  assert.ok("max_tokens" in surplusBody, "default (useMaxCompletionTokens unset) should keep sending max_tokens");
+  assert.ok(!("max_completion_tokens" in surplusBody), "default (useMaxCompletionTokens unset) should not send max_completion_tokens");
+});

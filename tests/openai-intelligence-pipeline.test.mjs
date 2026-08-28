@@ -848,3 +848,71 @@ test("qualifyConversations: transport failures persisting through every retry st
   );
   assert.equal(attempts, 3);
 });
+
+test("qualifyConversations: when Surplus's own retries are exhausted, a configured directFallback provider is tried once before the whole call fails", async () => {
+  let primaryAttempts = 0;
+  let fallbackAttempts = 0;
+  const fallback = new openai.OpenAiProvider({
+    apiKey: "fallback-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    fetchImpl: async () => {
+      fallbackAttempts += 1;
+      return chatResponse({
+        qualifications: [{
+          externalId: "a",
+          leadStatus: "potential_customer",
+          demandSignals: ["pain"],
+          intelligenceTags: ["problem_signal"],
+          productFit: "high",
+          painSeverity: "high",
+          intent: "switching",
+          timing: "current",
+          evidenceQuality: "high",
+          replyability: "low",
+          communityRisk: "low",
+          problemSummary: "Current workflow is failing",
+          competitorMentioned: null,
+          whyItMatters: "The author is actively looking to replace their workflow.",
+          shouldReply: false,
+          autoReplyAllowed: false,
+          requiresHumanReview: true,
+          replyAngle: null,
+          mentionProduct: false,
+          disclosureRequired: false,
+        }],
+      });
+    },
+  });
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    maxRetries: 0,
+    directFallback: fallback,
+    fetchImpl: async () => {
+      primaryAttempts += 1;
+      throw new Error("The operation was aborted due to timeout");
+    },
+  });
+  const base = candidate("a");
+  const matched = {
+    externalId: base.externalId,
+    kind: base.kind,
+    author: base.author,
+    body: base.body,
+    createdAt: base.createdAt,
+  };
+  const result = await provider.qualifyConversations({
+    business,
+    conversations: [{
+      ...base,
+      structuredContext: { originalPost: matched, matched, parentChain: [], replies: [], surroundingComments: [] },
+    }],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    coverageRetries: 2,
+  });
+
+  assert.equal(result.value.length, 1);
+  assert.equal(primaryAttempts, 3, "expected exactly 3 exhausted attempts against Surplus");
+  assert.equal(fallbackAttempts, 1, "expected exactly one call to the direct fallback");
+});

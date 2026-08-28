@@ -94,6 +94,32 @@ export interface OpenAiProviderOptions {
   onUsage?: (event: OpenAiUsageEvent) => void | Promise<void>;
   /** Sanitized provider-boundary metadata only; never includes prompts or model text. */
   onDiagnostic?: (event: OpenAiProviderDiagnosticEvent) => void | Promise<void>;
+  /**
+   * A fully separate OpenAiProvider instance (typically pointed at real
+   * OpenAI directly) to call as a last resort when this provider's own
+   * network-transport retries (see isNetworkTransportError) are exhausted
+   * for a triage/qualification batch. Left unset, behavior is identical to
+   * before this option existed. See createOpenAiProviderFromEnv's
+   * OPENAI_DIRECT_FALLBACK_* env vars for how this gets wired up in
+   * production.
+   */
+  directFallback?: OpenAiProvider;
+  /**
+   * Real OpenAI's Chat Completions API rejects `max_tokens` for the
+   * gpt-5.6-sol/gpt-5.6-luna model family this app uses, requiring
+   * `max_completion_tokens` instead (confirmed via a direct-OpenAI test
+   * call, 2026-08-28: HTTP 400 "Unsupported parameter: 'max_tokens'").
+   * Surplus Intelligence's gateway accepts the legacy `max_tokens` name
+   * fine for the same models. This is an explicit opt-in (default false)
+   * rather than inferred from baseUrl's hostname on purpose: many existing
+   * callers/tests construct a provider without setting baseUrl at all
+   * (falling back to this class's own "https://api.openai.com/v1"
+   * default) while still meaning to exercise ordinary max_tokens
+   * behavior, so hostname-sniffing silently changed their request shape.
+   * Only createOpenAiProviderFromEnv's directOpenAiFallbackFromEnv sets
+   * this, for the one instance that genuinely talks to real OpenAI.
+   */
+  useMaxCompletionTokens?: boolean;
 }
 
 interface ResponsesApiPayload {
@@ -1221,6 +1247,8 @@ export class OpenAiProvider implements AiProvider {
   private readonly pricing: ModelPriceCatalog;
   private readonly onUsage?: OpenAiProviderOptions["onUsage"];
   private readonly onDiagnostic?: OpenAiProviderOptions["onDiagnostic"];
+  private readonly directFallback: OpenAiProvider | null;
+  private readonly useMaxCompletionTokens: boolean;
 
   constructor(options: OpenAiProviderOptions) {
     if (!options.apiKey.trim()) throw new Error("OPENAI_API_KEY is required for the live OpenAI provider.");
@@ -1238,6 +1266,12 @@ export class OpenAiProvider implements AiProvider {
     this.pricing = options.pricing ?? {};
     this.onUsage = options.onUsage;
     this.onDiagnostic = options.onDiagnostic;
+    this.directFallback = options.directFallback ?? null;
+    this.useMaxCompletionTokens = options.useMaxCompletionTokens ?? false;
+  }
+
+  private get maxTokensField(): "max_tokens" | "max_completion_tokens" {
+    return this.useMaxCompletionTokens ? "max_completion_tokens" : "max_tokens";
   }
 
   private headers(): HeadersInit {
@@ -1388,7 +1422,7 @@ export class OpenAiProvider implements AiProvider {
               },
               { role: "user", content: options.user },
             ],
-            max_tokens: maxTokens,
+            [this.maxTokensField]: maxTokens,
           }, options.operation);
           activeModel = result.model ?? activeModel;
           const payload = objectValue(result.payload, "Chat Completions API payload") as ChatCompletionsPayload;
@@ -1713,7 +1747,22 @@ export class OpenAiProvider implements AiProvider {
               await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
               continue;
             }
-            throw error;
+            if (!isNetworkTransportError(error) || !this.directFallback) {
+              throw error;
+            }
+            // Surplus's own retry budget for this batch is exhausted.
+            // Surplus's buyer-side "Final Fallback" provider (configured in
+            // their own dashboard) cannot be relied on here: production
+            // evidence (2026-08-27/28) shows it only engages once Surplus's
+            // server has internally decided every marketplace seller
+            // failed, which can take longer than this provider's own
+            // client-side timeout allows -- the request aborts before
+            // Surplus's fallback logic ever runs. This bypasses Surplus's
+            // marketplace routing entirely for this one batch and calls a
+            // directly-configured OpenAI key instead, one last time, before
+            // truly giving up. If this also fails, that error (not the
+            // original) is what surfaces.
+            result = await this.directFallback.triageAttempt(request, pending);
           }
           attempts.push(result);
           for (const item of result.value) {
@@ -1878,7 +1927,15 @@ export class OpenAiProvider implements AiProvider {
           await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
           continue;
         }
-        throw error;
+        if (!isNetworkTransportError(error) || !this.directFallback) {
+          throw error;
+        }
+        // See triageConversations' processBatch for the full reasoning:
+        // Surplus's own retry budget is exhausted and its buyer-side
+        // fallback provider cannot be relied on to engage before this
+        // provider's own client-side timeout aborts the request, so call a
+        // directly-configured OpenAI key once as a last resort.
+        result = await this.directFallback.qualifyAttempt(request, pending);
       }
       attempts.push(result);
       for (const item of result.value) {
@@ -2134,6 +2191,34 @@ export class OpenAiProvider implements AiProvider {
   }
 }
 
+/**
+ * Builds a directFallback provider from OPENAI_DIRECT_FALLBACK_API_KEY, if
+ * set. Deliberately opt-in (unset by default): this calls real OpenAI
+ * directly, bypassing Surplus Intelligence's marketplace entirely, so it
+ * should only be configured once a real OpenAI key has been funded and
+ * provisioned for exactly this purpose. apiStyle is forced to "chat" (not
+ * the "responses" API real OpenAI would otherwise default to) so it reuses
+ * the exact same request/response handling as the primary provider -- see
+ * maxTokensField for the one real difference (real OpenAI needs
+ * max_completion_tokens, not max_tokens, for this app's models).
+ */
+function directOpenAiFallbackFromEnv(env: NodeJS.ProcessEnv): OpenAiProvider | undefined {
+  const apiKey = env.OPENAI_DIRECT_FALLBACK_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  return new OpenAiProvider({
+    apiKey,
+    baseUrl: env.OPENAI_DIRECT_FALLBACK_BASE_URL?.trim() || "https://api.openai.com/v1",
+    apiStyle: "chat",
+    useMaxCompletionTokens: true,
+    // Reuses the primary provider's pricing catalog: real OpenAI's actual
+    // retail price differs from Surplus's discounted rate, so cost
+    // estimates recorded for these rare fallback calls will be
+    // approximate, not exact -- acceptable for an emergency-path safety
+    // net that should rarely fire.
+    pricing: openAiPricingFromEnv(env),
+  });
+}
+
 export function createOpenAiProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   options: Omit<OpenAiProviderOptions, "apiKey" | "baseUrl" | "organization" | "project" | "pricing"> = {},
@@ -2156,5 +2241,6 @@ export function createOpenAiProviderFromEnv(
     maxRetries: options.maxRetries ?? optionalFiniteNumber(env.OPENAI_MAX_RETRIES),
     modelFallbacks: options.modelFallbacks ?? openAiModelFallbacksFromEnv(env),
     pricing: openAiPricingFromEnv(env),
+    directFallback: options.directFallback ?? directOpenAiFallbackFromEnv(env),
   });
 }

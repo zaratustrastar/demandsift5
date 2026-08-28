@@ -285,3 +285,4 @@ jobs:
 # trigger: query planning now matches review screen exactly (2026-08-27T16:12:09Z)
 # trigger: retry triage/qualification on transient network failures (2026-08-27T18:40:08Z)
 # trigger: direct-OpenAI fallback for triage/qualification (2026-08-28T14:49:17Z)
+# trigger: real deploy after fixing vps.env source-of-truth split (2026-08-28T15:54:36Z)

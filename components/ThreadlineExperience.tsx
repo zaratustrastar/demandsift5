@@ -330,6 +330,8 @@ function LandingBrand() {
   );
 }
 
+type LandingAccount = { id: string; email: string; name: string | null };
+
 function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => void }) {
   // Website and "describe your market / idea" are two equal ways in, not a
   // primary path and a fallback -- see the two-tab requirement this
@@ -339,6 +341,45 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
   const [contextText, setContextText] = useState("");
   const [error, setError] = useState("");
   const [openFaq, setOpenFaq] = useState(0);
+  // undefined = still checking; null = signed out; object = signed in.
+  // See /api/auth/session and the google-oauth.ts sign-in flow it reads.
+  const [account, setAccount] = useState<LandingAccount | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/auth/session", { cache: "no-store" });
+        const payload = (await response.json()) as { user: LandingAccount | null };
+        if (!cancelled) setAccount(payload.user);
+      } catch {
+        if (!cancelled) setAccount(null);
+      }
+    })();
+    // The Google sign-in callback redirects back here with ?account=... --
+    // strip it once read rather than leaving it in the address bar. The
+    // fetch above (not this param) is the source of truth for account
+    // state; this is purely cosmetic URL cleanup.
+    if (typeof window !== "undefined" && window.location.search.includes("account=")) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("account");
+      window.history.replaceState(null, "", url.toString());
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function signOut() {
+    setAccount(null);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Best-effort -- the client already reflects signed-out state either
+      // way, and the session cookie is HttpOnly so there's nothing else to
+      // clean up here even if the request failed.
+    }
+  }
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -387,7 +428,21 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
             </div>
           </div>
           <div className={styles.slNavRight}>
-            <a href="#website-url" className={styles.slNavLogin}>Log in</a>
+            {account ? (
+              <div className={styles.slNavAccount}>
+                <span className={styles.slNavAccountAvatar} aria-hidden="true">
+                  {(account.name?.trim()?.[0] ?? account.email[0] ?? "?").toUpperCase()}
+                </span>
+                <span className={styles.slNavAccountLabel}>{account.name?.trim() || account.email}</span>
+                <button type="button" className={styles.slNavSignOut} onClick={signOut}>
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <a href="/api/auth/google/start" className={styles.slNavLogin}>
+                Log in
+              </a>
+            )}
             <a href="#website-url" className={styles.slNavCta}>Run a free scan</a>
           </div>
         </div>

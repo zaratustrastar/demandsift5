@@ -116,6 +116,11 @@
 .slNavRight { display: flex; align-items: center; gap: 18px; }
 .slNavLogin { font-size: 14px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
 .slNavLogin:hover { color: var(--sl-ink); }
+.slNavAccount { display: inline-flex; align-items: center; gap: 8px; }
+.slNavAccountAvatar { width: 24px; height: 24px; border-radius: 24px; background: var(--sl-primary-tint); color: var(--sl-primary-hover); font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.slNavAccountLabel { font-size: 13.5px; color: var(--sl-text-muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slNavSignOut { border: 0; background: transparent; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--sl-text-faint); padding: 0; }
+.slNavSignOut:hover { color: var(--sl-warm-text); }
 .slNavCta { font-size: 14px; font-weight: 600; color: #fafafa; background: var(--sl-ink); padding: 9px 17px; border-radius: 7px; text-decoration: none; }
 .slNavCta:hover { background: #27272a; }
 

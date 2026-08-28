@@ -2,6 +2,8 @@ import { and, desc, eq, sql } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import {
+  authAccounts,
+  authSessions,
   backgroundJobs,
   runtimeCheckouts,
   runtimeConversions,
@@ -14,6 +16,7 @@ import {
   runtimeScans,
   runtimeWorkspaces,
   stripeEvents,
+  users,
 } from "@/db/postgres/schema";
 import type {
   BackgroundJobRecord,
@@ -26,7 +29,7 @@ import type {
   ReplyRecord,
   ScanRecord,
 } from "./contracts";
-import { createId } from "./ids";
+import { createId, createToken } from "./ids";
 import { isProductionRuntime } from "./runtime-env";
 import { getStore } from "./store";
 
@@ -51,11 +54,45 @@ export type RedditPublicationClaim = {
   record: RedditPublicationRecord;
 };
 
+/** Input to findOrCreateUserByGoogleAccount -- see google-oauth.ts's
+ * fetchGoogleProfile, which is the only caller. */
+export type GoogleAccountProfile = {
+  subject: string;
+  email: string;
+  name: string | null;
+  emailVerified: boolean;
+};
+
+export type AuthSessionActor = { userId: string };
+
+export type UserProfile = { id: string; email: string; name: string | null };
+
 export interface StateRepository {
   readonly kind: "memory" | "postgres";
   saveWorkspace(record: WorkspaceSessionRecord): Promise<void>;
   verifyWorkspaceToken(workspaceId: string, token: string): Promise<boolean>;
   workspaceExists(workspaceId: string): Promise<boolean>;
+  /**
+   * Links a workspace to a signed-in user (Google sign-in claiming the
+   * anonymous workspace their scan already lives in) and extends its
+   * expiry well past the 30-day anonymous window -- see requireWorkspace
+   * in http.ts, which resolves a session back to this workspace.
+   */
+  claimWorkspaceForUser(workspaceId: string, userId: string): Promise<void>;
+  /** Most-recently-updated workspace claimed by this user, if any. One
+   * primary workspace per account for now -- see the 0010 migration's
+   * comment on why this stays simple rather than reviving the older
+   * multi-workspace `workspace_members` model. */
+  getPrimaryWorkspaceIdForUser(userId: string): Promise<string | null>;
+  /** Upserts the user + auth_accounts link for a Google identity. Matches
+   * an existing auth_accounts row first (returning user), then falls back
+   * to matching by email (so a user who somehow already exists by that
+   * email gets linked rather than duplicated), then creates both rows. */
+  findOrCreateUserByGoogleAccount(profile: GoogleAccountProfile): Promise<{ id: string }>;
+  createAuthSession(userId: string): Promise<{ token: string; expiresAt: string }>;
+  verifyAuthSession(token: string): Promise<AuthSessionActor | null>;
+  revokeAuthSession(token: string): Promise<void>;
+  getUserProfile(userId: string): Promise<UserProfile | null>;
   saveScan(record: ScanRecord): Promise<void>;
   getScan(scanId: string): Promise<ScanRecord | null>;
   getLatestScan(workspaceId: string): Promise<ScanRecord | null>;
@@ -175,6 +212,86 @@ class MemoryStateRepository implements StateRepository {
 
   async workspaceExists(workspaceId: string) {
     return getStore().workspaces.has(workspaceId);
+  }
+
+  async claimWorkspaceForUser(workspaceId: string, userId: string) {
+    const workspace = getStore().workspaces.get(workspaceId);
+    if (!workspace) return;
+    getStore().workspaces.set(workspaceId, {
+      ...workspace,
+      userId,
+      // A claimed workspace outlives the 30-day anonymous window -- the
+      // signed-in session is the durable credential from here (see
+      // http.ts's requireWorkspace); this just stops the raw rd_workspace
+      // cookie from independently expiring underneath it.
+      expiresAt: new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1_000).toISOString(),
+    });
+  }
+
+  async getPrimaryWorkspaceIdForUser(userId: string) {
+    let best: { id: string; createdAt: string } | null = null;
+    for (const workspace of getStore().workspaces.values()) {
+      if (workspace.userId !== userId) continue;
+      if (!best || workspace.createdAt > best.createdAt) {
+        best = { id: workspace.id, createdAt: workspace.createdAt };
+      }
+    }
+    return best?.id ?? null;
+  }
+
+  async findOrCreateUserByGoogleAccount(profile: GoogleAccountProfile) {
+    const store = getStore();
+    const accountKey = `google:${profile.subject}`;
+    const existingUserId = store.authAccountsByProviderSubject.get(accountKey);
+    if (existingUserId) return { id: existingUserId };
+
+    const existingByEmail = [...store.users.values()].find((user) => user.email === profile.email);
+    const now = new Date().toISOString();
+    const user = existingByEmail ?? {
+      id: crypto.randomUUID(),
+      email: profile.email,
+      name: profile.name,
+      emailVerifiedAt: profile.emailVerified ? now : null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.users.set(user.id, user);
+    store.authAccountsByProviderSubject.set(accountKey, user.id);
+    return { id: user.id };
+  }
+
+  async createAuthSession(userId: string) {
+    const token = createToken();
+    const tokenHash = await sha256(token);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1_000);
+    getStore().authSessions.set(tokenHash, {
+      id: crypto.randomUUID(),
+      userId,
+      tokenHash,
+      expiresAt: expiresAt.toISOString(),
+      lastSeenAt: now.toISOString(),
+      createdAt: now.toISOString(),
+    });
+    return { token, expiresAt: expiresAt.toISOString() };
+  }
+
+  async verifyAuthSession(token: string) {
+    const tokenHash = await sha256(token);
+    const session = getStore().authSessions.get(tokenHash);
+    if (!session || Date.parse(session.expiresAt) <= Date.now()) return null;
+    session.lastSeenAt = new Date().toISOString();
+    return { userId: session.userId };
+  }
+
+  async revokeAuthSession(token: string) {
+    const tokenHash = await sha256(token);
+    getStore().authSessions.delete(tokenHash);
+  }
+
+  async getUserProfile(userId: string) {
+    const user = getStore().users.get(userId);
+    return user ? { id: user.id, email: user.email, name: user.name } : null;
   }
 
   async saveScan(record: ScanRecord) {
@@ -527,6 +644,107 @@ class PostgresStateRepository implements StateRepository {
       .where(eq(runtimeWorkspaces.id, workspaceId))
       .limit(1);
     return Boolean(row);
+  }
+
+  async claimWorkspaceForUser(workspaceId: string, userId: string) {
+    await getDb()
+      .update(runtimeWorkspaces)
+      .set({
+        userId,
+        // See the memory implementation's matching comment: claimed
+        // workspaces outlive the 30-day anonymous window.
+        expiresAt: new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1_000),
+        updatedAt: new Date(),
+      })
+      .where(eq(runtimeWorkspaces.id, workspaceId));
+  }
+
+  async getPrimaryWorkspaceIdForUser(userId: string) {
+    const [row] = await getDb()
+      .select({ id: runtimeWorkspaces.id })
+      .from(runtimeWorkspaces)
+      .where(eq(runtimeWorkspaces.userId, userId))
+      .orderBy(desc(runtimeWorkspaces.updatedAt))
+      .limit(1);
+    return row?.id ?? null;
+  }
+
+  async findOrCreateUserByGoogleAccount(profile: GoogleAccountProfile) {
+    const db = getDb();
+    const [existingAccount] = await db
+      .select({ userId: authAccounts.userId })
+      .from(authAccounts)
+      .where(and(eq(authAccounts.provider, "google"), eq(authAccounts.providerSubject, profile.subject)))
+      .limit(1);
+    if (existingAccount) return { id: existingAccount.userId };
+
+    // Not linked yet -- match by email first so a user who already exists
+    // under some other provider gets this Google account attached instead
+    // of a duplicate user row being created (users.email is unique).
+    const [existingUser] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, profile.email))
+      .limit(1);
+
+    let userId: string;
+    if (existingUser) {
+      userId = existingUser.id;
+    } else {
+      const [created] = await db
+        .insert(users)
+        .values({
+          email: profile.email,
+          name: profile.name,
+          emailVerifiedAt: profile.emailVerified ? new Date() : null,
+        })
+        .returning({ id: users.id });
+      userId = created.id;
+    }
+
+    await db
+      .insert(authAccounts)
+      .values({ userId, provider: "google", providerSubject: profile.subject })
+      .onConflictDoNothing({ target: [authAccounts.provider, authAccounts.providerSubject] });
+
+    return { id: userId };
+  }
+
+  async createAuthSession(userId: string) {
+    const token = createToken();
+    const tokenHash = await sha256(token);
+    const expiresAt = new Date(Date.now() + 180 * 24 * 60 * 60 * 1_000);
+    await getDb().insert(authSessions).values({ userId, tokenHash, expiresAt });
+    return { token, expiresAt: expiresAt.toISOString() };
+  }
+
+  async verifyAuthSession(token: string) {
+    const tokenHash = await sha256(token);
+    const [row] = await getDb()
+      .select({ userId: authSessions.userId, expiresAt: authSessions.expiresAt })
+      .from(authSessions)
+      .where(eq(authSessions.tokenHash, tokenHash))
+      .limit(1);
+    if (!row || row.expiresAt.getTime() <= Date.now()) return null;
+    await getDb()
+      .update(authSessions)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(authSessions.tokenHash, tokenHash));
+    return { userId: row.userId };
+  }
+
+  async revokeAuthSession(token: string) {
+    const tokenHash = await sha256(token);
+    await getDb().delete(authSessions).where(eq(authSessions.tokenHash, tokenHash));
+  }
+
+  async getUserProfile(userId: string) {
+    const [row] = await getDb()
+      .select({ id: users.id, email: users.email, name: users.name })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return row ?? null;
   }
 
   async saveScan(record: ScanRecord) {

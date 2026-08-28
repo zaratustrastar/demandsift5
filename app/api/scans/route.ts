@@ -18,11 +18,13 @@ type CreateScanBody = {
 const MIN_CONTEXT_TEXT_LENGTH = 20;
 const MAX_CONTEXT_TEXT_LENGTH = 4_000;
 
-function responseWithWorkspace(payload: unknown, status: number, cookie: string): Response {
-  return Response.json(payload, {
-    status,
-    headers: { "Set-Cookie": cookie, "Cache-Control": "no-store" },
-  });
+function responseWithWorkspace(payload: unknown, status: number, cookie: string | undefined): Response {
+  // cookie is undefined for a session-resolved actor (see http.ts's
+  // workspaceCookie) -- rd_session is already the durable credential in
+  // that case, so there's nothing to refresh here.
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  if (cookie) headers.set("Set-Cookie", cookie);
+  return Response.json(payload, { status, headers });
 }
 
 export async function POST(request: Request) {

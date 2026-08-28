@@ -430,9 +430,20 @@ export const runtimeWorkspaces = pgTable("runtime_workspaces", {
   id: varchar("id", { length: 96 }).primaryKey(),
   tokenHash: varchar("token_hash", { length: 64 }).notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  /**
+   * Set once a signed-in user claims this workspace (see
+   * lib/server/google-oauth.ts's callback handler). Nullable: most
+   * workspaces are still anonymous, pre-signup. Deliberately points at
+   * `users` (see 0001) rather than the older `workspaces`/`workspace_members`
+   * tables -- see 0010's migration comment for why.
+   */
+  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt,
   updatedAt,
-}, (table) => [index("runtime_workspaces_expires_idx").on(table.expiresAt)]);
+}, (table) => [
+  index("runtime_workspaces_expires_idx").on(table.expiresAt),
+  index("runtime_workspaces_user_idx").on(table.userId),
+]);
 
 export const runtimeScans = pgTable("runtime_scans", {
   id: varchar("id", { length: 96 }).primaryKey(),

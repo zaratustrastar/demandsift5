@@ -289,3 +289,4 @@ jobs:
 # trigger: deploy Scooptr landing page redesign (2026-08-28T20:32:30Z)
 # trigger: deploy Google account sign-in (2026-08-28T21:00:19Z)
 # trigger: reload vps.env for Google OAuth credentials (2026-08-30T12:31:10Z)
+# trigger: deploy Scooptr app shell (sidebar + Overview + Opportunities) (2026-08-30T13:55:54Z)

@@ -2035,6 +2035,22 @@ export function ProductDashboard({
                     <span className={styles.simpleCardMeta}>{insight.recommendedAction}</span>
                   </div>
                 ))}
+              {isFree && onCheckout && data.lockedCounts.insights > 0 && (
+                <div className={styles.simpleEmpty}>
+                  <div className={styles.emptyIcon} />
+                  <strong>
+                    {data.lockedCounts.insights} more insight{data.lockedCounts.insights === 1 ? "" : "s"} stored
+                  </strong>
+                  <p>
+                    Patterns need volume. After daily monitoring runs for a while, this is where the
+                    recurring problems and requests show up &mdash; with the conversations that prove them.
+                  </p>
+                  <button type="button" className={styles.blueCta} onClick={() => onCheckout("core")}>
+                    Turn on monitoring
+                  </button>
+                  <span className={styles.emptyFoot}>needs about a week of data</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -2053,10 +2069,11 @@ export function ProductDashboard({
             <div className={styles.lightSection}>
               {data.competitorWeaknesses.length === 0 ? (
                 <div className={styles.simpleEmpty}>
+                  <div className={styles.emptyIcon} />
                   <strong>No competitor signals yet</strong>
                   <p>
-                    Name the tools you lose deals to and we&apos;ll surface it the moment someone
-                    complains about them or asks for an alternative.
+                    We didn&apos;t find any complaints about named competitors in this scan. Once
+                    monitoring is on, we&apos;ll surface it the moment someone asks for an alternative.
                   </p>
                 </div>
               ) : (
@@ -2070,6 +2087,23 @@ export function ProductDashboard({
                     <span className={styles.simpleCardMeta}>{weakness.recommendedAction}</span>
                   </div>
                 ))
+              )}
+              {isFree && onCheckout && data.lockedCounts.competitorSignals > 0 && (
+                <div className={styles.simpleEmpty}>
+                  <div className={styles.emptyIcon} />
+                  <strong>
+                    {data.lockedCounts.competitorSignals} more competitor signal
+                    {data.lockedCounts.competitorSignals === 1 ? "" : "s"} stored
+                  </strong>
+                  <p>
+                    Found and stored from this scan. Turn on monitoring to keep watching for new ones
+                    every day instead of just this one snapshot.
+                  </p>
+                  <button type="button" className={styles.blueCta} onClick={() => onCheckout("core")}>
+                    Turn on monitoring
+                  </button>
+                  <span className={styles.emptyFoot}>from this scan</span>
+                </div>
               )}
             </div>
           )}

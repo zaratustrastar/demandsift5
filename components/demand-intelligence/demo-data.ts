@@ -371,7 +371,7 @@ const opportunities: RedditOpportunity[] = [
 const lockedCounts = countLockedResults(lockedResults);
 
 const baseNavigation: NavigationSection[] = [
-  { id: "dashboard", label: "Dashboard" },
+  { id: "dashboard", label: "Overview" },
   {
     id: "opportunities",
     label: "Opportunities",
@@ -389,8 +389,8 @@ const baseNavigation: NavigationSection[] = [
   },
   {
     id: "visibility",
-    label: "Search & AI Visibility",
-    shortLabel: "Search & AI",
+    label: "AI Visibility",
+    shortLabel: "AI Visibility",
     badge: 2 + lockedCounts.visibilityOpportunities,
   },
   {

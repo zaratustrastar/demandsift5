@@ -1,25 +1,28 @@
-.productShell {
-  --ink: #14201c;
-  --muted: #66716c;
-  --faint: #8a938e;
-  --line: #e5e9e6;
-  --line-strong: #d6ddd8;
+.productShell,
+.appShell {
+  --ink: #0d0d0f;
+  --muted: #52525b;
+  --faint: #71717a;
+  --line: #e4e4e7;
+  --line-strong: #d4d4d8;
   --surface: #ffffff;
-  --canvas: #f5f7f5;
-  --green: #1f6d4c;
-  --green-dark: #15543a;
-  --green-soft: #e8f5ee;
-  --violet: #6d5ae6;
-  --violet-soft: #f0edff;
-  --amber: #a66814;
-  --amber-soft: #fff4dc;
+  --canvas: #fafafa;
+  --green: #2563eb;
+  --green-dark: #1d4ed8;
+  --green-soft: #e3ebfd;
+  --violet: #2563eb;
+  --violet-soft: #f5f8ff;
+  --amber: #b4360f;
+  --amber-soft: #fdeae4;
+  --warm: #ef4a1e;
+  --font-ui: "Instrument Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   color: var(--ink);
   background: var(--canvas);
-  font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.5;
   letter-spacing: -0.006em;
@@ -52,7 +55,7 @@
   align-items: center;
   gap: 12px;
   padding: 14px 34px;
-  background: #10251d;
+  background: #0d0d0f;
   color: #ffffff;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -96,7 +99,7 @@
   display: flex;
   flex-direction: column;
   padding: 24px 16px 18px;
-  background: #10251d;
+  background: #0d0d0f;
   color: rgba(255, 255, 255, 0.72);
   overflow-y: auto;
 }
@@ -115,7 +118,7 @@
   display: grid;
   place-items: center;
   color: #163b2b;
-  background: #c8f36b;
+  background: #2563eb;
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
@@ -240,7 +243,7 @@
 
 .navigation .navActive small {
   color: #153a2a;
-  background: #c8f36b;
+  background: #2563eb;
 }
 
 .sidebarFooter {
@@ -252,8 +255,8 @@
 .accessBadge {
   display: inline-flex;
   padding: 3px 8px;
-  color: #173d2d;
-  background: #c8f36b;
+  color: #ffffff;
+  background: #2563eb;
   border-radius: 999px;
   font-size: 9px;
   font-weight: 800;
@@ -1361,7 +1364,7 @@
 
 .evidenceGrid blockquote p {
   margin: 0 0 6px;
-  color: #4f5d56;
+  color: #3f3f46;
   font-family: Georgia, "Times New Roman", serif;
   font-size: 11px;
   line-height: 1.5;
@@ -1883,8 +1886,8 @@
   top: -10px;
   right: 16px;
   padding: 4px 8px;
-  color: #173d2d;
-  background: #c8f36b;
+  color: #ffffff;
+  background: #2563eb;
   border-radius: 999px;
   font-size: 8px;
   font-weight: 850;
@@ -2204,7 +2207,7 @@
 
 .fitReasonGrid p {
   margin: 0;
-  color: #4f5d56;
+  color: #3f3f46;
   font-size: 10px;
   line-height: 1.55;
 }
@@ -2604,7 +2607,7 @@
 
 .themeCount {
   font-size: 12px;
-  color: var(--muted, #66716a);
+  color: var(--muted, #52525b);
   white-space: nowrap;
 }
 
@@ -2639,4 +2642,578 @@
 }
 
 .themeEvidence a { color: var(--ink, #18231d); }
-.themeEvidence em { font-style: normal; color: var(--muted, #66716a); white-space: nowrap; }
+.themeEvidence em { font-style: normal; color: var(--muted, #52525b); white-space: nowrap; }
+
+/* ============================================================
+   Scooptr app shell -- persistent scSidebar + header, added on top
+   of the existing single-page report without touching its data
+   flow. Overview and Opportunities get a full layout below;
+   Insights/Competitors/Visibility/Replies/Results/Billing reuse
+   .card and the retinted tokens above for a lighter pass.
+   ============================================================ */
+
+.appShell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-ui);
+}
+
+.appShell *,
+.appShell *::before,
+.appShell *::after {
+  box-sizing: border-box;
+}
+
+.appShell button {
+  font: inherit;
+}
+
+.scSidebar {
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 12px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.scSidebarLogo {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 6px;
+}
+
+.scSidebarLogoMark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--green);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.scSidebarLogoText {
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.028em;
+}
+
+.scSidebarBusiness {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--line);
+  background: #fcfcfd;
+  border-radius: 9px;
+  padding: 9px 11px;
+  min-width: 0;
+}
+
+.scSidebarBusinessAvatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: var(--ink);
+  color: #fafafa;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  flex-shrink: 0;
+}
+
+.scSidebarBusinessLabel {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scSidebarNav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.scSidebarNavItem {
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: background 0.12s ease;
+}
+
+.scSidebarNavItem:hover {
+  background: #f4f4f5;
+}
+
+.scSidebarNavItemActive {
+  background: #f4f4f5;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.scSidebarNavBadge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--faint);
+  background: #f4f4f5;
+  border-radius: 4px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
+.scSidebarDivider {
+  height: 1px;
+  background: #f0f0f2;
+}
+
+.scSidebarSpacer {
+  margin-top: auto;
+}
+
+.scSidebarFooter {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-top: 1px solid #f0f0f2;
+  padding-top: 12px;
+}
+
+.scSidebarFooterAvatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 26px;
+  background: var(--ink);
+  color: #fafafa;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.scSidebarFooterText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.scSidebarFooterName {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scSidebarFooterPlan {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.appMain {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.appHeader {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  padding: 22px 34px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.appHeaderTitleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.appHeaderTitle {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.028em;
+}
+
+.appHeaderSub {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.appHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+}
+
+.planPill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: #f4f4f5;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+.darkCta {
+  cursor: pointer;
+  border: 0;
+  background: var(--ink);
+  color: #fafafa;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 10px 16px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.darkCta:hover {
+  background: #27272a;
+}
+
+.blueCta {
+  cursor: pointer;
+  border: 0;
+  background: var(--green);
+  color: #ffffff;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 10px 16px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.blueCta:hover {
+  background: var(--green-dark);
+}
+
+.appContent {
+  padding: 30px 34px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: min(1220px, 100%);
+}
+
+/* Overview */
+
+.overviewGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.metricsRow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.scMetricCard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.scMetricLabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.scMetricValue {
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+
+.scMetricNote {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.overviewColumns {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 14px;
+  align-items: start;
+}
+
+.overviewMain {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.overviewSide {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.todayCard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  overflow: hidden;
+}
+
+.todayCardHead {
+  padding: 16px 20px;
+  border-bottom: 1px solid #f0f0f2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.todayCardHeadText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.todayCardHeadText strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.todayCardHeadText span {
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.ghostButton {
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #3f3f46;
+  padding: 7px 12px;
+  border-radius: 7px;
+  white-space: nowrap;
+}
+
+.ghostButton:hover {
+  background: #f7f7f8;
+}
+
+.todayItem {
+  padding: 16px 20px;
+  border-bottom: 1px solid #f5f5f6;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.todayItem:last-child {
+  border-bottom: none;
+}
+
+.todayItemBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.todayItemMeta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.todayItemMeta > span:first-child {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.todayTag {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: 4px;
+}
+
+.todayTitle {
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.todayWhy {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.todayEmpty {
+  padding: 30px 20px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.sideCard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.sideCard > strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Opportunities screen */
+
+.opportunitiesScreen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Light-pass wrapper for the remaining tabs: same tokens, simple layout */
+
+.lightSection {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.simpleCard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.simpleCardEyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.simpleCardTitle {
+  font-size: 15.5px;
+  font-weight: 600;
+}
+
+.simpleCardBody {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.simpleCardMeta {
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.simpleEmpty {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 56px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.simpleEmpty strong {
+  font-size: 16.5px;
+  font-weight: 600;
+}
+
+.simpleEmpty p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 440px;
+}
+
+@media (max-width: 900px) {
+  .appShell {
+    grid-template-columns: 1fr;
+  }
+
+  .scSidebar {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .metricsRow {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .overviewColumns {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1557,7 +1557,10 @@ export function ProductDashboard({
   data: fixtureData = redditDemandDemoData,
   scanResult,
   analyzedDomain,
+  initialSection,
+  accessLevel = "free",
   onNewScan,
+  onCheckout,
   onRegenerateReply,
   onPublishOpportunity,
   redditConnection = {
@@ -1578,6 +1581,9 @@ export function ProductDashboard({
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
+  const [activeSection, setActiveSection] = useState<NavigationSectionId>(
+    initialSection ?? "dashboard",
+  );
   const relevantConversations = useMemo(() => data.relevantConversations ?? [], [data.relevantConversations]);
   const normalizedAnalyzedDomain = analyzedDomain
     ?.replace(/^https?:\/\//, "")
@@ -1735,106 +1741,403 @@ export function ProductDashboard({
 
   const hasAnyRelevantContent = carouselItems.length > 0;
 
+  const navSections = data.navigation ?? [];
+  const activeNavItem = navSections.find((item) => item.id === activeSection);
+  const sectionSubtitles: Record<NavigationSectionId, string> = {
+    dashboard: "What changed since you were last here.",
+    opportunities: "One at a time, strongest match first.",
+    insights: "Patterns across everything we've read.",
+    competitors: "Reddit mentions of you and the tools you compete with.",
+    visibility: "Whether assistants name you, and what they read.",
+    replies: "Drafts, posted replies and what they did.",
+    results: "Everything this scan found, including what's stored but not shown.",
+    billing: "Your plan and how to change it.",
+  };
+  const goToSection = (id: NavigationSectionId) => () => setActiveSection(id);
+  const isFree = accessLevel === "free";
+
+  const topCarouselItems = carouselItems.slice(0, 3);
+
   return (
-    <div className={styles.productShell}>
-      <header className={styles.minimalHeader}>
-        <span className={styles.brandMark}>
-          <Icon name="logo" size={18} />
-        </span>
-        <strong>Threadline</strong>
-        <span className={styles.minimalHeaderSpacer} />
-        {onNewScan && (
-          <button className={styles.textButton} type="button" onClick={onNewScan}>
-            New scan
-          </button>
+    <>
+      {/* Design handoff (design_handoff_scooptr) specifies Instrument Sans
+       * and IBM Plex Mono; loaded here (rather than globally) so the rest
+       * of the product experience keeps its existing fonts -- same
+       * per-surface scoping used on the landing page. */}
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      <link
+        href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet"
+      />
+      <div className={styles.appShell}>
+      <aside className={styles.scSidebar}>
+        <div className={styles.scSidebarLogo}>
+          <span className={styles.scSidebarLogoMark}>
+            <Icon name="logo" size={14} />
+          </span>
+          <span className={styles.scSidebarLogoText}>Scooptr</span>
+        </div>
+
+        <div className={styles.scSidebarBusiness}>
+          <span className={styles.scSidebarBusinessAvatar}>
+            {data.business.hostname.slice(0, 2).toUpperCase()}
+          </span>
+          <span className={styles.scSidebarBusinessLabel}>{data.business.hostname}</span>
+        </div>
+
+        <nav className={styles.scSidebarNav}>
+          {navSections.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={goToSection(item.id)}
+              className={`${styles.scSidebarNavItem} ${
+                item.id === activeSection ? styles.scSidebarNavItemActive : ""
+              }`}
+            >
+              <span>{item.label}</span>
+              {item.badge && <span className={styles.scSidebarNavBadge}>{item.badge}</span>}
+            </button>
+          ))}
+        </nav>
+
+        {isFree && onCheckout && (
+          <div className={styles.scSidebarSpacer}>
+            <div className={styles.sideCard}>
+              <strong>Monitoring is off</strong>
+              <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                Your scan was a snapshot. New conversations appear every day &mdash; you&apos;re
+                not seeing them yet.
+              </p>
+              <button
+                type="button"
+                className={styles.blueCta}
+                onClick={() => onCheckout("core")}
+              >
+                Upgrade access
+              </button>
+            </div>
+          </div>
         )}
-      </header>
+      </aside>
 
-      <main className={`${styles.content} ${styles.singleReport}`}>
-        {(usesMockProvider || isFixtureFallbackForSubmittedDomain) && (
-          <MockProviderNotice
-            label={
-              usesMockProvider
-                ? "Some results use labeled demo/mock data"
-                : "Fallback demo fixture shown"
-            }
-            disclosure={fixtureDisclosure}
-          />
-        )}
+      <div className={styles.appMain}>
+        <header className={styles.appHeader}>
+          <div className={styles.appHeaderTitleGroup}>
+            <h1 className={styles.appHeaderTitle}>{activeNavItem?.label ?? "Overview"}</h1>
+            <p className={styles.appHeaderSub}>{sectionSubtitles[activeSection]}</p>
+          </div>
+          <div className={styles.appHeaderActions}>
+            {isFree && <span className={styles.planPill}>free scan</span>}
+            {onNewScan && (
+              <button className={styles.textButton} type="button" onClick={onNewScan}>
+                New scan
+              </button>
+            )}
+            {isFree && onCheckout && (
+              <button type="button" className={styles.darkCta} onClick={() => onCheckout("core")}>
+                Upgrade
+              </button>
+            )}
+          </div>
+        </header>
 
-        <BusinessProfilePanel profile={data.business} />
-
-        <RedditMonitoringPanel
-          key={monitoring
-            ? `${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
-            : "monitoring-unavailable"}
-          monitoring={monitoring}
-          onUpdate={onUpdateMonitoring}
-          runs={monitorRuns}
-          onViewRun={onViewMonitorRun}
-        />
-
-        <AiVisibilityPanel
-          key={aiVisibility ? `${aiVisibility.enabled}:${aiVisibility.nextRunAt}` : "ai-visibility-unavailable"}
-          status={aiVisibility}
-          onUpdate={onUpdateAiVisibility}
-          scans={visibilityScans}
-        />
-
-        <section className={styles.dashboardSection}>
-          {!hasAnyRelevantContent ? (
-            <section className={`${styles.card} ${styles.emptyResults}`}>
-              <h2>No relevant Reddit posts or comments were found in this scan.</h2>
-              <p>Nothing cleared qualification this run; nothing was substituted to fill the space.</p>
-            </section>
-          ) : (
-            carouselItems.length > 0 && (
-              <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
-                <div className={styles.sectionHeadingRow}>
-                  <div>
-                    <h2>Reddit posts found:</h2>
-                  </div>
-                  <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
-                </div>
-                <OpportunityCarousel
-                  items={carouselItems}
-                  drafts={drafts}
-                  editingReplyId={editingReplyId}
-                  copiedReplyId={copiedReplyId}
-                  publishedOpportunityIds={publishedOpportunityIds}
-                  onDraftChange={(opportunityId, value) =>
-                    setDrafts((current) => ({ ...current, [opportunityId]: value }))
-                  }
-                  onToggleEdit={(opportunityId) =>
-                    setEditingReplyId((current) => (current === opportunityId ? null : opportunityId))
-                  }
-                  onRegenerate={(opportunity) => void regenerateReply(opportunity)}
-                  onCopy={(opportunityId) => void copyReply(opportunityId)}
-                  onPublish={(opportunity) => void publishReply(opportunity)}
-                  redditConnection={redditConnection}
-                  onFunnelEvent={onFunnelEvent}
-                  createdReplies={createdReplies}
-                  creatingReplyId={creatingReplyId}
-                  onCreateReply={(conversation) => void createReply(conversation)}
-                />
-              </TrackedSection>
-            )
+        <div className={styles.appContent}>
+          {(usesMockProvider || isFixtureFallbackForSubmittedDomain) && (
+            <MockProviderNotice
+              label={
+                usesMockProvider
+                  ? "Some results use labeled demo/mock data"
+                  : "Fallback demo fixture shown"
+              }
+              disclosure={fixtureDisclosure}
+            />
           )}
-        </section>
 
-        <ThemeSection
-          kind="struggle"
-          eyebrow="Recurring pain"
-          heading="What customers are struggling with"
-          themes={data.conversationThemes}
-        />
-        <ThemeSection
-          kind="request"
-          eyebrow="Recurring requests"
-          heading="What they are asking for"
-          themes={data.conversationThemes}
-        />
-      </main>
-    </div>
+          {activeSection === "dashboard" && (
+            <div className={styles.overviewGrid}>
+              <div className={styles.metricsRow}>
+                <div className={styles.scMetricCard}>
+                  <span className={styles.scMetricLabel}>Opportunities found</span>
+                  <span className={styles.scMetricValue}>{data.metrics.qualifiedOpportunities}</span>
+                  <span className={styles.scMetricNote}>Qualified this scan</span>
+                </div>
+                <div className={styles.scMetricCard}>
+                  <span className={styles.scMetricLabel}>High intent</span>
+                  <span className={styles.scMetricValue}>{data.metrics.highIntentOpportunities}</span>
+                  <span className={styles.scMetricNote}>Worth replying to first</span>
+                </div>
+                <div className={styles.scMetricCard}>
+                  <span className={styles.scMetricLabel}>Replies ready</span>
+                  <span className={styles.scMetricValue}>{data.metrics.readyReplies}</span>
+                  <span className={styles.scMetricNote}>Drafted, {data.metrics.publishedReplies} posted</span>
+                </div>
+                <div className={styles.scMetricCard}>
+                  <span className={styles.scMetricLabel}>Competitor signals</span>
+                  <span className={styles.scMetricValue}>{data.metrics.competitorSignals}</span>
+                  <span className={styles.scMetricNote}>Mentioned in your results</span>
+                </div>
+              </div>
+
+              <div className={styles.overviewColumns}>
+                <div className={styles.overviewMain}>
+                  <div className={styles.todayCard}>
+                    <div className={styles.todayCardHead}>
+                      <div className={styles.todayCardHeadText}>
+                        <strong>Worth your time today</strong>
+                        <span>Ordered by AI reliability, highest first</span>
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.ghostButton}
+                        onClick={goToSection("opportunities")}
+                      >
+                        See all
+                      </button>
+                    </div>
+                    {topCarouselItems.length === 0 ? (
+                      <p className={styles.todayEmpty}>
+                        Nothing cleared qualification this run.
+                      </p>
+                    ) : (
+                      topCarouselItems.map((item) => {
+                        const title = item.kind === "opportunity" ? item.opportunity.title : item.conversation.title;
+                        const subreddit = item.kind === "opportunity" ? item.opportunity.subreddit : item.conversation.subreddit;
+                        const why =
+                          item.kind === "opportunity"
+                            ? item.opportunity.classification.customerProblem
+                            : item.conversation.summary;
+                        return (
+                          <div key={item.id} className={styles.todayItem}>
+                            <div className={styles.todayItemBody}>
+                              <div className={styles.todayItemMeta}>
+                                <span>{subreddit}</span>
+                                <span
+                                  className={styles.todayTag}
+                                  style={{ background: "var(--amber-soft)", color: "var(--amber)" }}
+                                >
+                                  {item.kind === "opportunity" ? "opportunity" : "relevant"}
+                                </span>
+                              </div>
+                              <span className={styles.todayTitle}>{title}</span>
+                              <span className={styles.todayWhy}>{why}</span>
+                            </div>
+                            <button
+                              type="button"
+                              className={styles.ghostButton}
+                              onClick={goToSection("opportunities")}
+                            >
+                              Review
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <BusinessProfilePanel profile={data.business} />
+                </div>
+
+                <div className={styles.overviewSide}>
+                  <RedditMonitoringPanel
+                    key={monitoring
+                      ? `${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
+                      : "monitoring-unavailable"}
+                    monitoring={monitoring}
+                    onUpdate={onUpdateMonitoring}
+                    runs={monitorRuns}
+                    onViewRun={onViewMonitorRun}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === "opportunities" && (
+            <div className={styles.opportunitiesScreen}>
+              <section className={styles.dashboardSection} style={{ margin: 0 }}>
+                {!hasAnyRelevantContent ? (
+                  <section className={`${styles.card} ${styles.emptyResults}`}>
+                    <h2>No relevant Reddit posts or comments were found in this scan.</h2>
+                    <p>Nothing cleared qualification this run; nothing was substituted to fill the space.</p>
+                  </section>
+                ) : (
+                  carouselItems.length > 0 && (
+                    <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
+                      <div className={styles.sectionHeadingRow}>
+                        <div>
+                          <h2>Reddit posts found:</h2>
+                        </div>
+                        <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
+                      </div>
+                      <OpportunityCarousel
+                        items={carouselItems}
+                        drafts={drafts}
+                        editingReplyId={editingReplyId}
+                        copiedReplyId={copiedReplyId}
+                        publishedOpportunityIds={publishedOpportunityIds}
+                        onDraftChange={(opportunityId, value) =>
+                          setDrafts((current) => ({ ...current, [opportunityId]: value }))
+                        }
+                        onToggleEdit={(opportunityId) =>
+                          setEditingReplyId((current) => (current === opportunityId ? null : opportunityId))
+                        }
+                        onRegenerate={(opportunity) => void regenerateReply(opportunity)}
+                        onCopy={(opportunityId) => void copyReply(opportunityId)}
+                        onPublish={(opportunity) => void publishReply(opportunity)}
+                        redditConnection={redditConnection}
+                        onFunnelEvent={onFunnelEvent}
+                        createdReplies={createdReplies}
+                        creatingReplyId={creatingReplyId}
+                        onCreateReply={(conversation) => void createReply(conversation)}
+                      />
+                    </TrackedSection>
+                  )
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeSection === "insights" && (
+            <div className={styles.lightSection}>
+              <ThemeSection
+                kind="struggle"
+                eyebrow="Recurring pain"
+                heading="What customers are struggling with"
+                themes={data.conversationThemes}
+              />
+              <ThemeSection
+                kind="request"
+                eyebrow="Recurring requests"
+                heading="What they are asking for"
+                themes={data.conversationThemes}
+              />
+              {data.insights.length > 0 &&
+                data.insights.map((insight) => (
+                  <div key={insight.id} className={styles.simpleCard}>
+                    <span className={styles.simpleCardEyebrow}>{insight.eyebrow}</span>
+                    <span className={styles.simpleCardTitle}>{insight.title}</span>
+                    <p className={styles.simpleCardBody}>{insight.summary}</p>
+                    <span className={styles.simpleCardMeta}>{insight.recommendedAction}</span>
+                  </div>
+                ))}
+            </div>
+          )}
+
+          {activeSection === "visibility" && (
+            <div className={styles.lightSection}>
+              <AiVisibilityPanel
+                key={aiVisibility ? `${aiVisibility.enabled}:${aiVisibility.nextRunAt}` : "ai-visibility-unavailable"}
+                status={aiVisibility}
+                onUpdate={onUpdateAiVisibility}
+                scans={visibilityScans}
+              />
+            </div>
+          )}
+
+          {activeSection === "competitors" && (
+            <div className={styles.lightSection}>
+              {data.competitorWeaknesses.length === 0 ? (
+                <div className={styles.simpleEmpty}>
+                  <strong>No competitor signals yet</strong>
+                  <p>
+                    Name the tools you lose deals to and we&apos;ll surface it the moment someone
+                    complains about them or asks for an alternative.
+                  </p>
+                </div>
+              ) : (
+                data.competitorWeaknesses.map((weakness) => (
+                  <div key={weakness.id} className={styles.simpleCard}>
+                    <span className={styles.simpleCardEyebrow}>
+                      {weakness.competitorName ?? "Unnamed competitor"}
+                    </span>
+                    <span className={styles.simpleCardTitle}>{weakness.headline}</span>
+                    <p className={styles.simpleCardBody}>{weakness.summary}</p>
+                    <span className={styles.simpleCardMeta}>{weakness.recommendedAction}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {activeSection === "replies" && (
+            <div className={styles.lightSection}>
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardTitle}>
+                  {publishedOpportunityIds.length} posted &middot; {Object.keys(drafts).length} drafted
+                </span>
+                <p className={styles.simpleCardBody}>
+                  Replies are drafted, edited and posted from Opportunities &mdash; nothing is ever
+                  posted without you reading it first.
+                </p>
+                <button
+                  type="button"
+                  className={styles.ghostButton}
+                  onClick={goToSection("opportunities")}
+                  style={{ alignSelf: "flex-start" }}
+                >
+                  Go to Opportunities
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeSection === "results" && (
+            <div className={styles.lightSection}>
+              {data.lockedCounts ? (
+                <div className={styles.simpleCard}>
+                  <span className={styles.simpleCardTitle}>Everything this scan found</span>
+                  <p className={styles.simpleCardBody}>
+                    {data.lockedCounts.opportunities} opportunities &middot;{" "}
+                    {data.lockedCounts.insights} insights &middot;{" "}
+                    {data.lockedCounts.competitorSignals} competitor signals &middot;{" "}
+                    {data.lockedCounts.visibilityOpportunities} visibility opportunities &middot;{" "}
+                    {data.lockedCounts.readyReplies} ready replies
+                  </p>
+                  {isFree && (
+                    <span className={styles.simpleCardMeta}>
+                      Some of this is stored but not shown on the free scan.
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className={styles.simpleEmpty}>
+                  <strong>Nothing stored yet</strong>
+                  <p>Results from this scan will appear here once they&apos;re available.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeSection === "billing" && (
+            <div className={styles.lightSection}>
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardEyebrow}>current plan</span>
+                <span className={styles.simpleCardTitle}>
+                  {accessLevel === "free" ? "Free scan" : accessLevel === "pass" ? "Full access pass" : "Core"}
+                </span>
+                <p className={styles.simpleCardBody}>
+                  {isFree
+                    ? "One scan, a limited set of opportunities and one reply. Monitoring is off, so nothing new is arriving."
+                    : "Thanks for being on a paid plan. Manage or change it any time."}
+                </p>
+                {isFree && onCheckout && (
+                  <button
+                    type="button"
+                    className={styles.blueCta}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => onCheckout("core")}
+                  >
+                    Upgrade access
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      </div>
+    </>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { OnboardingHeader } from "./OnboardingHeader";
 import styles from "./DiscoveryProfile.module.css";
 
 /**
@@ -125,6 +126,7 @@ export function CompetitorsSetup({
 
   return (
     <main className={styles.screen}>
+      <OnboardingHeader activeIndex={2} />
       <header className={styles.head}>
         <div>
           <div className={styles.kicker}>

@@ -15,6 +15,7 @@ import {
 } from "./demand-intelligence/from-scan";
 import { DiscoveryProfile } from "./DiscoveryProfile";
 import { CompetitorsSetup } from "./CompetitorsSetup";
+import { OnboardingHeader } from "./OnboardingHeader";
 import styles from "./ThreadlineExperience.module.css";
 
 // "competitors" is a dedicated, optional step (Back/Skip/Continue) between
@@ -131,19 +132,6 @@ async function copyText(value: string): Promise<boolean> {
   const copied = document.execCommand("copy");
   field.remove();
   return copied;
-}
-
-function Brand() {
-  return (
-    <a className={styles.brand} aria-label="Threadline acceptance diagnostics" href="/acceptance-ai-diagnostics">
-      <span className={styles.brandMark} aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>
-      <span>threadline</span>
-    </a>
-  );
 }
 
 export type LandingSubmission = { mode: "website"; websiteUrl: string } | { mode: "context"; contextText: string };
@@ -1163,10 +1151,12 @@ function Scanning({
   url,
   inputMode,
   progress,
+  stepIndex,
 }: {
   url: string;
   inputMode: "website" | "context";
   progress: ApiScanResponse["scan"]["progress"];
+  stepIndex: number;
 }) {
   const isContext = inputMode === "context";
   const domain = useMemo(() => safeDomain(url), [url]);
@@ -1178,7 +1168,7 @@ function Scanning({
 
   return (
     <main className={styles.scanScreen}>
-      <header className={styles.scanHeader}><Brand /><span>Building your Market Scan</span></header>
+      <OnboardingHeader activeIndex={stepIndex} />
       <section className={styles.scanPanel}>
         <div className={styles.scanVisual} aria-hidden="true">
           <div className={styles.orbit}><i /><i /><i /></div>
@@ -1280,7 +1270,7 @@ function RefiningProfile({
 
   return (
     <main className={styles.scanScreen}>
-      <header className={styles.scanHeader}><Brand /><span>Finishing your analysis</span></header>
+      <OnboardingHeader activeIndex={3} />
       <section className={styles.scanPanel}>
         <div className={styles.scanVisual} aria-hidden="true">
           <div className={styles.orbit}><i /><i /><i /></div>
@@ -2096,7 +2086,7 @@ export function ThreadlineExperience() {
 
   if (view === "landing") return <Landing onSubmit={startScan} />;
   if (view === "analyzing") {
-    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} />;
+    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} stepIndex={1} />;
   }
   if (view === "competitors") {
     return (
@@ -2122,12 +2112,12 @@ export function ThreadlineExperience() {
     );
   }
   if (view === "scanning" || view === "restoring") {
-    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} />;
+    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} stepIndex={4} />;
   }
   if (view === "error") {
     return (
       <main className={styles.scanScreen}>
-        <header className={styles.scanHeader}><Brand /><span>Market Scan paused</span></header>
+        <OnboardingHeader activeIndex={0} statusLabel="Market Scan paused" />
         <section className={`${styles.scanPanel} ${styles.errorPanel}`}>
           <div className={styles.errorMark}>!</div>
           <div className={styles.scanKicker}>Safe analysis stopped</div>

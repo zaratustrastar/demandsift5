@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { CompetitorProfileView } from "./CompetitorsSetup";
+import { OnboardingHeader } from "./OnboardingHeader";
 import styles from "./DiscoveryProfile.module.css";
 
 /**
@@ -242,6 +243,7 @@ export function DiscoveryProfile({
 
   return (
     <main className={styles.screen}>
+      <OnboardingHeader activeIndex={3} />
       <header className={styles.head}>
         <div>
           <div className={styles.kicker}>

@@ -1,0 +1,115 @@
+/*
+ * Self-contained (no reliance on any ancestor's custom properties) since
+ * this mounts inside several different screens, each with its own token
+ * scope (ThreadlineExperience's .scanScreen, DiscoveryProfile's .screen).
+ */
+.bar {
+  height: 62px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  position: relative;
+  z-index: 10;
+  font-family: "Instrument Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+}
+
+.logoMark {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 18px;
+}
+
+.logoMark i {
+  display: block;
+  width: 4px;
+  border-radius: 1px;
+}
+
+.logoMark i:nth-child(1) {
+  height: 18px;
+  background: #2563eb;
+}
+
+.logoMark i:nth-child(2) {
+  height: 12px;
+  background: #2563eb;
+  opacity: 0.55;
+}
+
+.logoMark i:nth-child(3) {
+  height: 6px;
+  background: #0d0d0f;
+}
+
+.logoText {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  color: #0d0d0f;
+}
+
+.status {
+  font-size: 13px;
+  color: #52525b;
+}
+
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #a1a1aa;
+  white-space: nowrap;
+}
+
+.stepDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 7px;
+  background: #e4e4e7;
+  flex-shrink: 0;
+}
+
+.stepDone {
+  color: #52525b;
+}
+
+.stepDone .stepDot {
+  background: #2563eb;
+}
+
+.stepActive {
+  color: #0d0d0f;
+  font-weight: 600;
+}
+
+.stepActive .stepDot {
+  background: #2563eb;
+}
+
+@media (max-width: 720px) {
+  .steps {
+    display: none;
+  }
+}

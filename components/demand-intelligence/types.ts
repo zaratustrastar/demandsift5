@@ -20,6 +20,7 @@ export type NavigationSectionId =
   | "visibility"
   | "replies"
   | "results"
+  | "settings"
   | "billing";
 
 export type ProvenanceKind =

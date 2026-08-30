@@ -9,6 +9,7 @@ import type {
   BusinessProfile,
   ConversationTheme,
   NavigationSectionId,
+  PricingPlan,
   RedditDemandDemoData,
   RedditOpportunity,
   RelevantConversation,
@@ -1570,6 +1571,8 @@ export function ProductDashboard({
     canConnect: false,
     requiresPaidAccess: true,
   },
+  onConnectReddit,
+  onDisconnectReddit,
   monitoring = null,
   onUpdateMonitoring,
   monitorRuns = null,
@@ -1639,6 +1642,17 @@ export function ProductDashboard({
   // stored version once the backend has it.
   const [createdReplies, setCreatedReplies] = useState<Record<string, string>>({});
   const [creatingReplyId, setCreatingReplyId] = useState<string | null>(null);
+  const [disconnectingReddit, setDisconnectingReddit] = useState(false);
+
+  const disconnectReddit = async () => {
+    if (!onDisconnectReddit || disconnectingReddit) return;
+    setDisconnectingReddit(true);
+    try {
+      await onDisconnectReddit();
+    } finally {
+      setDisconnectingReddit(false);
+    }
+  };
 
   const createReply = async (conversation: RelevantConversation) => {
     if (!onCreateReply || creatingReplyId) return;
@@ -1751,6 +1765,7 @@ export function ProductDashboard({
     visibility: "Whether assistants name you, and what they read.",
     replies: "Drafts, posted replies and what they did.",
     results: "Everything this scan found, including what's stored but not shown.",
+    settings: "Your business profile, competitors and Reddit connection.",
     billing: "Your plan and how to change it.",
   };
   const goToSection = (id: NavigationSectionId) => () => setActiveSection(id);
@@ -1935,8 +1950,6 @@ export function ProductDashboard({
                       })
                     )}
                   </div>
-
-                  <BusinessProfilePanel profile={data.business} />
                 </div>
 
                 <div className={styles.overviewSide}>
@@ -2065,21 +2078,44 @@ export function ProductDashboard({
             <div className={styles.lightSection}>
               <div className={styles.simpleCard}>
                 <span className={styles.simpleCardTitle}>
-                  {publishedOpportunityIds.length} posted &middot; {Object.keys(drafts).length} drafted
+                  {publishedOpportunityIds.length} posted &middot; {rankedOpportunities.length} drafted
                 </span>
-                <p className={styles.simpleCardBody}>
-                  Replies are drafted, edited and posted from Opportunities &mdash; nothing is ever
-                  posted without you reading it first.
+                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                  Nothing is ever posted without you reading it first.
                 </p>
-                <button
-                  type="button"
-                  className={styles.ghostButton}
-                  onClick={goToSection("opportunities")}
-                  style={{ alignSelf: "flex-start" }}
-                >
-                  Go to Opportunities
-                </button>
               </div>
+              {rankedOpportunities.map((opportunity) => {
+                const isPublished = publishedOpportunityIds.includes(opportunity.id);
+                return (
+                  <div key={opportunity.id} className={styles.simpleCard}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                      <span className={styles.simpleCardEyebrow}>{opportunity.subreddit}</span>
+                      <span
+                        className={styles.todayTag}
+                        style={
+                          isPublished
+                            ? { background: "var(--green-soft)", color: "var(--green-dark)" }
+                            : { background: "#f4f4f5", color: "#52525b" }
+                        }
+                      >
+                        {isPublished ? "posted" : "draft"}
+                      </span>
+                    </div>
+                    <span className={styles.simpleCardTitle}>{opportunity.title}</span>
+                    <p className={styles.simpleCardBody}>
+                      {drafts[opportunity.id] ?? opportunity.reply.draft}
+                    </p>
+                    <button
+                      type="button"
+                      className={styles.ghostButton}
+                      onClick={goToSection("opportunities")}
+                      style={{ alignSelf: "flex-start" }}
+                    >
+                      Open in Opportunities
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -2110,31 +2146,116 @@ export function ProductDashboard({
             </div>
           )}
 
-          {activeSection === "billing" && (
+          {activeSection === "settings" && (
             <div className={styles.lightSection}>
+              <BusinessProfilePanel profile={data.business} />
+
               <div className={styles.simpleCard}>
-                <span className={styles.simpleCardEyebrow}>current plan</span>
-                <span className={styles.simpleCardTitle}>
-                  {accessLevel === "free" ? "Free scan" : accessLevel === "pass" ? "Full access pass" : "Core"}
-                </span>
-                <p className={styles.simpleCardBody}>
-                  {isFree
-                    ? "One scan, a limited set of opportunities and one reply. Monitoring is off, so nothing new is arriving."
-                    : "Thanks for being on a paid plan. Manage or change it any time."}
+                <span className={styles.simpleCardTitle}>Reddit account</span>
+                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                  {redditConnection.connected
+                    ? `Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`
+                    : "Connect it to post replies from here. Without it you copy and paste \u2014 the drafts work either way."}
                 </p>
-                {isFree && onCheckout && (
+                {redditConnection.connected ? (
                   <button
                     type="button"
-                    className={styles.blueCta}
+                    className={styles.ghostButton}
                     style={{ alignSelf: "flex-start" }}
-                    onClick={() => onCheckout("core")}
+                    onClick={() => void disconnectReddit()}
+                    disabled={disconnectingReddit}
                   >
-                    Upgrade access
+                    {disconnectingReddit ? "Disconnecting\u2026" : "Disconnect Reddit"}
                   </button>
-                )}
+                ) : redditConnection.canConnect ? (
+                  <button
+                    type="button"
+                    className={styles.darkCta}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={onConnectReddit}
+                  >
+                    Connect Reddit
+                  </button>
+                ) : redditConnection.requiresPaidAccess ? (
+                  <span className={styles.simpleCardMeta}>Posting to Reddit requires a paid plan.</span>
+                ) : null}
               </div>
+
+              {data.business.competitors.length > 0 && (
+                <div className={styles.simpleCard}>
+                  <span className={styles.simpleCardTitle}>Competitors identified</span>
+                  <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                    Tools we watch for alongside your own keywords, found from your website.
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                    {data.business.competitors.map((competitor) => (
+                      <span key={competitor} className={styles.todayTag} style={{ background: "#f4f4f5", color: "#3f3f46" }}>
+                        {competitor}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
+
+          {activeSection === "billing" && (() => {
+            const planIdForAccessLevel: Record<AccessLevel, PricingPlan["id"]> = {
+              free: "market-scan",
+              pass: "full-access-pass",
+              core: "core",
+            };
+            const currentPlan =
+              data.pricing.find((plan) => plan.id === planIdForAccessLevel[accessLevel]) ??
+              data.pricing[0];
+            const formatPrice = (plan: PricingPlan) =>
+              plan.priceInCents === 0 ? "$0" : `$${(plan.priceInCents / 100).toFixed(0)}`;
+            const upgradePlans = isFree
+              ? data.pricing.filter((plan) => plan.id !== "market-scan")
+              : [];
+            return (
+              <div className={styles.lightSection}>
+                <div className={styles.simpleCard}>
+                  <span className={styles.simpleCardEyebrow}>current plan</span>
+                  <span className={styles.simpleCardTitle}>{currentPlan.name}</span>
+                  <p className={styles.simpleCardBody}>{currentPlan.description}</p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {currentPlan.features.map((feature) => (
+                      <span
+                        key={feature}
+                        className={styles.todayTag}
+                        style={{ background: "var(--green-soft)", color: "var(--green-dark)" }}
+                      >
+                        {feature}
+                      </span>
+                    ))}
+                  </div>
+                  <span className={styles.simpleCardMeta}>{currentPlan.checkoutNote}</span>
+                </div>
+
+                {upgradePlans.map((plan) => (
+                  <div key={plan.id} className={styles.simpleCard}>
+                    <span className={styles.simpleCardEyebrow}>
+                      {formatPrice(plan)}
+                      {plan.cadence === "monthly" ? "/month" : plan.cadence === "one-time" ? ` one-time \u00b7 ${plan.durationDays ?? 7} days` : ""}
+                    </span>
+                    <span className={styles.simpleCardTitle}>{plan.name}</span>
+                    <p className={styles.simpleCardBody}>{plan.description}</p>
+                    {onCheckout && (plan.id === "full-access-pass" || plan.id === "core") && (
+                      <button
+                        type="button"
+                        className={styles.blueCta}
+                        style={{ alignSelf: "flex-start" }}
+                        onClick={() => onCheckout(plan.id as CheckoutPlanId)}
+                      >
+                        Choose {plan.name}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
       </div>
       </div>

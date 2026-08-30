@@ -50,6 +50,61 @@
 .progressItem.done > span { border-color: var(--green); color: #fff; background: var(--green); }
 .progressItem > i { width: 20px; height: 3px; margin-left: auto; border-radius: 99px; background: #93b4fb; animation: pulse 1s ease-in-out infinite alternate; }
 @keyframes pulse { to { width: 32px; background: var(--green); } }
+
+.stageWorking {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--green);
+  flex-shrink: 0;
+  margin-left: 8px;
+  animation: sc-pulse-text 1.4s ease-in-out infinite;
+}
+@keyframes sc-pulse-text { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+
+.stageBarTrack {
+  height: 5px;
+  border-radius: 5px;
+  background: #f0f0f2;
+  overflow: hidden;
+  margin-top: 22px;
+}
+.stageBarFill {
+  height: 5px;
+  border-radius: 5px;
+  background: var(--green);
+  transition: width 0.4s ease;
+}
+
+.stageFooter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 6px;
+}
+.stageFooter span {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.stageCloseNote {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.scanVisualDone .orbit {
+  animation: none;
+  border-color: var(--mint);
+}
+.scanVisualDone > span {
+  background: var(--green);
+  box-shadow: 0 0 0 8px var(--mint);
+}
+
 .domainSafety { padding: 12px; border-radius: 9px; color: var(--muted); background: #f5f8ff; font-size: 10px; }
 .domainSafety span { color: var(--green); margin-right: 6px; }
 .errorPanel { padding-top: 54px; }

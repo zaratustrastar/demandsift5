@@ -67,36 +67,142 @@ function effectiveAccessLevel(access: ApiScanResponse["access"] | undefined | nu
   return access?.unlocked ? access.plan : "free";
 }
 
-const progressSteps = [
-  {
+/**
+ * Mirrors lib/server/scan-workflow.ts's STAGES exactly (id, label, detail)
+ * -- the real backend pipeline the whole onboarding funnel is honest
+ * about: one flat, seven-stage list. Used only as a fallback for a stage
+ * `progress` hasn't reported yet; whenever the backend has an entry for a
+ * given id, its label/detail always wins (see stageRows below).
+ *
+ * Two screens each show a slice of this same list rather than pretending
+ * to be two separate pipelines: PRE_INPUT_STAGE_IDS is what can honestly
+ * happen before the user has reviewed anything (the "analyzing" view),
+ * POST_INPUT_STAGE_IDS is the Reddit-side work that only starts once
+ * they've confirmed their keywords (the "scanning"/"restoring" view).
+ */
+const STAGE_META: Record<string, { label: string; detail: string }> = {
+  website: {
     label: "Understanding your business",
-    detail: "Reading safe public pages on the submitted domain",
+    detail: "Reading safe public pages on the submitted domain.",
   },
-  {
+  understanding: {
     label: "Mapping the problems you solve",
-    detail: "Products, buyers, problems and source-backed proof",
+    detail: "Working out what you sell and who it's for.",
   },
-  {
+  discovery: {
     label: "Searching recent Reddit conversations",
-    detail: "Only the current scan window",
+    detail: "Searching explicit demand, pain, workaround, switching and timing signals.",
   },
-  {
-    label: "Reading relevant posts and replies",
-    detail: "Context, problem fit and source quality",
+  triage: {
+    label: "Reading every credible candidate",
+    detail: "Filtering for genuine buying intent before reading full conversations.",
   },
-  {
+  enrichment: {
+    label: "Opening the strongest conversations",
+    detail: "Fetching useful thread context only for candidates worth deeper review.",
+  },
+  qualification: {
     label: "Identifying potential customers",
-    detail: "Qualifying and deduplicating people by Reddit author",
+    detail: "Qualifying first, then ranking and deduplicating people by Reddit author.",
   },
-  {
-    label: "Checking competitor frustrations",
-    detail: "Verifying complaints and alternative-seeking signals",
+  replies: {
+    label: "Drafting a reply",
+    detail: "Generating one grounded reply only when the conversation is appropriate to join.",
   },
-  {
-    label: "Ranking the strongest opportunities",
-    detail: "Ordering the best fits and preparing grounded replies",
-  },
-];
+};
+
+const PRE_INPUT_STAGE_IDS = ["website", "understanding"];
+const POST_INPUT_STAGE_IDS = ["discovery", "triage", "enrichment", "qualification", "replies"];
+
+type StageStatus = "pending" | "active" | "complete" | "failed";
+
+type StageRow = {
+  id: string;
+  label: string;
+  detail: string;
+  status: StageStatus;
+};
+
+/** Builds the rows for one screen's slice of the pipeline, real backend data first, static fallback second. */
+function stageRowsFor(
+  stageIds: string[],
+  progress: ApiScanResponse["scan"]["progress"],
+): StageRow[] {
+  const reported = new Map(progress.map((item) => [item.id, item]));
+  return stageIds.map((id, index) => {
+    const real = reported.get(id);
+    const meta = STAGE_META[id];
+    return {
+      id,
+      label: real?.label ?? meta.label,
+      detail: real?.detail ?? meta.detail,
+      status: real?.status ?? (index === 0 ? "active" : "pending"),
+    };
+  });
+}
+
+/** Ticks up once a second for as long as `active` stays true, resetting whenever it flips back on -- a real, locally-measured "how long has this screen been waiting" clock, not a fabricated one. */
+function useElapsedSeconds(active: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return seconds;
+}
+
+/**
+ * The stage list, progress bar and step/elapsed-time footer shared by the
+ * "analyzing" and "scanning"/"restoring" screens -- each passes in its own
+ * slice of the real pipeline (see PRE_INPUT_STAGE_IDS / POST_INPUT_STAGE_IDS
+ * above) so the two screens stay honest about which stages could possibly
+ * be true at that point, instead of both showing the same seven-stage list.
+ */
+function StageProgress({ rows, closeTabNote }: { rows: StageRow[]; closeTabNote: string }) {
+  const completed = rows.filter((row) => row.status === "complete").length;
+  const total = rows.length;
+  const pct = total === 0 ? 0 : Math.round((completed / total) * 100);
+  const allDone = total > 0 && completed === total;
+  const elapsed = useElapsedSeconds(!allDone);
+
+  return (
+    <>
+      <div className={styles.stageBarTrack}>
+        <div className={styles.stageBarFill} style={{ width: `${pct}%` }} />
+      </div>
+      <div className={styles.progressList}>
+        {rows.map((row) => (
+          <div
+            className={`${styles.progressItem} ${row.status === "complete" ? styles.done : ""} ${row.status === "active" ? styles.active : ""}`}
+            key={row.id}
+          >
+            <span>{row.status === "complete" ? "✓" : row.status === "active" ? "•" : ""}</span>
+            <div>
+              <strong>{row.label}</strong>
+              <small>{row.detail}</small>
+            </div>
+            {row.status === "active" && (
+              <>
+                <span className={styles.stageWorking}>working…</span>
+                <i />
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className={styles.stageFooter}>
+        <span>
+          Step {Math.min(completed + 1, total)} of {total} &middot; {elapsed}s elapsed
+        </span>
+      </div>
+      <p className={styles.stageCloseNote}>{closeTabNote}</p>
+    </>
+  );
+}
 
 function safeDomain(value: string) {
   try {
@@ -1152,46 +1258,44 @@ function Scanning({
   inputMode,
   progress,
   stepIndex,
+  stageIds,
 }: {
   url: string;
   inputMode: "website" | "context";
   progress: ApiScanResponse["scan"]["progress"];
   stepIndex: number;
+  /** Which slice of the real pipeline this screen is honest about showing -- PRE_INPUT_STAGE_IDS or POST_INPUT_STAGE_IDS. */
+  stageIds: string[];
 }) {
   const isContext = inputMode === "context";
   const domain = useMemo(() => safeDomain(url), [url]);
-  const reported = new Map(progress.map((item) => [item.id, item]));
-  const statuses = progressSteps.map((_, index) => {
-    const stage = progress[index];
-    return stage?.status ?? (index === 0 ? "active" : "pending");
-  });
+  const rows = stageRowsFor(stageIds, progress);
+  const allDone = rows.length > 0 && rows.every((row) => row.status === "complete");
+  const isPreInput = stageIds === PRE_INPUT_STAGE_IDS;
 
   return (
     <main className={styles.scanScreen}>
       <OnboardingHeader activeIndex={stepIndex} />
       <section className={styles.scanPanel}>
-        <div className={styles.scanVisual} aria-hidden="true">
+        <div className={`${styles.scanVisual} ${allDone ? styles.scanVisualDone : ""}`} aria-hidden="true">
           <div className={styles.orbit}><i /><i /><i /></div>
           <span>↗</span>
         </div>
         <div className={styles.scanKicker}>{isContext ? "Analyzing your description" : `Analyzing ${domain}`}</div>
         <h1>{isContext ? "Turning your description into a demand map" : "Turning your website into a demand map"}</h1>
-        <p>These stages update from the backend analysis pipeline.</p>
-        <div className={styles.progressList}>
-          {progressSteps.map((item, index) => (
-            <div
-              className={`${styles.progressItem} ${statuses[index] === "complete" ? styles.done : ""} ${statuses[index] === "active" ? styles.active : ""}`}
-              key={item.label}
-            >
-              <span>{statuses[index] === "complete" ? "✓" : statuses[index] === "active" ? "•" : index + 1}</span>
-              <div>
-                <strong>{reported.get(progress[index]?.id ?? "")?.label ?? item.label}</strong>
-                <small>{progress[index]?.detail ?? item.detail}</small>
-              </div>
-              {statuses[index] === "active" && <i />}
-            </div>
-          ))}
-        </div>
+        <p>
+          {isPreInput
+            ? "Usually done in under half a minute."
+            : "This is the longer wait -- usually a minute or two, since it's reading real Reddit conversations."}
+        </p>
+        <StageProgress
+          rows={rows}
+          closeTabNote={
+            isPreInput
+              ? "You can close this tab -- we'll keep going either way."
+              : "You can close this tab -- we keep going and hold the results for you."
+          }
+        />
         {!isContext && (
           <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
         )}
@@ -1268,6 +1372,8 @@ function RefiningProfile({
     };
   }, [scanId, setView]);
 
+  const elapsed = useElapsedSeconds(true);
+
   return (
     <main className={styles.scanScreen}>
       <OnboardingHeader activeIndex={3} />
@@ -1277,8 +1383,12 @@ function RefiningProfile({
           <span>↗</span>
         </div>
         <div className={styles.scanKicker}>{isContext ? "Analyzing your description" : `Analyzing ${domain}`}</div>
-        <h1>Putting together your business profile</h1>
-        <p>{isContext ? "Double-checking what we found in your description." : "Reading a few more pages and double-checking what we found."}</p>
+        <h1>Proposing search terms</h1>
+        <p>{isContext ? "Turning what we found into terms we'll search Reddit with." : "Reading a few more pages and turning what we found into terms we'll search Reddit with."}</p>
+        <div className={styles.stageFooter}>
+          <span>{elapsed}s elapsed</span>
+        </div>
+        <p className={styles.stageCloseNote}>You can close this tab &mdash; we&apos;ll keep going either way.</p>
         {!isContext && (
           <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
         )}
@@ -2086,7 +2196,15 @@ export function ThreadlineExperience() {
 
   if (view === "landing") return <Landing onSubmit={startScan} />;
   if (view === "analyzing") {
-    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} stepIndex={1} />;
+    return (
+      <Scanning
+        url={url}
+        inputMode={inputMode}
+        progress={scanProgress}
+        stepIndex={1}
+        stageIds={PRE_INPUT_STAGE_IDS}
+      />
+    );
   }
   if (view === "competitors") {
     return (
@@ -2112,7 +2230,15 @@ export function ThreadlineExperience() {
     );
   }
   if (view === "scanning" || view === "restoring") {
-    return <Scanning url={url} inputMode={inputMode} progress={scanProgress} stepIndex={4} />;
+    return (
+      <Scanning
+        url={url}
+        inputMode={inputMode}
+        progress={scanProgress}
+        stepIndex={4}
+        stageIds={POST_INPUT_STAGE_IDS}
+      />
+    );
   }
   if (view === "error") {
     return (

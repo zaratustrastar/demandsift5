@@ -73,7 +73,7 @@ const STAGES: ScanStage[] = [
     id: "understanding",
     label: "Mapping the problems you solve",
     status: "pending",
-    detail: "Building a source-backed company context pack.",
+    detail: "Working out what you sell and who it's for.",
   },
   {
     id: "discovery",
@@ -85,7 +85,7 @@ const STAGES: ScanStage[] = [
     id: "triage",
     label: "Reading every credible candidate",
     status: "pending",
-    detail: "Using high-recall AI triage before spending on full thread context.",
+    detail: "Filtering for genuine buying intent before reading full conversations.",
   },
   {
     id: "enrichment",
@@ -101,7 +101,7 @@ const STAGES: ScanStage[] = [
   },
   {
     id: "replies",
-    label: "Preparing the best next move",
+    label: "Drafting a reply",
     status: "pending",
     detail: "Generating one grounded reply only when the conversation is appropriate to join.",
   },

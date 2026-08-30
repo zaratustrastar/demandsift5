@@ -23,7 +23,7 @@ const MONITOR_PROGRESS: ScanStage[] = [
   { id: "triage", label: "Reading unseen matches", status: "pending", detail: "Lexical matches must still pass the existing AI relevance gate." },
   { id: "enrichment", label: "Opening the strongest conversations", status: "pending", detail: "Fetching useful context only for candidates worth deeper review." },
   { id: "qualification", label: "Qualifying signals", status: "pending", detail: "Separating potential customers from relevant market intelligence." },
-  { id: "replies", label: "Preparing the best next move", status: "pending", detail: "Grounded replies are drafted only for appropriate conversations." },
+  { id: "replies", label: "Drafting a reply", status: "pending", detail: "Grounded replies are drafted only for appropriate conversations." },
 ];
 
 function emptyRejectionCounts() {

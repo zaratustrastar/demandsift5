@@ -137,6 +137,9 @@ export interface ProductDashboardProps {
     enabled: boolean,
     watchTerms: RedditMonitoringStatus["watchTerms"],
   ) => Promise<boolean>;
+  /** Corrects the "what you sell" summary every qualification judgement and
+   * reply draft is grounded in -- see PATCH /api/scans/[scanId]/business-profile. */
+  onUpdateBusinessSummary?: (summary: string) => Promise<boolean>;
   /** Recent daily monitoring runs, most recent first -- the "where will I see results" answer for Reddit monitoring. */
   monitorRuns?: RedditMonitorRunSummary[] | null;
   /** Loads a completed monitoring run's own scan into view, in place, without leaving the dashboard. */
@@ -298,6 +301,75 @@ function FormattedAnswerText({ text }: { text: string }) {
         ),
       )}
     </div>
+  );
+}
+
+/**
+ * Corrects the one free-text sentence every qualification judgement and
+ * reply draft is grounded in (see lib/server/presenter.ts's
+ * applyBusinessSummaryOverride). This is the summary itself, not the
+ * derived search terms -- those are already separately editable via the
+ * watch-terms textarea below.
+ */
+function BusinessSummaryEditor({
+  summary,
+  onUpdate,
+}: {
+  summary: string;
+  onUpdate?: (summary: string) => Promise<boolean>;
+}) {
+  const [value, setValue] = useState(summary);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const dirty = value.trim() !== summary.trim();
+
+  const save = async () => {
+    if (!onUpdate || !value.trim() || saving) return;
+    setSaving(true);
+    try {
+      const ok = await onUpdate(value.trim());
+      if (ok) setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={`${styles.card} ${styles.monitoringCard}`}>
+      <div>
+        <span className={styles.eyebrow}>What you sell</span>
+        <h2>Correct your business summary</h2>
+        <p>
+          Every relevance judgement and drafted reply is grounded in this one sentence. If it
+          missed something about what you actually sell or who it&apos;s for, fix it here rather
+          than starting a new scan.
+        </p>
+      </div>
+      <label className={styles.monitoringTerms}>
+        <span>One-line summary</span>
+        <textarea
+          value={value}
+          rows={3}
+          disabled={saving}
+          onChange={(event) => setValue(event.currentTarget.value)}
+        />
+      </label>
+      <div className={styles.monitoringFooter}>
+        <small>
+          {savedAt && !dirty
+            ? "Saved. New matches and regenerated replies will use this."
+            : "Only applies going forward -- it does not rewrite anything already found."}
+        </small>
+        <button
+          className={styles.primaryButton}
+          type="button"
+          disabled={saving || !dirty || !value.trim()}
+          onClick={() => void save()}
+        >
+          {saving ? "Saving…" : "Save summary"}
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1576,6 +1648,7 @@ export function ProductDashboard({
   onDisconnectReddit,
   monitoring = null,
   onUpdateMonitoring,
+  onUpdateBusinessSummary,
   monitorRuns = null,
   onViewMonitorRun,
   aiVisibility = null,
@@ -2365,6 +2438,11 @@ export function ProductDashboard({
 
           {activeSection === "monitoring" && (
             <div className={styles.lightSection}>
+              <BusinessSummaryEditor
+                summary={data.business.oneLineSummary}
+                onUpdate={onUpdateBusinessSummary}
+              />
+
               <RedditMonitoringPanel
                 key={monitoring
                   ? `config:${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`

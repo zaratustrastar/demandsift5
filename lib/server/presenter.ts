@@ -1,11 +1,27 @@
 import { candidateReliabilityScore, dedupeMarketIntelligenceRecords } from "@/lib/intelligence/reddit-pipeline";
-import type { EntitlementRecord, MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanRecord } from "./contracts";
+import type { EntitlementRecord, MarketIntelligenceRecord, OpportunityRecord, Provenance, ReplyRecord, ScanBusinessProfile, ScanRecord } from "./contracts";
 import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 import { ApiError } from "./http";
 import { getEffectiveEntitlement, getStateRepository } from "./repository";
 import { summarizeTrackedResults } from "./result-totals";
 
 export { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
+
+/**
+ * Applies a user's businessSummaryOverride correction on top of the profile
+ * the scan actually produced. The single place this is applied -- every
+ * consumer of a completed scan's profile (the report shown to the user,
+ * and regenerateReply's grounding) goes through here so a correction is
+ * visible everywhere consistently, not just wherever someone remembered to
+ * check for it.
+ */
+export function applyBusinessSummaryOverride(
+  scan: ScanRecord,
+  profile: ScanBusinessProfile,
+): ScanBusinessProfile {
+  if (!scan.businessSummaryOverride) return profile;
+  return { ...profile, summary: scan.businessSummaryOverride.summary };
+}
 
 async function isUnlocked(workspaceId: string, websiteUrl: string): Promise<boolean> {
   const entitlement = await getEffectiveEntitlement(workspaceId);
@@ -253,7 +269,7 @@ export async function presentScan(scan: ScanRecord) {
     },
     access,
     report: {
-      profile: result.profile,
+      profile: applyBusinessSummaryOverride(scan, result.profile),
       insights: visibleInsights,
       // Themes are aggregations over the relevant corpus. Older stored results
       // predate them, so an absent field is an empty list rather than an error.

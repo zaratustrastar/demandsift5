@@ -493,6 +493,20 @@ export type ScanRecord = {
    */
   discoveryOverrides?: DiscoveryTermOverrides | null;
   /**
+   * A user's correction to their own "what you sell" summary -- the one
+   * free-text sentence every qualification judgement and reply draft is
+   * grounded in (see presentScan's use of this and regenerateReply's
+   * profile argument). Distinct from discoveryOverrides: that edits *search
+   * terms*, this edits the underlying self-description those terms and
+   * every AI judgement about relevance/fit are derived from. Only
+   * meaningful once a scan has a result to correct -- see the
+   * PATCH /api/scans/[scanId]/business-profile route.
+   *
+   * Stored on the scan record, which is persisted as jsonb, so (like
+   * discoveryOverrides) no schema change is required.
+   */
+  businessSummaryOverride?: { summary: string; updatedAt: string } | null;
+  /**
    * Website analysis result, persisted as soon as the crawl completes and
    * before any Reddit retrieval.
    *

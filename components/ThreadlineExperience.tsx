@@ -352,7 +352,7 @@ const landingFaq = [
   },
   {
     q: "How do you choose which subreddits to watch?",
-    a: "From your site. We work out what you sell and who for, then look where those conversations actually happen — and you can add or remove communities and keywords whenever you like.",
+    a: "We do not restrict to specific subreddits -- we search across Reddit for terms drawn from your site (what you sell, the problems you solve, your competitors), and AI checks every match for relevance before anything is kept. You can edit those search terms any time from Monitoring config.",
   },
   {
     q: "Are these real conversations?",
@@ -2230,6 +2230,38 @@ export function ThreadlineExperience() {
     }
   }
 
+  async function updateBusinessSummary(summary: string): Promise<boolean> {
+    if (!scanResponse?.scan.id) return false;
+    try {
+      const response = await fetch(
+        `/api/scans/${encodeURIComponent(scanResponse.scan.id)}/business-profile`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ summary }),
+        },
+      );
+      const payload = (await response.json()) as {
+        profile?: { summary: string };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.profile) {
+        throw new Error(payload.error?.message ?? "Your business summary could not be saved.");
+      }
+      const correctedSummary = payload.profile.summary;
+      setScanResponse((current) =>
+        current?.report
+          ? { ...current, report: { ...current.report, profile: { ...current.report.profile, summary: correctedSummary } } }
+          : current,
+      );
+      setStatusMessage("Business summary updated.");
+      return true;
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Your business summary could not be saved.");
+      return false;
+    }
+  }
+
   async function updateMonitoring(
     enabled: boolean,
     watchTerms: RedditMonitoringStatus["watchTerms"],
@@ -2548,6 +2580,7 @@ export function ThreadlineExperience() {
         onDisconnectReddit={disconnectReddit}
         monitoring={monitoring}
         onUpdateMonitoring={updateMonitoring}
+        onUpdateBusinessSummary={updateBusinessSummary}
         monitorRuns={monitorRuns}
         onViewMonitorRun={viewMonitorRun}
         aiVisibility={aiVisibility}

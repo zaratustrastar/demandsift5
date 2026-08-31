@@ -2877,6 +2877,38 @@
   flex-shrink: 0;
 }
 
+.scSidebarInboxGroup {
+  display: flex;
+  flex-direction: column;
+}
+
+.scSidebarInboxHeader {
+  font-weight: 600;
+  color: var(--faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.scSidebarInboxChevron {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.scSidebarInboxChildren {
+  display: flex;
+  flex-direction: column;
+  margin-top: 2px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+  margin-left: 12px;
+}
+
+.scSidebarNavItemIndented {
+  padding-left: 14px;
+  font-size: 13px;
+}
+
 .scSidebarDivider {
   height: 1px;
   background: #f0f0f2;

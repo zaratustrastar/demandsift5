@@ -8,6 +8,7 @@ import { redditDemandDemoData } from "./demo-data";
 import type {
   BusinessProfile,
   ConversationTheme,
+  NavigationSection,
   NavigationSectionId,
   PricingPlan,
   RedditDemandDemoData,
@@ -1587,6 +1588,12 @@ export function ProductDashboard({
   const [activeSection, setActiveSection] = useState<NavigationSectionId>(
     initialSection ?? "dashboard",
   );
+  // Opportunities and Competitors are the two screens that fill in on their
+  // own as monitoring runs -- grouped under one collapsible "Inbox" header,
+  // open by default. AI Citations/Live feed from the original design don't
+  // exist yet (no pipeline behind them), so this stays a two-item group
+  // rather than the full four-item one until those are real.
+  const [inboxOpen, setInboxOpen] = useState(true);
   const relevantConversations = useMemo(() => data.relevantConversations ?? [], [data.relevantConversations]);
   const normalizedAnalyzedDomain = analyzedDomain
     ?.replace(/^https?:\/\//, "")
@@ -1888,19 +1895,53 @@ export function ProductDashboard({
         </div>
 
         <nav className={styles.scSidebarNav}>
-          {navSections.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={goToSection(item.id)}
-              className={`${styles.scSidebarNavItem} ${
-                item.id === activeSection ? styles.scSidebarNavItemActive : ""
-              }`}
-            >
-              <span>{item.label}</span>
-              {item.badge && <span className={styles.scSidebarNavBadge}>{item.badge}</span>}
-            </button>
-          ))}
+          {(() => {
+            const inboxIds: NavigationSectionId[] = ["opportunities", "competitors"];
+            const inboxItems = navSections.filter((item) => inboxIds.includes(item.id));
+            const inboxBadgeTotal = inboxItems.reduce((sum, item) => sum + (item.badge ?? 0), 0);
+            const inboxActive = inboxIds.includes(activeSection);
+            const navItemButton = (item: NavigationSection, indented?: boolean) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={goToSection(item.id)}
+                className={`${styles.scSidebarNavItem} ${indented ? styles.scSidebarNavItemIndented : ""} ${
+                  item.id === activeSection ? styles.scSidebarNavItemActive : ""
+                }`}
+              >
+                <span>{item.label}</span>
+                {item.badge ? <span className={styles.scSidebarNavBadge}>{item.badge}</span> : null}
+              </button>
+            );
+            return navSections.map((item) => {
+              if (inboxIds.includes(item.id)) {
+                if (item.id !== "opportunities") return null;
+                return (
+                  <div className={styles.scSidebarInboxGroup} key="inbox-group">
+                    <button
+                      type="button"
+                      className={`${styles.scSidebarNavItem} ${styles.scSidebarInboxHeader} ${
+                        inboxActive ? styles.scSidebarNavItemActive : ""
+                      }`}
+                      onClick={() => setInboxOpen((open) => !open)}
+                    >
+                      <span>Inbox</span>
+                      {inboxBadgeTotal > 0 && <span className={styles.scSidebarNavBadge}>{inboxBadgeTotal}</span>}
+                      <span className={styles.scSidebarInboxChevron} aria-hidden="true">
+                        {inboxOpen ? "⌄" : "⌃"}
+                      </span>
+                    </button>
+                    {inboxOpen && (
+                      <div className={styles.scSidebarInboxChildren}>
+                        {inboxItems.map((child) => navItemButton(child, true))}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              return navItemButton(item);
+            });
+          })()}
         </nav>
 
         {isFree && onCheckout && (

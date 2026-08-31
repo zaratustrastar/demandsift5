@@ -526,3 +526,161 @@
 @media (prefers-reduced-motion: reduce) {
   .slPage * { transition: none !important; }
 }
+
+/* Results -> Signup -> Done (onboarding steps 6-8). Reuses .scanScreen /
+ * .scanPanel's card chrome; these add width and content-specific rules. */
+.resultsPanel {
+  width: min(720px, calc(100% - 40px));
+  text-align: left;
+}
+.resultsPanel h1 {
+  margin: 10px 0 4px;
+  max-width: none;
+  text-align: left;
+}
+.resultsPanel > .scanKicker {
+  text-align: left;
+}
+.resultsSummary {
+  margin: 0 0 22px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.resultsPrimaryCard {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px 24px;
+  background: #fff;
+  margin-bottom: 18px;
+}
+.resultsPrimaryMeta {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.resultsPrimaryTitle {
+  margin: 8px 0 10px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -.02em;
+  line-height: 1.3;
+}
+.resultsPrimaryWhy {
+  margin: 0 0 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--green);
+  color: #27272a;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.resultsPrimaryReply {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: var(--mint);
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.resultsRowList {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #f0f0f2;
+}
+.resultsRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 11px 2px;
+  border-bottom: 1px solid #f0f0f2;
+  font-size: 13px;
+}
+.resultsRowSub {
+  flex: 0 0 auto;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.resultsRowTitle {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resultsFooterNote {
+  margin: 18px 0 0;
+  color: #a1a1aa;
+  font-size: 12px;
+}
+
+.signupPanel {
+  width: min(460px, calc(100% - 40px));
+}
+.signupPanel p {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.signupGoogleButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 13px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 650;
+  font-size: 14px;
+  text-decoration: none;
+}
+.signupGoogleButton:hover {
+  background: #f7f7f8;
+}
+.signupGoogleButton span {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.signupSkipLink {
+  display: block;
+  margin: 14px auto 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.signupSkipLink:hover {
+  color: var(--ink);
+}
+
+.donePanel {
+  width: min(460px, calc(100% - 40px));
+}
+.doneMark {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  font-size: 22px;
+}
+.doneActions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}

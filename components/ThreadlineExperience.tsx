@@ -8,6 +8,9 @@ import {
   type RedditMonitorRunSummary,
   type AiVisibilityStatus,
   type AiVisibilityScanSummary,
+  type NavigationSectionId,
+  type RedditOpportunity,
+  type RelevantConversation,
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
@@ -31,6 +34,9 @@ type View =
   | "profile"
   | "scanning"
   | "restoring"
+  | "results"
+  | "signup"
+  | "done"
   | "report"
   | "error";
 type AccessLevel = "free" | "pass" | "core";
@@ -426,7 +432,19 @@ function LandingBrand() {
 
 type LandingAccount = { id: string; email: string; name: string | null };
 
-function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => void }) {
+function Landing({
+  onSubmit,
+  account,
+  onSignOut,
+}: {
+  onSubmit: (submission: LandingSubmission) => void;
+  // undefined = still checking; null = signed out; object = signed in.
+  // Lifted to ThreadlineExperience so the post-scan Results/Signup/Done
+  // steps can read the same account state this nav button already did --
+  // see /api/auth/session and the google-oauth.ts sign-in flow it reads.
+  account: LandingAccount | null | undefined;
+  onSignOut: () => void;
+}) {
   // Website and "describe your market / idea" are two equal ways in, not a
   // primary path and a fallback -- see the two-tab requirement this
   // implements. Website stays the default tab.
@@ -435,44 +453,9 @@ function Landing({ onSubmit }: { onSubmit: (submission: LandingSubmission) => vo
   const [contextText, setContextText] = useState("");
   const [error, setError] = useState("");
   const [openFaq, setOpenFaq] = useState(0);
-  // undefined = still checking; null = signed out; object = signed in.
-  // See /api/auth/session and the google-oauth.ts sign-in flow it reads.
-  const [account, setAccount] = useState<LandingAccount | null | undefined>(undefined);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetch("/api/auth/session", { cache: "no-store" });
-        const payload = (await response.json()) as { user: LandingAccount | null };
-        if (!cancelled) setAccount(payload.user);
-      } catch {
-        if (!cancelled) setAccount(null);
-      }
-    })();
-    // The Google sign-in callback redirects back here with ?account=... --
-    // strip it once read rather than leaving it in the address bar. The
-    // fetch above (not this param) is the source of truth for account
-    // state; this is purely cosmetic URL cleanup.
-    if (typeof window !== "undefined" && window.location.search.includes("account=")) {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("account");
-      window.history.replaceState(null, "", url.toString());
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   async function signOut() {
-    setAccount(null);
-    try {
-      await fetch("/api/auth/logout", { method: "POST" });
-    } catch {
-      // Best-effort -- the client already reflects signed-out state either
-      // way, and the session cookie is HttpOnly so there's nothing else to
-      // clean up here even if the request failed.
-    }
+    onSignOut();
   }
 
   function submit(event: FormEvent) {
@@ -1397,6 +1380,203 @@ function RefiningProfile({
   );
 }
 
+type ResultsItem =
+  | { kind: "opportunity"; reliability: number; opportunity: RedditOpportunity }
+  | { kind: "conversation"; reliability: number; conversation: RelevantConversation };
+
+function buildResultsItems(data: NonNullable<ReturnType<typeof scanResponseToDashboard>>): ResultsItem[] {
+  const opportunityItems: ResultsItem[] = data.opportunities.map((opportunity) => ({
+    kind: "opportunity" as const,
+    reliability: opportunity.classification.relevanceScore,
+    opportunity,
+  }));
+  const conversationItems: ResultsItem[] = (data.relevantConversations ?? []).map((conversation) => ({
+    kind: "conversation" as const,
+    reliability: conversation.reliabilityScore,
+    conversation,
+  }));
+  return [...opportunityItems, ...conversationItems].sort((a, b) => b.reliability - a.reliability);
+}
+
+/**
+ * Step 6 in the design handoff's onboarding sequence. Sits between a
+ * completed scan and the account-creation step -- shows the real strongest
+ * match in full, then the rest as compact rows, so "keep these results" has
+ * something concrete behind it before asking for an account. Every number
+ * here comes from data.metrics / the ranked items themselves; nothing is
+ * invented to match a target count.
+ */
+function ResultsPreview({
+  data,
+  domain,
+  inputMode,
+  onKeep,
+}: {
+  data: NonNullable<ReturnType<typeof scanResponseToDashboard>>;
+  domain: string;
+  inputMode: "website" | "context";
+  onKeep: () => void;
+}) {
+  const items = useMemo(() => buildResultsItems(data), [data]);
+  const strongest = items[0];
+  const rest = items.slice(1, 11);
+  const { qualifiedOpportunities, highIntentOpportunities } = data.metrics;
+
+  return (
+    <main className={styles.scanScreen}>
+      <OnboardingHeader activeIndex={4} statusLabel="Results" />
+      <section className={`${styles.scanPanel} ${styles.resultsPanel}`}>
+        <div className={styles.scanKicker}>
+          {inputMode === "context" ? "Scan complete" : `Scan complete · ${domain}`}
+        </div>
+        <h1>Here&apos;s what we found</h1>
+        <p className={styles.resultsSummary}>
+          {qualifiedOpportunities} opportunit{qualifiedOpportunities === 1 ? "y" : "ies"} worth replying to
+          {highIntentOpportunities > 0
+            ? `, ${highIntentOpportunities} of them high intent`
+            : ""}
+          .
+        </p>
+
+        {strongest && (
+          <div className={styles.resultsPrimaryCard}>
+            {strongest.kind === "opportunity" ? (
+              <>
+                <span className={styles.resultsPrimaryMeta}>
+                  {strongest.opportunity.subreddit} &middot; {strongest.opportunity.authorLabel}
+                </span>
+                <h2 className={styles.resultsPrimaryTitle}>{strongest.opportunity.title}</h2>
+                {strongest.opportunity.matchReasons[0] && (
+                  <p className={styles.resultsPrimaryWhy}>{strongest.opportunity.matchReasons[0]}</p>
+                )}
+                {strongest.opportunity.reply?.draft && (
+                  <p className={styles.resultsPrimaryReply}>{strongest.opportunity.reply.draft}</p>
+                )}
+              </>
+            ) : (
+              <>
+                <span className={styles.resultsPrimaryMeta}>
+                  {strongest.conversation.subreddit} &middot; {strongest.conversation.authorLabel}
+                </span>
+                <h2 className={styles.resultsPrimaryTitle}>{strongest.conversation.title}</h2>
+                <p className={styles.resultsPrimaryWhy}>{strongest.conversation.summary}</p>
+              </>
+            )}
+          </div>
+        )}
+
+        {rest.length > 0 && (
+          <div className={styles.resultsRowList}>
+            {rest.map((item) =>
+              item.kind === "opportunity" ? (
+                <div className={styles.resultsRow} key={`opportunity-${item.opportunity.id}`}>
+                  <span className={styles.resultsRowSub}>{item.opportunity.subreddit}</span>
+                  <span className={styles.resultsRowTitle}>{item.opportunity.title}</span>
+                </div>
+              ) : (
+                <div className={styles.resultsRow} key={`conversation-${item.conversation.id}`}>
+                  <span className={styles.resultsRowSub}>{item.conversation.subreddit}</span>
+                  <span className={styles.resultsRowTitle}>{item.conversation.title}</span>
+                </div>
+              ),
+            )}
+          </div>
+        )}
+
+        <p className={styles.resultsFooterNote}>
+          These stay on this browser for 30 days unless you keep them.
+        </p>
+        <button className={styles.tryAgain} type="button" onClick={onKeep} style={{ background: "var(--green)", color: "#fff", borderColor: "var(--green)" }}>
+          Keep these results
+        </button>
+      </section>
+    </main>
+  );
+}
+
+/**
+ * Step 7. Reuses the exact same /api/auth/google/start -> callback round
+ * trip the landing nav's "Log in" link already drives (see google-oauth.ts
+ * and completeGoogleSignIn) -- this screen does not implement its own auth,
+ * it just asks at the moment it matters. Skipping is real: the anonymous
+ * workspace already keeps results for 30 days on its own, so this is an
+ * upgrade to permanent storage, not a gate on seeing them.
+ */
+function SignupGate({
+  qualifiedOpportunities,
+  onSkip,
+}: {
+  qualifiedOpportunities: number;
+  onSkip: () => void;
+}) {
+  return (
+    <main className={styles.scanScreen}>
+      <OnboardingHeader activeIndex={4} statusLabel="Save your results" />
+      <section className={`${styles.scanPanel} ${styles.signupPanel}`}>
+        <div className={styles.scanKicker}>Almost done</div>
+        <h1>
+          Save your {qualifiedOpportunities} opportunit{qualifiedOpportunities === 1 ? "y" : "ies"}
+        </h1>
+        <p>
+          An account keeps these permanently instead of the 30-day anonymous window, and is where
+          monitoring and billing live if you decide to use them later. Free, and a separate decision
+          from anything paid.
+        </p>
+        <a href="/api/auth/google/start" className={styles.signupGoogleButton}>
+          <span aria-hidden="true">G</span> Continue with Google
+        </a>
+        <button type="button" className={styles.signupSkipLink} onClick={onSkip}>
+          Continue without an account
+        </button>
+      </section>
+    </main>
+  );
+}
+
+/**
+ * Step 8. Reached either after a real Google sign-in redirect round trip
+ * (see the justSignedIn handling in ThreadlineExperience's mount effect) or
+ * after choosing "continue without an account" on SignupGate -- copy
+ * adapts to which one happened rather than assuming.
+ */
+function DoneConfirmation({
+  signedIn,
+  onGoToOpportunities,
+  onSeePlans,
+}: {
+  signedIn: boolean;
+  onGoToOpportunities: () => void;
+  onSeePlans: () => void;
+}) {
+  return (
+    <main className={styles.scanScreen}>
+      <OnboardingHeader activeIndex={4} statusLabel="All set" />
+      <section className={`${styles.scanPanel} ${styles.donePanel}`}>
+        <div className={styles.doneMark} aria-hidden="true">&#10003;</div>
+        <h1>{signedIn ? "Your account is set up" : "You're set for now"}</h1>
+        <p>
+          {signedIn
+            ? "Your results are saved to your account. Monitoring stays off until you pick a plan."
+            : "Your results are saved to this browser for 30 days. Sign in any time from the top of the page to keep them longer."}
+        </p>
+        <div className={styles.doneActions}>
+          <button
+            className={styles.tryAgain}
+            type="button"
+            onClick={onGoToOpportunities}
+            style={{ background: "var(--green)", color: "#fff", borderColor: "var(--green)" }}
+          >
+            Go to my opportunities
+          </button>
+          <button className={styles.signupSkipLink} type="button" onClick={onSeePlans}>
+            See plans
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 export function ThreadlineExperience() {
   const [view, setView] = useState<View>("landing");
   const [url, setUrl] = useState("");
@@ -1417,6 +1597,42 @@ export function ThreadlineExperience() {
   const [monitorRuns, setMonitorRuns] = useState<RedditMonitorRunSummary[] | null>(null);
   const [aiVisibility, setAiVisibility] = useState<AiVisibilityStatus | null>(null);
   const [visibilityScans, setVisibilityScans] = useState<AiVisibilityScanSummary[] | null>(null);
+  // undefined = still checking; null = signed out; object = signed in. Read
+  // once on mount (in parallel with the latest-scan restore below) and kept
+  // here, not inside Landing, because the post-scan Results/Signup/Done
+  // steps need it too -- see /api/auth/session and google-oauth.ts.
+  const [account, setAccount] = useState<LandingAccount | null | undefined>(undefined);
+  const [reportInitialSection, setReportInitialSection] = useState<NavigationSectionId>("dashboard");
+  // Read inside the scan-polling effect below without adding `account` to
+  // its dependency array -- that effect creates/polls a scan as a side
+  // effect, so re-running it just because the account fetch resolved
+  // (undefined -> null/object, shortly after mount) would risk restarting
+  // an in-flight scan. This mirrors it live without gating the effect on it.
+  const accountRef = useRef(account);
+  useEffect(() => {
+    accountRef.current = account;
+  }, [account]);
+
+  async function fetchAccountProfile(): Promise<LandingAccount | null> {
+    try {
+      const response = await fetch("/api/auth/session", { cache: "no-store" });
+      const payload = (await response.json()) as { user: LandingAccount | null };
+      return payload.user;
+    } catch {
+      return null;
+    }
+  }
+
+  async function signOutAccount() {
+    setAccount(null);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Best-effort -- the client already reflects signed-out state either
+      // way, and the session cookie is HttpOnly so there's nothing else to
+      // clean up here even if the request failed.
+    }
+  }
   const dashboardData = useMemo(
     () => (scanResponse ? scanResponseToDashboard(scanResponse) : null),
     [scanResponse],
@@ -1427,8 +1643,19 @@ export function ThreadlineExperience() {
     const checkoutState = params.get("checkout");
     const redditState = params.get("reddit");
     const scanId = params.get("scan_id");
+    // Set by /api/auth/google/callback right after a successful sign-in
+    // round trip. The fetch to /api/auth/session below (not this param) is
+    // the source of truth for account state -- this only tells us whether
+    // we just came back from that redirect, to decide "done" vs "report".
+    const justSignedIn = params.get("account") === "connected";
     let cancelled = false;
     let pollTimer = 0;
+
+    if (typeof window !== "undefined" && window.location.search.includes("account=")) {
+      const cleanedUrl = new URL(window.location.href);
+      cleanedUrl.searchParams.delete("account");
+      window.history.replaceState({}, "", `${cleanedUrl.pathname}${cleanedUrl.search}`);
+    }
 
     if (redditState) {
       queueMicrotask(() => {
@@ -1452,7 +1679,11 @@ export function ThreadlineExperience() {
     if (!scanId || (checkoutState !== "success" && checkoutState !== "canceled")) {
       async function restoreLatestWorkspace() {
         try {
-          const response = await fetch("/api/scans/latest", { cache: "no-store" });
+          const [response, userAccount] = await Promise.all([
+            fetch("/api/scans/latest", { cache: "no-store" }),
+            fetchAccountProfile(),
+          ]);
+          if (!cancelled) setAccount(userAccount);
           if (response.status === 401 || response.status === 404) return;
           const latest = (await response.json()) as ApiScanResponse;
           if (!response.ok || cancelled || !latest.scan?.id) return;
@@ -1467,7 +1698,13 @@ export function ThreadlineExperience() {
             setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");
             setView("error");
           } else if (latest.scan.status === "complete" && latest.report) {
-            setView("report");
+            // A signed-in visitor (returning, or just back from the Google
+            // redirect) skips straight past the results/signup gate -- it
+            // only exists to get an anonymous scan claimed by an account in
+            // the first place. justSignedIn distinguishes "just completed
+            // that round trip, show a confirmation" from "ordinary reload
+            // of an already-claimed workspace, go straight to the report".
+            setView(userAccount ? (justSignedIn ? "done" : "report") : "results");
           } else {
             setView("scanning");
           }
@@ -1779,7 +2016,7 @@ export function ThreadlineExperience() {
         setScanProgress(created.scan.progress);
         setAccessLevel(effectiveAccessLevel(created.access));
         if (created.scan.status === "complete" && created.report) {
-          setView("report");
+          setView(accountRef.current ? "report" : "results");
           return;
         }
 
@@ -1816,7 +2053,7 @@ export function ThreadlineExperience() {
               setScanResponse(completed);
               setScanProgress(completed.scan.progress);
               setAccessLevel(effectiveAccessLevel(completed.access));
-              setView("report");
+              setView(accountRef.current ? "report" : "results");
               return;
             }
             if (latest.scan.status === "failed") {
@@ -2194,7 +2431,7 @@ export function ThreadlineExperience() {
     }
   }
 
-  if (view === "landing") return <Landing onSubmit={startScan} />;
+  if (view === "landing") return <Landing onSubmit={startScan} account={account} onSignOut={signOutAccount} />;
   if (view === "analyzing") {
     return (
       <Scanning
@@ -2240,6 +2477,39 @@ export function ThreadlineExperience() {
       />
     );
   }
+  if (view === "results" && dashboardData) {
+    return (
+      <ResultsPreview
+        data={dashboardData}
+        domain={safeDomain(url)}
+        inputMode={inputMode}
+        onKeep={() => setView("signup")}
+      />
+    );
+  }
+  if (view === "signup" && dashboardData) {
+    return (
+      <SignupGate
+        qualifiedOpportunities={dashboardData.metrics.qualifiedOpportunities}
+        onSkip={() => setView("done")}
+      />
+    );
+  }
+  if (view === "done") {
+    return (
+      <DoneConfirmation
+        signedIn={Boolean(account)}
+        onGoToOpportunities={() => {
+          setReportInitialSection("dashboard");
+          setView("report");
+        }}
+        onSeePlans={() => {
+          setReportInitialSection("billing");
+          setView("report");
+        }}
+      />
+    );
+  }
   if (view === "error") {
     return (
       <main className={styles.scanScreen}>
@@ -2266,6 +2536,7 @@ export function ThreadlineExperience() {
         analyzedDomain={safeDomain(url)}
         scanResult={dashboardData ?? undefined}
         accessLevel={accessLevel}
+        initialSection={reportInitialSection}
         onNewScan={() => setView("landing")}
         onCheckout={checkout}
         onRegenerateReply={regenerateReply}

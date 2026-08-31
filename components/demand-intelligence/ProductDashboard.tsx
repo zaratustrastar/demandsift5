@@ -1773,6 +1773,92 @@ export function ProductDashboard({
 
   const topCarouselItems = carouselItems.slice(0, 3);
 
+  if (activeSection === "billing") {
+    const planIdForAccessLevel: Record<AccessLevel, PricingPlan["id"]> = {
+      free: "market-scan",
+      pass: "full-access-pass",
+      core: "core",
+    };
+    const currentPlan =
+      data.pricing.find((plan) => plan.id === planIdForAccessLevel[accessLevel]) ??
+      data.pricing[0];
+    const formatPrice = (plan: PricingPlan) =>
+      plan.priceInCents === 0 ? "$0" : `$${(plan.priceInCents / 100).toFixed(0)}`;
+    const upgradePlans = isFree ? data.pricing.filter((plan) => plan.id !== "market-scan") : [];
+
+    return (
+      <>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+          rel="stylesheet"
+        />
+        <div className={styles.billingStandalone}>
+          <header className={styles.billingHeader}>
+            <button type="button" className={styles.billingHeaderLogo} onClick={goToSection("dashboard")}>
+              <Icon name="logo" size={14} />
+              Scooptr
+            </button>
+            <button type="button" className={styles.billingBackLink} onClick={goToSection("dashboard")}>
+              &larr; Back to dashboard
+            </button>
+            <span className={styles.billingHeaderSpacer} />
+            <span className={styles.billingUserChip}>{data.business.hostname}</span>
+          </header>
+
+          <div className={styles.billingContent}>
+            <div>
+              <h1>Billing</h1>
+              <p className={styles.appHeaderSub}>Your plan and how to change it.</p>
+            </div>
+
+            <div className={styles.lightSection}>
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardEyebrow}>current plan</span>
+                <span className={styles.simpleCardTitle}>{currentPlan.name}</span>
+                <p className={styles.simpleCardBody}>{currentPlan.description}</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {currentPlan.features.map((feature) => (
+                    <span
+                      key={feature}
+                      className={styles.todayTag}
+                      style={{ background: "var(--green-soft)", color: "var(--green-dark)" }}
+                    >
+                      {feature}
+                    </span>
+                  ))}
+                </div>
+                <span className={styles.simpleCardMeta}>{currentPlan.checkoutNote}</span>
+              </div>
+
+              {upgradePlans.map((plan) => (
+                <div key={plan.id} className={styles.simpleCard}>
+                  <span className={styles.simpleCardEyebrow}>
+                    {formatPrice(plan)}
+                    {plan.cadence === "monthly" ? "/month" : plan.cadence === "one-time" ? ` one-time \u00b7 ${plan.durationDays ?? 7} days` : ""}
+                  </span>
+                  <span className={styles.simpleCardTitle}>{plan.name}</span>
+                  <p className={styles.simpleCardBody}>{plan.description}</p>
+                  {onCheckout && (plan.id === "full-access-pass" || plan.id === "core") && (
+                    <button
+                      type="button"
+                      className={styles.blueCta}
+                      style={{ alignSelf: "flex-start" }}
+                      onClick={() => onCheckout(plan.id as CheckoutPlanId)}
+                    >
+                      Choose {plan.name}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       {/* Design handoff (design_handoff_scooptr) specifies Instrument Sans
@@ -2233,63 +2319,6 @@ export function ProductDashboard({
             </div>
           )}
 
-          {activeSection === "billing" && (() => {
-            const planIdForAccessLevel: Record<AccessLevel, PricingPlan["id"]> = {
-              free: "market-scan",
-              pass: "full-access-pass",
-              core: "core",
-            };
-            const currentPlan =
-              data.pricing.find((plan) => plan.id === planIdForAccessLevel[accessLevel]) ??
-              data.pricing[0];
-            const formatPrice = (plan: PricingPlan) =>
-              plan.priceInCents === 0 ? "$0" : `$${(plan.priceInCents / 100).toFixed(0)}`;
-            const upgradePlans = isFree
-              ? data.pricing.filter((plan) => plan.id !== "market-scan")
-              : [];
-            return (
-              <div className={styles.lightSection}>
-                <div className={styles.simpleCard}>
-                  <span className={styles.simpleCardEyebrow}>current plan</span>
-                  <span className={styles.simpleCardTitle}>{currentPlan.name}</span>
-                  <p className={styles.simpleCardBody}>{currentPlan.description}</p>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                    {currentPlan.features.map((feature) => (
-                      <span
-                        key={feature}
-                        className={styles.todayTag}
-                        style={{ background: "var(--green-soft)", color: "var(--green-dark)" }}
-                      >
-                        {feature}
-                      </span>
-                    ))}
-                  </div>
-                  <span className={styles.simpleCardMeta}>{currentPlan.checkoutNote}</span>
-                </div>
-
-                {upgradePlans.map((plan) => (
-                  <div key={plan.id} className={styles.simpleCard}>
-                    <span className={styles.simpleCardEyebrow}>
-                      {formatPrice(plan)}
-                      {plan.cadence === "monthly" ? "/month" : plan.cadence === "one-time" ? ` one-time \u00b7 ${plan.durationDays ?? 7} days` : ""}
-                    </span>
-                    <span className={styles.simpleCardTitle}>{plan.name}</span>
-                    <p className={styles.simpleCardBody}>{plan.description}</p>
-                    {onCheckout && (plan.id === "full-access-pass" || plan.id === "core") && (
-                      <button
-                        type="button"
-                        className={styles.blueCta}
-                        style={{ alignSelf: "flex-start" }}
-                        onClick={() => onCheckout(plan.id as CheckoutPlanId)}
-                      >
-                        Choose {plan.name}
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
         </div>
       </div>
       </div>

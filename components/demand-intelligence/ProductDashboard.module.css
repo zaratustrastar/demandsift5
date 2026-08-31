@@ -1,5 +1,6 @@
 .productShell,
-.appShell {
+.appShell,
+.billingStandalone {
   --ink: #0d0d0f;
   --muted: #52525b;
   --faint: #71717a;
@@ -2669,6 +2670,94 @@
 
 .appShell button {
   font: inherit;
+}
+
+/* Billing renders as its own full-width page, deliberately outside the
+ * sidebar shell above (see design_handoff_scooptr's App shell section --
+ * "Billing is not inside the shell"). Same design tokens, no grid/sidebar. */
+.billingStandalone {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #fbfbfc;
+  color: var(--ink);
+  font-family: var(--font-ui);
+}
+
+.billingStandalone *,
+.billingStandalone *::before,
+.billingStandalone *::after {
+  box-sizing: border-box;
+}
+
+.billingStandalone button {
+  font: inherit;
+}
+
+.billingHeader {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 18px 34px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.billingHeaderLogo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  color: var(--ink);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.billingBackLink {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.billingBackLink:hover {
+  color: var(--ink);
+}
+
+.billingHeaderSpacer {
+  margin-left: auto;
+}
+
+.billingUserChip {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--faint);
+  background: var(--fill-subtle, #f4f4f5);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+}
+
+.billingContent {
+  max-width: 1120px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 52px 40px 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.billingContent h1 {
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: -0.036em;
+  margin: 0 0 4px;
 }
 
 .scSidebar {

@@ -20,6 +20,7 @@ export type NavigationSectionId =
   | "visibility"
   | "replies"
   | "results"
+  | "monitoring"
   | "settings"
   | "billing";
 

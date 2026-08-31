@@ -1779,6 +1779,7 @@ export function ProductDashboard({
     visibility: "Whether assistants name you, and what they read.",
     replies: "Drafts, posted replies and what they did.",
     results: "Everything this scan found, including what's stored but not shown.",
+    monitoring: "Daily Reddit monitoring, watch terms and your Reddit connection.",
     settings: "Your business profile, competitors and Reddit connection.",
     billing: "Your plan and how to change it.",
   };
@@ -2359,6 +2360,51 @@ export function ProductDashboard({
                   <p>Results from this scan will appear here once they&apos;re available.</p>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeSection === "monitoring" && (
+            <div className={styles.lightSection}>
+              <RedditMonitoringPanel
+                key={monitoring
+                  ? `config:${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
+                  : "monitoring-config-unavailable"}
+                monitoring={monitoring}
+                onUpdate={onUpdateMonitoring}
+                runs={monitorRuns}
+                onViewRun={onViewMonitorRun}
+              />
+
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardTitle}>Reddit account</span>
+                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                  {redditConnection.connected
+                    ? `Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`
+                    : "Connect it to post replies from here. Without it you copy and paste \u2014 the drafts work either way."}
+                </p>
+                {redditConnection.connected ? (
+                  <button
+                    type="button"
+                    className={styles.ghostButton}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => void disconnectReddit()}
+                    disabled={disconnectingReddit}
+                  >
+                    {disconnectingReddit ? "Disconnecting\u2026" : "Disconnect Reddit"}
+                  </button>
+                ) : redditConnection.canConnect ? (
+                  <button
+                    type="button"
+                    className={styles.darkCta}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={onConnectReddit}
+                  >
+                    Connect Reddit
+                  </button>
+                ) : redditConnection.requiresPaidAccess ? (
+                  <span className={styles.simpleCardMeta}>Posting to Reddit requires a paid plan.</span>
+                ) : null}
+              </div>
             </div>
           )}
 

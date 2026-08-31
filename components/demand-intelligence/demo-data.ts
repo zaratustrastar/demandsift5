@@ -399,6 +399,7 @@ const baseNavigation: NavigationSection[] = [
     badge: opportunities.length + lockedCounts.readyReplies,
   },
   { id: "results", label: "Results" },
+  { id: "monitoring", label: "Monitoring config" },
   { id: "settings", label: "Settings" },
   { id: "billing", label: "Billing" },
 ];

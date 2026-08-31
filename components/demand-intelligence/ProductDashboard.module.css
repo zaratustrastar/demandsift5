@@ -1,6 +1,7 @@
 .productShell,
 .appShell,
-.billingStandalone {
+.billingStandalone,
+.valuePropOverlay {
   --ink: #0d0d0f;
   --muted: #52525b;
   --faint: #71717a;
@@ -3349,6 +3350,107 @@
   }
 
   .overviewColumns {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Value-proposition modal, shown over Overview while no plan is active. */
+.valuePropOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(13, 13, 15, 0.45);
+  overflow-y: auto;
+}
+
+.valuePropModal {
+  position: relative;
+  width: min(620px, 100%);
+  margin: auto;
+  background: #fff;
+  border-radius: 16px;
+  padding: 40px 40px 34px;
+  box-shadow: 0 40px 80px -30px rgba(9, 9, 11, 0.45);
+}
+
+.valuePropClose {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.valuePropClose:hover {
+  background: #f4f4f5;
+}
+
+.valuePropEyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.valuePropModal h2 {
+  margin: 8px 0 10px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.026em;
+  line-height: 1.25;
+  max-width: 480px;
+}
+
+.valuePropModal > p {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.valuePropCards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 26px;
+}
+
+.valuePropCard {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 14px 16px;
+  background: var(--canvas);
+}
+
+.valuePropCard > strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: var(--ink);
+}
+
+.valuePropCard > p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .valuePropCards {
     grid-template-columns: 1fr;
   }
 }

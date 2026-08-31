@@ -1594,6 +1594,13 @@ export function ProductDashboard({
   // exist yet (no pipeline behind them), so this stays a two-item group
   // rather than the full four-item one until those are real.
   const [inboxOpen, setInboxOpen] = useState(true);
+  // Shown once per session over the Overview tab while no plan is active.
+  // Deliberately does NOT claim the dashboard is empty -- the free scan's
+  // real results are already shown here, which is true in this product
+  // even before payment. What's actually off is ongoing monitoring, so
+  // that's the honest premise (matches the sidebar's existing "Monitoring
+  // is off" card copy, just with more room to make the case).
+  const [valuePropDismissed, setValuePropDismissed] = useState(false);
   const relevantConversations = useMemo(() => data.relevantConversations ?? [], [data.relevantConversations]);
   const normalizedAnalyzedDomain = analyzedDomain
     ?.replace(/^https?:\/\//, "")
@@ -1878,6 +1885,54 @@ export function ProductDashboard({
         href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
         rel="stylesheet"
       />
+      {activeSection === "dashboard" && isFree && onCheckout && !valuePropDismissed && (
+        <div className={styles.valuePropOverlay}>
+          <div className={styles.valuePropModal}>
+            <button
+              type="button"
+              className={styles.valuePropClose}
+              onClick={() => setValuePropDismissed(true)}
+              aria-label="Dismiss"
+            >
+              &times;
+            </button>
+            <span className={styles.valuePropEyebrow}>{data.business.hostname}</span>
+            <h2>Monitoring isn&apos;t running on {data.business.hostname} yet</h2>
+            <p>
+              What you&apos;re looking at is a one-time snapshot from your free scan. New
+              conversations show up on Reddit every day, and none of them get read until a plan
+              is active.
+            </p>
+            <div className={styles.valuePropCards}>
+              <div className={styles.valuePropCard}>
+                <strong>Be first in the thread</strong>
+                <p>
+                  People post exactly this problem on Reddit every day. Whoever replies first
+                  with something useful usually gets named.
+                </p>
+              </div>
+              <div className={styles.valuePropCard}>
+                <strong>Replies keep working after you write them</strong>
+                <p>
+                  Reddit threads rank in Google search results for years. One good reply keeps
+                  sending people your way long after you post it.
+                </p>
+              </div>
+              <div className={styles.valuePropCard}>
+                <strong>Show up when people ask AI instead</strong>
+                <p>
+                  ChatGPT and Perplexity often quote Reddit threads when someone asks what tool
+                  to use for something.
+                </p>
+              </div>
+            </div>
+            <button type="button" className={styles.blueCta} onClick={goToSection("billing")}>
+              Start finding customers &rarr;
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className={styles.appShell}>
       <aside className={styles.scSidebar}>
         <div className={styles.scSidebarLogo}>

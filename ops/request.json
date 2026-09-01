@@ -1,6 +1,11 @@
 {
-  "id": "diagnose-apify-403-2026-08-22",
-  "ops": ["reddit-config", "runtime", "status"],
+  "id": "set-reddit-year-2026-09-02",
+  "ops": [
+    "set-reddit-config APIFY_REDDIT_TIME_RANGE year",
+    "reddit-config",
+    "runtime",
+    "status"
+  ],
   "inspectScans": [],
   "startScan": null
 }

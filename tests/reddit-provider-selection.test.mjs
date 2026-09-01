@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
 /**
  * Trudax and Harshmaur must be interchangeable behind one contract.
@@ -13,63 +12,8 @@ import ts from "typescript";
  * rather than assumed.
  */
 
-const u = (c) => `data:text/javascript;base64,${Buffer.from(c).toString("base64")}`;
-const cc = (s, f) => ts.transpileModule(s, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  fileName: f,
-}).outputText;
-
-const here = (p) => new URL(p, import.meta.url);
-const stub = u("export {};");
-
-const ranking = u(cc(
-  (await readFile(here("../lib/intelligence/opportunity-ranking.ts"), "utf8"))
-    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub)), "r.ts"));
-const natural = u(cc(
-  (await readFile(here("../lib/providers/reddit-natural-queries.ts"), "utf8"))
-    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking)), "n.ts"));
-const queryFamilies = u(cc(
-  (await readFile(here("../lib/providers/reddit-query-families.ts"), "utf8"))
-    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-    .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural)), "qf.ts"));
-const searchUrl = u(cc(
-  await readFile(here("../lib/providers/reddit-search-url.ts"), "utf8"), "su.ts"));
-// Compiled from the real sources so retry/backoff selection behavior is
-// actually exercised, not assumed away by a stub.
-const apifyRetry = u(cc(
-  await readFile(here("../lib/providers/apify-retry.ts"), "utf8"), "ar.ts"));
-const resilience = u(cc(
-  await readFile(here("../lib/server/resilience.ts"), "utf8"), "res.ts"));
-
-let harshSrc = await readFile(here("../lib/providers/reddit-harshmaur.server.ts"), "utf8");
-harshSrc = harshSrc
-  .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-  .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-  .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural))
-  .replaceAll('"@/lib/providers/reddit-query-families"', JSON.stringify(queryFamilies))
-  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl))
-  .replaceAll('"@/lib/providers/apify-retry"', JSON.stringify(apifyRetry))
-  .replaceAll('"@/lib/server/resilience"', JSON.stringify(resilience));
-const harshmaurModule = u(cc(harshSrc, "h.ts"));
-const { HarshmaurRedditProvider } = await import(harshmaurModule);
-
-let redditSrc = await readFile(here("../lib/providers/reddit.server.ts"), "utf8");
-redditSrc = redditSrc
-  .replaceAll('"@/lib/providers/mock-reddit"', JSON.stringify(u(
-    "export class MockRedditProvider{name='mock-reddit';sourceMode='mock';async discover(){return{candidates:[],searchPlan:[],sourceMode:'mock',diagnostics:{}}}async enrich(){return{conversations:[],sourceMode:'mock',diagnostics:{}}}}")))
-  .replaceAll('"@/lib/providers/reddit-harshmaur.server"', JSON.stringify(harshmaurModule))
-  .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-  .replaceAll('"@/lib/server/runtime-env"', JSON.stringify(u(
-    "export function isProductionRuntime(env=process.env){return (env.APP_RUNTIME_ENV||env.NODE_ENV)==='production';}")))
-  .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-  .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-  .replaceAll('"@/lib/providers/apify-retry"', JSON.stringify(apifyRetry))
-  .replaceAll('"@/lib/server/resilience"', JSON.stringify(resilience));
-const reddit = await import(u(cc(redditSrc, "reddit.server.ts")));
+const { HarshmaurRedditProvider } = await loadTsModule("lib/providers/reddit-harshmaur.server.ts");
+const reddit = await loadTsModule("lib/providers/reddit.server.ts");
 
 const tvcp = {
   queries: {
@@ -405,7 +349,7 @@ test("a Harshmaur run that times out with zero retained records is retried, not 
 
   assert.equal(runStarts, 2, "the empty timed-out run must trigger exactly one retry, starting a fresh run");
   assert.equal(result.candidates.length, 1);
-  assert.equal(result.diagnostics.degraded, undefined, "a batch that eventually succeeds is not degraded");
+  assert.equal(result.diagnostics.degraded, false, "a batch that eventually succeeds is not degraded");
 });
 
 test("chunked discovery preserves a successful query batch when another batch exhausts its retries", async () => {

@@ -19,7 +19,8 @@ import type {
   RedditSearchResponse,
 } from "@/lib/providers/contracts";
 import { isProductionRuntime } from "@/lib/server/runtime-env";
-import { ApifyTransientError, APIFY_RETRYABLE_RUN_STATUSES, isApifyRetryableHttpStatus } from "@/lib/providers/apify-retry";
+import { ApifyTransientError } from "@/lib/providers/apify-retry";
+import { ApifyRunRecovery, ApifyRecoveryError } from "./apify-run-recovery";
 import { withRetry } from "@/lib/server/resilience";
 import type {
   EnrichedRedditConversation,
@@ -1446,6 +1447,9 @@ export class ApifyRedditTestProvider implements RedditProvider {
   private readonly timeRange: ApifySearchActorInput["time"];
   private readonly fetchImpl: typeof fetch;
   private readonly discoveryRetryAttempts: number;
+  private readonly runRecovery: ApifyRunRecovery;
+  private readonly signal?: AbortSignal;
+  private readonly onActorStarted?: (checkpoint: import("./contracts").RedditActorCheckpoint) => Promise<void>;
 
   constructor(input: {
     actorId: string;
@@ -1456,6 +1460,9 @@ export class ApifyRedditTestProvider implements RedditProvider {
     timeoutMs?: number;
     timeRange?: ApifySearchActorInput["time"];
     discoveryRetryAttempts?: number;
+    runRecovery?: ApifyRunRecovery;
+    signal?: AbortSignal;
+    onActorStarted?: (checkpoint: import("./contracts").RedditActorCheckpoint) => Promise<void>;
     fetchImpl?: typeof fetch;
   }) {
     this.actorId = apifyActorId(input.actorId);
@@ -1468,209 +1475,18 @@ export class ApifyRedditTestProvider implements RedditProvider {
     this.timeRange = input.timeRange ?? "month";
     this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
     this.fetchImpl = input.fetchImpl ?? fetch;
+    this.runRecovery = input.runRecovery ?? new ApifyRunRecovery();
+    this.signal = input.signal;
+    this.onActorStarted = input.onActorStarted;
   }
 
-  private async runActor(
-    actorInput: ApifyRedditActorInput,
-    timeoutMs = this.timeoutMs,
-  ): Promise<unknown[]> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const headers = {
-      accept: "application/json",
-      authorization: `Bearer ${this.token}`,
-      "content-type": "application/json",
-    };
-
-    const readJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
-      const declaredBytes = Number(response.headers.get("content-length") ?? 0);
-      if (Number.isFinite(declaredBytes) && declaredBytes > maximumBytes) {
-        throw new Error("The Apify Reddit test response exceeded the size limit.");
-      }
-      const raw = await response.text();
-      if (new TextEncoder().encode(raw).byteLength > maximumBytes) {
-        throw new Error("The Apify Reddit test response exceeded the size limit.");
-      }
-      if (!response.ok) {
-        const message = `Apify Reddit test request failed with HTTP ${response.status}.`;
-        throw isApifyRetryableHttpStatus(response.status)
-          ? new ApifyTransientError(message)
-          : new Error(message);
-      }
-      try {
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-        throw new Error("The Apify Reddit test provider returned invalid JSON.");
-      }
-    };
-
-    const safeGet = async (endpoint: URL): Promise<Response> => {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          const response = await this.fetchImpl(endpoint, {
-            method: "GET",
-            headers,
-            signal: controller.signal,
-          });
-          if (response.ok || !isApifyRetryableHttpStatus(response.status) || attempt === 2) return response;
-
-          const retryAfterHeader = response.headers.get("retry-after");
-          const retryAfterSeconds = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
-          await response.text().catch(() => "");
-          const delayMs = Number.isFinite(retryAfterSeconds)
-            ? Math.min(Math.max(0, retryAfterSeconds * 1_000), 5_000)
-            : Math.min(500 * 2 ** attempt, 2_000);
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        } catch (error) {
-          lastError = error;
-          if (controller.signal.aborted || attempt === 2) throw error;
-          await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
-        }
-      }
-      throw lastError instanceof Error
-        ? new ApifyTransientError(lastError.message)
-        : new ApifyTransientError("Apify Reddit test GET request failed.");
-    };
-
-    const runData = (payload: unknown): Record<string, unknown> => {
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        throw new Error("The Apify Reddit test provider returned invalid run metadata.");
-      }
-      const data = (payload as { data?: unknown }).data;
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error("The Apify Reddit test provider returned invalid run metadata.");
-      }
-      return data as Record<string, unknown>;
-    };
-
-    let runId = "";
-    let status = "NOT_STARTED";
-    let pollCount = 0;
-
-    try {
-      const startEndpoint = new URL(
-        `/v2/actors/${encodeURIComponent(this.actorId)}/runs`,
-        "https://api.apify.com",
-      );
-      // Start asynchronously and obtain the run ID immediately. Holding this
-      // non-idempotent POST open while the Actor works makes a transient gateway
-      // 502 ambiguous: retrying could create and charge for a duplicate run.
-      // Once we have runId, all waiting/reading happens through retry-safe GETs.
-      startEndpoint.searchParams.set("waitForFinish", "0");
-      startEndpoint.searchParams.set("timeout", String(apifyActorTimeoutSeconds(timeoutMs)));
-      // Platform-level dataset cap. This was pinned at 100, which silently
-      // truncated any run above that regardless of the requested acquisition
-      // budget and would defeat the 200-300 candidate target outright.
-      startEndpoint.searchParams.set("maxItems", String(Math.min(400, actorInput.maxItems)));
-      // Scale with the requested volume: a cap pinned at $0.50 would abort a
-      // 250-item run partway and waste the spend already incurred.
-      const chargeCapUsd = Math.min(3, Math.max(0.5, actorInput.maxItems * 0.006));
-      startEndpoint.searchParams.set("maxTotalChargeUsd", chargeCapUsd.toFixed(2));
-
-      let startResponse: Response;
-      try {
-        startResponse = await this.fetchImpl(startEndpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(actorInput),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        // No response was ever received, so no run could have been billed --
-        // always safe to retry, unlike an ambiguous mid-flight gateway error.
-        if (controller.signal.aborted) {
-          throw new ApifyTransientError(
-            `The Apify Reddit test actor could not be started within ${Math.ceil(timeoutMs / 1_000)} seconds.`,
-          );
-        }
-        throw new ApifyTransientError(
-          error instanceof Error
-            ? `The Apify Reddit test actor could not be started: ${error.message}`
-            : "The Apify Reddit test actor could not be started due to a network error.",
-        );
-      }
-      const started = runData(await readJson(startResponse, 1_000_000));
-      runId = stringValue(started.id, 120);
-      status = stringValue(started.status, 40).toUpperCase();
-      let statusMessage = stringValue(started.statusMessage, 500);
-      let datasetId = stringValue(started.defaultDatasetId, 120);
-      if (!runId || !status) {
-        throw new Error("The Apify Reddit test provider returned incomplete run metadata.");
-      }
-
-      const terminalStatuses = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
-      while (!terminalStatuses.has(status)) {
-        pollCount += 1;
-        const statusEndpoint = new URL(
-          `/v2/actor-runs/${encodeURIComponent(runId)}`,
-          "https://api.apify.com",
-        );
-        statusEndpoint.searchParams.set("waitForFinish", "60");
-        const statusResponse = await safeGet(statusEndpoint);
-        const current = runData(await readJson(statusResponse, 1_000_000));
-        status = stringValue(current.status, 40).toUpperCase();
-        statusMessage = stringValue(current.statusMessage, 500);
-        datasetId = stringValue(current.defaultDatasetId, 120) || datasetId;
-        if (!status) {
-          throw new Error("The Apify Reddit test provider returned incomplete run status.");
-        }
-      }
-
-      const usablePartialDataset = status === "TIMED-OUT" && Boolean(datasetId);
-      if (status !== "SUCCEEDED" && !usablePartialDataset) {
-        const message = `The Apify Reddit test run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`;
-        throw APIFY_RETRYABLE_RUN_STATUSES.has(status) ? new ApifyTransientError(message) : new Error(message);
-      }
-      if (!datasetId) {
-        throw new ApifyTransientError("The Apify Reddit test run completed without a dataset.");
-      }
-
-      // Apify returns dataset items in pages. A single 100-item request used to
-      // silently truncate larger runs, so acquisition could never exceed 100
-      // records no matter what the actor produced.
-      const datasetPageSize = 100;
-      const wanted = Math.max(1, actorInput.maxItems);
-      const payload: unknown[] = [];
-      for (let offset = 0; offset < wanted; offset += datasetPageSize) {
-        const datasetEndpoint = new URL(
-          `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
-          "https://api.apify.com",
-        );
-        datasetEndpoint.searchParams.set("clean", "true");
-        datasetEndpoint.searchParams.set("format", "json");
-        datasetEndpoint.searchParams.set("limit", String(Math.min(datasetPageSize, wanted - offset)));
-        datasetEndpoint.searchParams.set("offset", String(offset));
-
-        const datasetResponse = await safeGet(datasetEndpoint);
-        const page = await readJson(datasetResponse, 5_000_000);
-        if (!Array.isArray(page)) {
-          throw new Error("The Apify Reddit test provider returned an invalid dataset.");
-        }
-        payload.push(...page);
-        if (page.length < Math.min(datasetPageSize, wanted - offset)) break;
-      }
-      if (usablePartialDataset && payload.length === 0) {
-        throw new ApifyTransientError("The timed-out Apify Reddit test run did not retain any usable records.");
-      }
-      if (usablePartialDataset) {
-        console.warn("Using bounded partial Apify Reddit results after Actor timeout", {
-          actorStatus: status,
-          datasetItems: payload.length,
-        });
-      }
-      return payload;
-    } catch (error) {
-      if (controller.signal.aborted) {
-        throw new ApifyTransientError(
-          `The Apify Reddit test run timed out after ${Math.ceil(timeoutMs / 1_000)} seconds ` +
-          `(actor status ${status || "UNKNOWN"}, polls ${pollCount}, run ${runId || "not-started"}).`,
-        );
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
+  private async runActor(actorInput: ApifyRedditActorInput, timeoutMs = this.timeoutMs, purpose?: "mapping-recovery"): Promise<unknown[]> {
+    return this.runRecovery.run({ actorId: this.actorId, actorInput,
+      platformMaxItems: Math.min(400, actorInput.maxItems), wantedItems: Math.max(1, actorInput.maxItems),
+      maxChargeUsd: Math.min(3, Math.max(0.5, actorInput.maxItems * 0.006)), timeoutMs,
+      actorTimeoutSeconds: apifyActorTimeoutSeconds(timeoutMs), maxStarts: Math.max(3, this.discoveryRetryAttempts),
+      token: this.token, fetchImpl: this.fetchImpl, signal: this.signal, label: "Apify Reddit test",
+      maximumMetadataBytes: 1_000_000, maximumDatasetPageBytes: 5_000_000, onStarted: this.onActorStarted, purpose });
   }
 
   async discover(
@@ -1740,6 +1556,7 @@ export class ApifyRedditTestProvider implements RedditProvider {
     // client gets 30 seconds to observe its terminal status and dataset.
     const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 600_000));
     const payload = await withRetry(() => this.runActor(discoveryInput, discoveryTimeoutMs), {
+      signal: this.signal,
       attempts: this.discoveryRetryAttempts,
       initialDelayMs: 1_500,
       maximumDelayMs: 8_000,
@@ -1870,6 +1687,8 @@ export class ApifyRedditTestProvider implements RedditProvider {
       payload = await this.runActor(primaryInput, apifyEnrichmentTimeoutMs(this.timeoutMs));
     } catch (error) {
       console.error("Apify Reddit thread enrichment failed", error);
+      this.signal?.throwIfAborted();
+      if (error instanceof ApifyRecoveryError) throw error;
       const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";
       return {
         conversations: candidates.map((candidate) =>
@@ -1920,12 +1739,15 @@ export class ApifyRedditTestProvider implements RedditProvider {
           const recoveryPayload = await this.runActor(
             recoveryInput,
             apifyEnrichmentTimeoutMs(this.timeoutMs),
+            "mapping-recovery",
           );
           recoveryPayloadItems = recoveryPayload.length;
           const before = mapped.size;
           mapFromPayload(initiallyUnmatched, recoveryPayload);
           recovered = mapped.size - before;
         } catch (error) {
+          this.signal?.throwIfAborted();
+          if (error instanceof ApifyRecoveryError) throw error;
           recoveryError = true;
           console.error("Apify Reddit thread enrichment recovery failed", error);
         }
@@ -2187,6 +2009,9 @@ export class ApprovedHttpRedditProvider implements RedditProvider {
 export function createRedditProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   liveProviders: Readonly<Record<string, RedditProvider>> = {},
+  observation: { onActorRun?: (event: import("./contracts").RedditActorEvent) => void | Promise<void>;
+    onActorStarted?: (event: import("./contracts").RedditActorCheckpoint) => Promise<void>; fetchImpl?: typeof fetch;
+    runRecovery?: ApifyRunRecovery; signal?: AbortSignal } = {},
 ): RedditProvider {
   const selected =
     env.REDDIT_PROVIDER?.trim().toLocaleLowerCase("en-US") ||
@@ -2209,6 +2034,8 @@ export function createRedditProviderFromEnv(
       throw new Error("APIFY_REDDIT_TIME_RANGE must be day, week, month, year, or all.");
     }
     return new ApifyRedditTestProvider({
+      runRecovery: observation.runRecovery, signal: observation.signal, onActorStarted: observation.onActorStarted,
+      fetchImpl: observation.fetchImpl,
       actorId: required(env.APIFY_REDDIT_ACTOR_ID, "APIFY_REDDIT_ACTOR_ID"),
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
       maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 250, 1, 400),
@@ -2229,6 +2056,10 @@ export function createRedditProviderFromEnv(
   // production scan is expected to use.
   if (selected === "harshmaur" || selected === "apify-harshmaur") {
     const primary = new HarshmaurRedditProvider({
+      runRecovery: observation.runRecovery, signal: observation.signal,
+      fetchImpl: observation.fetchImpl,
+      onActorStarted: observation.onActorStarted,
+      onActorRun: observation.onActorRun,
       actorId: env.HARSHMAUR_REDDIT_ACTOR_ID?.trim() || "harshmaur/reddit-scraper",
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
       // Lowered from 250/12 after production testing showed the actor
@@ -2273,9 +2104,10 @@ export function createRedditProviderFromEnv(
       // fresh run via withRetry without first aborting the run it was
       // giving up on, so a queued ("READY") run and its replacement both
       // ended up live at once, compounding with every retry. That is now
-      // fixed at the source (runActor aborts capturedRunId before any
-      // retry-triggering throw, unless it already reached a terminal
-      // status on its own) -- so concurrency here is purely a wall-clock
+      // guarded by durable run reconciliation: a known run is inspected
+      // and only a confirmed failed terminal state permits replacement.
+      // A best-effort abort or lost start response is not confirmation.
+      // Concurrency here is a per-scan wall-clock
       // tuning knob, not a safety mechanism, and defaults to the full
       // query cap so a scan's queries all start together.
       maxConcurrentDiscoveryRuns: positiveInteger(env.HARSHMAUR_REDDIT_MAX_CONCURRENT_RUNS, 9, 1, 20),

@@ -28,7 +28,7 @@ const source = await readFile(
 );
 
 function extractTriageCandidateBudget() {
-  const start = source.indexOf("function triageCandidateBudget(): number {");
+  const start = source.indexOf("function triageCandidateBudget(");
   assert.notEqual(start, -1, "triageCandidateBudget was not found");
   const end = source.indexOf("\n}", start) + 2;
   return source.slice(start, end);
@@ -49,24 +49,11 @@ async function loadTriageCandidateBudget() {
   return cachedTriageCandidateBudget;
 }
 
-// The real triageCandidateBudget() takes no arguments and reads
-// process.env.REDDIT_TRIAGE_BUDGET directly at call time, so the env swap
-// must wrap the actual invocation, not just the import -- swapping it only
-// around compile/import and restoring before the caller invokes the
-// function would silently read back the real process env instead.
+// The workflow now supplies the accepted scan's environment explicitly.
+// Test the same function without mutating process-wide configuration.
 async function compileTriageCandidateBudget(env) {
   const triageCandidateBudget = await loadTriageCandidateBudget();
-  return () => {
-    const previousEnv = process.env.REDDIT_TRIAGE_BUDGET;
-    if (env.REDDIT_TRIAGE_BUDGET === undefined) delete process.env.REDDIT_TRIAGE_BUDGET;
-    else process.env.REDDIT_TRIAGE_BUDGET = env.REDDIT_TRIAGE_BUDGET;
-    try {
-      return triageCandidateBudget();
-    } finally {
-      if (previousEnv === undefined) delete process.env.REDDIT_TRIAGE_BUDGET;
-      else process.env.REDDIT_TRIAGE_BUDGET = previousEnv;
-    }
-  };
+  return () => triageCandidateBudget(env);
 }
 
 test("defaults to 400 when REDDIT_TRIAGE_BUDGET is unset", async () => {

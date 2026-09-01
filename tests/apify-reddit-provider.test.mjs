@@ -1,104 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
-function moduleUrl(source) {
-  return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-}
-
-async function compileRedditProvider() {
-  let source = await readFile(
-    new URL("../lib/providers/reddit.server.ts", import.meta.url),
-    "utf8",
-  );
-  const mockModule = moduleUrl(`
-    export class MockRedditProvider {
-      name = "mock-reddit";
-      sourceMode = "mock";
-      async discover() { return { candidates: [], searchPlan: [], sourceMode: "mock", diagnostics: { queryCount: 0, fetchedCandidates: 0, normalizedCandidates: 0, verifiedRecentCandidates: 0, rejectedByReason: {}, laneQueryCounts: {} } }; }
-      async enrich() { return { conversations: [], sourceMode: "mock", diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 } }; }
-      async search() { return { conversations: [], sourceMode: "mock" }; }
-    }
-  `);
-  const rankingModule = moduleUrl(`
-    export function contentFingerprint(value) {
-      let hash = 2166136261;
-      for (const character of value) {
-        hash ^= character.codePointAt(0);
-        hash = Math.imul(hash, 16777619);
-      }
-      return Math.abs(hash >>> 0).toString(16).padStart(8, "0");
-    }
-    export function isUsefulSearchPhrase(value) {
-      const normalized = normalizeSearchText(value);
-      const generic = new Set(["api", "app", "buy", "models", "pricing", "reviews", "save", "sell", "tools"]);
-      const tokens = normalized.split(/\\s+/).filter(Boolean);
-      return normalized.length >= 4 && tokens.length <= 10 && !tokens.every((token) => generic.has(token));
-    }
-    export function normalizeSearchText(value) {
-      return value
-        .normalize("NFKD")
-        .replace(/[\\u0300-\\u036f]/g, "")
-        .toLowerCase()
-        .replace(/https?:\\/\\/\\S+/g, " ")
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim()
-        .replace(/\\s+/g, " ");
-    }
-  `);
-  const runtimeModule = moduleUrl(`
-    export function isProductionRuntime(env = process.env) {
-      return (env.APP_RUNTIME_ENV || env.NODE_ENV) === "production";
-    }
-  `);
-  // Compiled from the real sources rather than hand-stubbed: retry
-  // classification and backoff are exactly the behavior these tests assert
-  // on ("transient status/dataset GET failures retry without duplicate
-  // runs"), so a fake stand-in would let a regression in the real modules
-  // pass silently.
-  const apifyRetrySource = await readFile(
-    new URL("../lib/providers/apify-retry.ts", import.meta.url),
-    "utf8",
-  );
-  const apifyRetryModule = moduleUrl(
-    ts.transpileModule(apifyRetrySource, {
-      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-      fileName: "apify-retry.ts",
-    }).outputText,
-  );
-  const resilienceSource = await readFile(
-    new URL("../lib/server/resilience.ts", import.meta.url),
-    "utf8",
-  );
-  const resilienceModule = moduleUrl(
-    ts.transpileModule(resilienceSource, {
-      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-      fileName: "resilience.ts",
-    }).outputText,
-  );
-  const replacements = {
-    "@/lib/providers/reddit-harshmaur.server": "data:text/javascript;base64,ZXhwb3J0IGNsYXNzIEhhcnNobWF1clJlZGRpdFByb3ZpZGVyIHt9",
-    "@/lib/providers/mock-reddit": mockModule,
-    "@/lib/intelligence/opportunity-ranking": rankingModule,
-    "@/lib/server/runtime-env": runtimeModule,
-    "@/lib/providers/apify-retry": apifyRetryModule,
-    "@/lib/server/resilience": resilienceModule,
-  };
-  for (const [specifier, replacement] of Object.entries(replacements)) {
-    source = source.replaceAll(`"${specifier}"`, JSON.stringify(replacement));
-  }
-  const javascript = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-    },
-    fileName: "reddit.server.ts",
-  }).outputText;
-  return import(moduleUrl(javascript));
-}
-
-const redditModule = await compileRedditProvider();
+const redditModule = await loadTsModule("lib/providers/reddit.server.ts");
 
 const searchRequest = {
   queries: {
@@ -899,7 +803,7 @@ test("enrichment only opens the candidates selected by the workflow", async () =
   );
 });
 
-test("enrichment failure preserves only the verified discovery record", async () => {
+test("confirmed enrichment failure preserves only the verified discovery record", async () => {
   let actorRun = 0;
 
   const provider = new redditModule.ApifyRedditTestProvider({
@@ -921,7 +825,7 @@ test("enrichment failure preserves only the verified discovery record", async ()
           }), { status: 201 });
         }
 
-        return new Response("upstream failed", { status: 503 });
+        return new Response(JSON.stringify({ data: { id: "run-enrichment-failed", status: "FAILED" } }), { status: 201 });
       }
 
       if (parsedUrl.pathname.includes("/datasets/dataset-discovery/items")) {
@@ -954,7 +858,7 @@ test("enrichment failure preserves only the verified discovery record", async ()
   assert.equal(result.diagnostics.enriched, 0);
   assert.equal(result.diagnostics.failed, 1);
   assert.equal(result.diagnostics.fallbackUsed, 1);
-  assert.match(result.diagnostics.failureReason, /^actor_error:.*HTTP 503/i);
+  assert.match(result.diagnostics.failureReason, /^actor_error:.*status FAILED/i);
 });
 
 test("enrichment reports actor-success mapping failures without inventing context", async () => {

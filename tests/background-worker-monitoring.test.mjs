@@ -16,10 +16,29 @@ import {
   scheduleMonitoringScans,
   waitForScanExecution,
   WorkerExecutorHttpError,
+  workerQueueConfiguration,
 } from "../scripts/background-worker.mjs";
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
+
+test("two executor lanes require global provider ceilings and expose scheduler roles", () => {
+  assert.deepEqual(workerQueueConfiguration({}), { concurrency: 1, role: "combined", agingSeconds: 300 });
+  assert.throws(
+    () => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "2" }),
+    /requires PROVIDER_GLOBAL_CAPS=1/u,
+  );
+  assert.deepEqual(workerQueueConfiguration({
+    BACKGROUND_WORKER_CONCURRENCY: "2",
+    PROVIDER_GLOBAL_CAPS: "1",
+    BACKGROUND_WORKER_ROLE: "executor",
+    BACKGROUND_JOB_AGING_SECONDS: "120",
+  }), { concurrency: 2, role: "executor", agingSeconds: 120 });
+  assert.equal(workerQueueConfiguration({ BACKGROUND_WORKER_ROLE: "scheduler" }).role, "scheduler");
+  assert.throws(() => workerQueueConfiguration({ BACKGROUND_WORKER_ROLE: "anything" }), /must be/u);
+  assert.throws(() => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "3" }), /must be 1 or 2/u);
+  assert.throws(() => workerQueueConfiguration({ BACKGROUND_JOB_AGING_SECONDS: "2.5" }), /must be an integer/u);
+});
 
 test("monitoring configuration has launch defaults and bounded overrides", () => {
   assert.deepEqual(monitoringConfiguration({}), {
@@ -327,10 +346,11 @@ test("job lease heartbeat only refreshes a still-owned running job", async () =>
     query = strings.join("?").replace(/\s+/gu, " ").trim();
     return [{ id: "job_owned" }];
   };
-  assert.equal(await refreshJobLease(sql, "job_owned", "worker_owned"), true);
+  assert.equal(await refreshJobLease(sql, "job_owned", "worker_owned", 2), true);
   assert.match(query, /UPDATE background_jobs SET locked_at = now\(\), updated_at = now\(\)/u);
   assert.match(query, /status = 'running'/u);
   assert.match(query, /locked_by = \?/u);
+  assert.match(query, /attempts = \?/u);
 });
 
 test("long worker execution helper uses the configured timeout rather than fetch defaults", async () => {

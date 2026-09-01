@@ -29,11 +29,12 @@ function loadingEffectSource() {
   return experience.slice(start, end);
 }
 
-test("a dedicated, slower poll interval is defined for the background-scheduled panels", () => {
+test("a dedicated, slower poll interval is defined for the background-scheduled panels", async () => {
   assert.match(experience, /const BACKGROUND_STATUS_POLL_INTERVAL_MS = 20_000;/);
   // Must be slower than the main scan's poll -- these panels don't need
   // sub-second responsiveness.
-  assert.match(experience, /const SCAN_POLL_INTERVAL_MS = 3_000;/);
+  const polling = await readFile(new URL("../lib/client/scan-polling.ts", import.meta.url), "utf8");
+  assert.match(polling, /const SCAN_POLL_INTERVAL_MS = 3_000;/);
 });
 
 test("loadRedditMonitoring and loadAiVisibility are re-invoked on a repeating interval, not just once on mount", () => {

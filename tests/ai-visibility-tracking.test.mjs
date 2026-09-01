@@ -232,7 +232,7 @@ test("the weekly schedule always advances strictly into the future, at most 7 da
 });
 
 test("the job type ai_visibility_scan is registered with the background worker's claim query", () => {
-  assert.match(backgroundWorker, /type IN \('scan\.run', 'reddit_monitor_scan', 'ai_visibility_scan'\)/);
+  assert.match(backgroundWorker, /type IN \('scan\.run', 'scan\.analyze', 'reddit_monitor_scan', 'ai_visibility_scan'\)/);
   assert.match(backgroundWorker, /export async function scheduleAiVisibilityScans/);
   assert.match(backgroundWorker, /runAiVisibilityScheduler/);
   assert.match(backgroundWorker, /aiVisibilitySchedulerEnabled/);
@@ -253,9 +253,11 @@ test("the internal job executor dispatches ai_visibility_scan jobs", () => {
 test("AI visibility tracking starts automatically once a primary scan completes, never a monitoring scan", () => {
   assert.match(scanWorkflow, /ensureAiVisibilityTrackingStarted/);
   const completionIndex = scanWorkflow.indexOf('scan.status = "complete";');
-  const nearby = scanWorkflow.slice(completionIndex, completionIndex + 800);
-  assert.match(nearby, /scan\.scanKind !== "monitoring"/);
-  assert.match(nearby, /void ensureAiVisibilityTrackingStarted\(scan\)\.catch/);
+  const completionEnd = scanWorkflow.indexOf("} catch (error)", completionIndex);
+  assert.ok(completionIndex >= 0 && completionEnd > completionIndex);
+  const completionBlock = scanWorkflow.slice(completionIndex, completionEnd);
+  assert.match(completionBlock, /scan\.scanKind !== "monitoring"/);
+  assert.match(completionBlock, /void ensureAiVisibilityTrackingStarted\(scan\)\.catch/);
 });
 
 // Strips comments so doc-comments that reference a sibling module by name

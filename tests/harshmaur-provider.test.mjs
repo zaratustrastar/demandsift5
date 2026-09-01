@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
 /**
  * Harshmaur is a separate provider because its schema differs from Trudax in
@@ -11,48 +10,7 @@ import ts from "typescript";
  * neither may let the actor's own filtering stand in for ours.
  */
 
-const u = (c) => `data:text/javascript;base64,${Buffer.from(c).toString("base64")}`;
-const cc = (s, f) => ts.transpileModule(s, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  fileName: f,
-}).outputText;
-
-const stub = u("export {};");
-const ranking = u(cc(
-  (await readFile(new URL("../lib/intelligence/opportunity-ranking.ts", import.meta.url), "utf8"))
-    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub)), "r.ts"));
-const natural = u(cc(
-  (await readFile(new URL("../lib/providers/reddit-natural-queries.ts", import.meta.url), "utf8"))
-    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking)), "n.ts"));
-const queryFamilies = u(cc(
-  (await readFile(new URL("../lib/providers/reddit-query-families.ts", import.meta.url), "utf8"))
-    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-    .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural)), "qf.ts"));
-const searchUrl = u(cc(
-  await readFile(new URL("../lib/providers/reddit-search-url.ts", import.meta.url), "utf8"), "su.ts"));
-// Compiled from the real sources: retry classification and backoff are
-// exactly the behavior under test here (TIMED-OUT-with-empty-dataset now
-// retries instead of silently succeeding with zero records), so a fake
-// stand-in would let a regression in the real modules pass silently.
-const apifyRetry = u(cc(
-  await readFile(new URL("../lib/providers/apify-retry.ts", import.meta.url), "utf8"), "ar.ts"));
-const resilience = u(cc(
-  await readFile(new URL("../lib/server/resilience.ts", import.meta.url), "utf8"), "res.ts"));
-
-let src = await readFile(new URL("../lib/providers/reddit-harshmaur.server.ts", import.meta.url), "utf8");
-src = src
-  .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-  .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-  .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural))
-  .replaceAll('"@/lib/providers/reddit-query-families"', JSON.stringify(queryFamilies))
-  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl))
-  .replaceAll('"@/lib/providers/apify-retry"', JSON.stringify(apifyRetry))
-  .replaceAll('"@/lib/server/resilience"', JSON.stringify(resilience));
-const harshmaur = await import(u(cc(src, "h.ts")));
+const harshmaur = await loadTsModule("lib/providers/reddit-harshmaur.server.ts");
 
 const NOW = new Date("2026-08-16T12:00:00.000Z");
 const WINDOW = harshmaur.oneYearWindow(NOW);

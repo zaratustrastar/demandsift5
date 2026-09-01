@@ -439,6 +439,31 @@ import type { RedditDiscoveryResponse } from "@/lib/providers/contracts";
 
 export type ScanRecord = {
   id: string;
+  /** Durable, idempotent in-app completion notice. No report content or recipient data. */
+  completionNotice?: {
+    version: "scan-complete-v1";
+    createdAt: string;
+    readAt: string | null;
+  };
+  /** Bounded, scan-owned live output snapshot; never exposed without presentation/access filtering. */
+  partialResults?: import("./partial-results").ScanPartialResults;
+  runtimeProgress?: import("../domain/scan-progress").ScanRuntimeProgress;
+  phase?: import("./scan-lifecycle").ScanPhase;
+  analysisCompletedAt?: string;
+  reviewRequired?: true;
+  approval?: { version: string; approvedAt: string };
+  durableJob?: { id: string; type: import("./scan-lifecycle").ScanJobType; acceptedAt: string };
+  /** Internal optimistic version for non-executor edits and durable ownership. */
+  revision?: number;
+  execution?: import("./scan-execution").ScanExecutionLease;
+  /** Known external run IDs survive executor interruption; T11 adds reconciliation. */
+  externalActorRuns?: Record<string, import("../providers/contracts").RedditActorCheckpoint>;
+  externalActorLedger?: import("../providers/apify-run-recovery").ApifyRunLedger;
+  /** Internal-only, additive configuration receipt. Credentials never persist. */
+  runConfiguration?: import("./scan-configuration").ScanRunConfiguration;
+  websiteSnapshot?: import("./website-snapshot").WebsiteSnapshot;
+  timing?: { acceptedAt: string; firstStartedAt: string; lastStartedAt: string; firstResultAt?: string;
+    firstPreviewAt?: string; firstQualifiedAt?: string; finishedAt?: string; executionId: string };
   workspaceId: string;
   /**
    * Empty string for a `inputMode: "context"` scan -- never a fabricated
@@ -503,6 +528,8 @@ export type ScanRecord = {
    * already run.
    */
   discoveryProfile?: {
+    /** Exact evidence version used to produce the approved business profile. */
+    websiteSnapshotId?: string;
     profile: ScanBusinessProfile;
     business: BusinessUnderstanding;
     analysisMode: ScanResult["analysisMode"];
@@ -537,15 +564,20 @@ export type ScanRecord = {
   /**
    * Triage results already obtained for a subset of this scan's candidates
    * during an earlier, interrupted attempt, keyed by externalId. Exists for
-   * the same reason redditDiscovery does: triageConversations() only
-   * guarantees full coverage or throws, and a single concurrent batch that
-   * exhausts its own retries (e.g. an OpenAI request timing out) discards
-   * the *whole* triage call, not just that batch. Without this checkpoint,
-   * every job retry would resubmit every candidate to OpenAI again, even
-   * ones a sibling batch already classified successfully moments before the
-   * failing batch gave up.
+   * the same reason redditDiscovery does: interruptions must not resubmit
+   * already validated judgments. This contains successful judgments only;
+   * processing failures live in triageProcessing, not fabricated negatives.
+   * Legacy synthetic-failure entries are invalidated before resume.
    */
   triageCheckpoint?: Record<string, ConversationTriage> | null;
+  triageCheckpointVersions?: Record<string, string>;
+  discoveryTriageCheckpoint?: import("./discovery-triage-coordinator").DiscoveryTriageCheckpoint;
+  aiRecoveryLedger?: import("../ai/recovery-budget").AiRecoveryLedger;
+  /** Successful same-scan reply generations keyed by deterministic reply ID. */
+  replyCheckpoint?: Record<string, import("../ai/reply-checkpoint").ReplyGenerationCheckpoint>;
+  /** Processing status is separate from semantic relevance and never a judgment. */
+  triageProcessing?: Record<string, import("../providers/contracts").TriageProcessingOutcome>;
+  triageCoverage?: import("../providers/contracts").TriageCoverage;
   /**
    * Optional, user-supplied competitor URLs and what DemandSift understood
    * from each of their homepages. Fixed by the user before the Reddit scan
@@ -593,7 +625,7 @@ export type ConversionRecord = {
 
 export type BackgroundJobRecord = {
   id: string;
-  type: "scan.run";
+  type: import("./scan-lifecycle").ScanJobType;
   status: "queued" | "running" | "retrying" | "succeeded" | "failed";
   payload: { scanId: string; workspaceId: string };
   dedupeKey: string;

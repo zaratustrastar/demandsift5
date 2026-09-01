@@ -8,7 +8,7 @@ import type {
   ScanEvidence,
 } from "./types";
 
-type ApiSource = {
+export type ApiSource = {
   id: string;
   kind: "website" | "reddit" | "user_supplied";
   url: string;
@@ -44,7 +44,7 @@ type ApiInsight = {
   sourceCount?: number;
 };
 
-type ApiRelevantConversation = {
+export type ApiRelevantConversation = {
   id: string;
   externalId: string;
   title: string;
@@ -63,7 +63,7 @@ type ApiRelevantConversation = {
   reliabilityScore?: number;
 };
 
-type ApiOpportunity = {
+export type ApiOpportunity = {
   id: string;
   title: string;
   excerpt: string;
@@ -95,7 +95,7 @@ type ApiOpportunity = {
   disclosureRequired: boolean;
 };
 
-type ApiReply = {
+export type ApiReply = {
   id: string;
   opportunityId: string;
   content: string;
@@ -188,6 +188,21 @@ type ApiReport = {
 export type ApiScanResponse = {
   scan: {
     id: string;
+    phase?: "created" | "analysis_queued" | "analyzing" | "awaiting_review" | "scan_queued" | "scanning" | "complete" | "failed";
+    analysisReady?: boolean;
+    durable?: boolean;
+    approvedProfile?: {
+      name: string;
+      summary: string;
+      targetAudience: string[];
+      problemsSolved: string[];
+    } | null;
+    runtimeProgress?: import("@/lib/domain/scan-progress").ScanRuntimeProgress;
+    completionNotice?: {
+      version: "scan-complete-v1";
+      createdAt: string;
+      readAt: string | null;
+    } | null;
     /**
      * "retrying" mirrors lib/server/contracts.ts's ScanRecord.status: the
      * pipeline hit an error, but a background job attempt is still
@@ -217,6 +232,67 @@ export type ApiScanResponse = {
     verifiedByWebhook: boolean;
   };
   report: ApiReport | null;
+  error?: { code: string; message: string };
+};
+
+export type ApiPartialPreview = {
+  kind: "candidate_preview";
+  id: string;
+  version: number;
+  state: "ready";
+  qualificationStatus: "pending";
+  externalId: string;
+  sourceId: string;
+  title: string;
+  excerpt: string;
+  subreddit: string;
+  author: string | null;
+  permalink: string | null;
+  postedAt: string;
+  intent: "actively_looking" | "evaluating" | "switching" | "problem_aware" | "informational" | "promotional" | "irrelevant";
+  demandSignal: "explicit_demand" | "pain" | "workaround" | "switching" | "timing" | "none";
+  problem: string | null;
+  productFit: "high" | "medium" | "low" | "unknown";
+  sourceMode: "mock" | "live" | "apify-test";
+};
+
+export type ApiPartialOpportunity = ApiOpportunity & { outputVersion: number };
+export type ApiPartialRelevantConversation = ApiRelevantConversation & { outputVersion: number };
+export type ApiPartialReply = ApiReply & { outputVersion: number };
+export type ApiPartialReplyState = {
+  id: string;
+  opportunityId: string;
+  state: "ready" | "pending" | "failed";
+  outputVersion: number;
+  safeErrorCode?: "reply_generation_failed";
+};
+
+export type ApiPartialSnapshot = {
+  schemaVersion: 1;
+  version: number;
+  updatedAt: string | null;
+  snapshot: true;
+  complete: false;
+  previews: ApiPartialPreview[];
+  opportunities: ApiPartialOpportunity[];
+  relevantConversations: ApiPartialRelevantConversation[];
+  replies: ApiPartialReply[];
+  replyStates: ApiPartialReplyState[];
+  sources: ApiSource[];
+  tombstones: Array<{ id: string; kind: string; version: number }>;
+  foundSoFar: {
+    reviewedCandidates: number;
+    qualifiedPeople: number;
+    relevantConversations: number;
+    repliesReady: number;
+  };
+};
+
+export type ApiPartialResponse = {
+  changed: boolean;
+  version: number;
+  access: ApiScanResponse["access"];
+  partial?: ApiPartialSnapshot;
   error?: { code: string; message: string };
 };
 
@@ -266,7 +342,12 @@ function lockedRecords(report: ApiReport): LockedStoredResult[] {
 export function scanResponseToDashboard(response: ApiScanResponse): RedditDemandDemoData | null {
   const report = response.report;
   if (!report || response.scan.status !== "complete") return null;
-  const hostname = new URL(report.profile.websiteUrl).hostname.replace(/^www\./, "");
+  // Context-only scans deliberately have no website; never invent a domain.
+  let hostname = "";
+  if (report.profile.websiteUrl) {
+    try { hostname = new URL(report.profile.websiteUrl).hostname.replace(/^www\./, ""); }
+    catch { /* A missing/legacy URL must not crash a saved report. */ }
+  }
   const replyByOpportunity = new Map(report.replies.map((reply) => [reply.opportunityId, reply]));
   const sourceById = new Map(report.sources.map((source) => [source.id, source]));
   const factIds = [

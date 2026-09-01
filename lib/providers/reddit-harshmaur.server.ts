@@ -1,3 +1,4 @@
+import { ApifyRunRecovery, ApifyRecoveryError } from "./apify-run-recovery";
 import type {
   EnrichedRedditConversation,
   RedditContextMessage,
@@ -20,8 +21,22 @@ import { contentFingerprint } from "@/lib/intelligence/opportunity-ranking";
 import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
 import { redditQueryFamilies, type RedditQueryFamily } from "@/lib/providers/reddit-query-families";
 import { redditSearchUrl } from "@/lib/providers/reddit-search-url";
-import { ApifyTransientError, APIFY_RETRYABLE_RUN_STATUSES, isApifyRetryableHttpStatus } from "@/lib/providers/apify-retry";
+import { ApifyTransientError } from "@/lib/providers/apify-retry";
 import { withRetry } from "@/lib/server/resilience";
+
+type QueryState = "pending" | "active" | "retrying" | "succeeded" | "failed";
+type ReportQueryState = (queries: string[], state: QueryState) => Promise<void>;
+function discoveryProgress(queries: string[], options?: RedditDiscoverOptions): ReportQueryState {
+  const covered = new Set(options?.resumeFrom?.searchPlan.map(row => row.query) ?? []);
+  const states = new Map<string, QueryState>(queries.map(query => [query, covered.has(query) ? "succeeded" : "pending"]));
+  return async (changed, state) => {
+    for (const query of changed) if (states.has(query)) states.set(query, state);
+    const progress = { planned: states.size, succeeded: 0, active: 0, retrying: 0, failed: 0, pending: 0 };
+    for (const value of states.values()) progress[value] += 1;
+    try { await options?.onProgress?.(progress); }
+    catch (error) { console.error("Could not persist Reddit query progress.", error); }
+  };
+}
 
 /**
  * Adapter for the `harshmaur/reddit-scraper` Apify actor.
@@ -805,21 +820,20 @@ export class HarshmaurRedditProvider implements RedditProvider {
   /**
    * How many query-batch chunks (each its own Apify actor run) may be in
    * flight at the same time. This is a resource/performance knob, not a
-   * correctness one: a "READY" (queued) or "RUNNING" run never triggers a
-   * retry -- runActor just keeps long-polling until the run reaches a
-   * terminal status or this call's own timeoutMs elapses, and any retry
-   * (via withRetry, one layer up in runDiscovery) only happens once the
-   * run it replaces has conclusively finished on its own or been
-   * explicitly aborted first (see the abort call in runActor's catch
-   * block). So raising this cannot reintroduce the duplicate-run cascade
-   * a production incident traced to queued runs being retried out from
-   * under themselves -- that was a missing-abort-before-retry bug, now
-   * fixed independently of concurrency. Defaults to the full query cap
+   * correctness one: READY/RUNNING runs are polled, never blindly replaced.
+   * The shared run-recovery helper resumes a known run after a lost poll;
+   * a best-effort abort alone is not proof of termination. Only a confirmed
+   * failed terminal state authorizes another paid start. Defaults to the query cap
    * (9) so a normal scan's queries all start at once; lower this only if
    * Apify-side queueing under real load turns out to slow scans down more
    * than running fewer at a time would.
    */
   private readonly maxConcurrentDiscoveryRuns: number;
+  private readonly onActorRun?: (event: import("./contracts").RedditActorEvent) => void | Promise<void>;
+  private readonly onActorStarted?: (event: import("./contracts").RedditActorCheckpoint) => Promise<void>;
+  private actorRequestIndex = 0;
+  private readonly runRecovery: ApifyRunRecovery;
+  private readonly signal?: AbortSignal;
 
   constructor(input: {
     actorId?: string;
@@ -846,6 +860,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
     postsPerQuery?: number;
     maxConcurrentDiscoveryRuns?: number;
     fetchImpl?: typeof fetch;
+    onActorRun?: (event: import("./contracts").RedditActorEvent) => void | Promise<void>;
+    onActorStarted?: (event: import("./contracts").RedditActorCheckpoint) => Promise<void>;
+    runRecovery?: ApifyRunRecovery;
+    signal?: AbortSignal;
   }) {
     // Apify's API path takes an actor id or `username~actor-name`; a slash
     // would be percent-encoded and resolve to nothing.
@@ -864,6 +882,24 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.postsPerQuery = Math.max(5, Math.min(100, Math.trunc(input.postsPerQuery ?? 50)));
     this.maxConcurrentDiscoveryRuns = Math.max(1, Math.min(20, Math.trunc(input.maxConcurrentDiscoveryRuns ?? 9)));
     this.fetchImpl = input.fetchImpl ?? fetch;
+    this.onActorRun = input.onActorRun;
+    this.onActorStarted = input.onActorStarted;
+    this.runRecovery = input.runRecovery ?? new ApifyRunRecovery();
+    this.signal = input.signal;
+  }
+
+  private actorEvent(event: import("./contracts").RedditActorEvent) {
+    try { void Promise.resolve(this.onActorRun?.(event)).catch(() => {}); }
+    catch { /* Metadata collection is independent of actor execution. */ }
+  }
+
+  configurationForDiagnostics() {
+    return { actorId: this.actorId, actorBuild: "unverified", maximumItems: this.maximumItems,
+      maxTerms: this.maxTerms, maxQueries: this.maxQueries, discoveryMode: this.discoveryMode,
+      timeoutMs: this.timeoutMs, maxChargeUsd: this.maxChargeUsd, enrichmentLimit: this.enrichmentLimit,
+      enrichmentComments: this.enrichmentComments, queriesPerRun: this.queriesPerRun,
+      discoveryRetryAttempts: this.discoveryRetryAttempts, postsPerQuery: this.postsPerQuery,
+      maxConcurrentDiscoveryRuns: this.maxConcurrentDiscoveryRuns };
   }
 
   /**
@@ -881,216 +917,19 @@ export class HarshmaurRedditProvider implements RedditProvider {
     actorInput: HarshmaurActorInput | HarshmaurEnrichmentInput | HarshmaurDirectDiscoveryInput,
     platformMaxItems: number,
   ): Promise<unknown[]> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const headers = {
-      accept: "application/json",
-      authorization: `Bearer ${this.token}`,
-      "content-type": "application/json",
-    };
-    // Set once the run actually exists, so any give-up below (timeout,
-    // repeated status-check failures, anything) can tell Apify to actually
-    // cancel it instead of leaving it running/queued while a retry starts a
-    // second one on top of it. lastKnownStatus lets the catch block skip
-    // that call once the run has already reached a terminal state on its
-    // own -- nothing to abort at that point.
-    let capturedRunId = "";
-    let lastKnownStatus = "";
-    const TERMINAL_RUN_STATUSES = new Set(["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"]);
-
-    const readJson = async (response: Response): Promise<unknown> => {
-      const raw = await response.text();
-      if (!response.ok) {
-        const message = `Harshmaur request failed with HTTP ${response.status}.`;
-        throw isApifyRetryableHttpStatus(response.status)
-          ? new ApifyTransientError(message)
-          : new Error(message);
-      }
-      try {
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-        throw new Error("The Harshmaur actor returned invalid JSON.");
-      }
-    };
-
-    const safeGet = async (endpoint: URL): Promise<Response> => {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          const response = await this.fetchImpl(endpoint, {
-            headers,
-            signal: controller.signal,
-          });
-          if (!isApifyRetryableHttpStatus(response.status)) return response;
-          await response.text().catch(() => "");
-        } catch (error) {
-          lastError = error;
-          // A genuine client timeout is classified by the outer catch
-          // regardless of what's thrown here. Exhausting these 3 attempts
-          // for any other reason (persistent network failure hitting the
-          // status-check endpoint, say) must still surface as
-          // ApifyTransientError -- rethrowing the raw error here bypassed
-          // runDiscovery's shouldRetry (which only retries
-          // ApifyTransientError), silently turning "3 flaky GETs in a row"
-          // into a hard failure with no retry at all instead of the
-          // recoverable case it actually is.
-          if (controller.signal.aborted) throw error;
-          if (attempt === 2) {
-            throw error instanceof Error
-              ? new ApifyTransientError(error.message)
-              : new ApifyTransientError("Harshmaur GET request failed.");
-          }
-        }
-        await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 2_000)));
-      }
-      throw lastError instanceof Error
-        ? new ApifyTransientError(lastError.message)
-        : new ApifyTransientError("Harshmaur GET request failed.");
-    };
-
-    const runData = (payload: unknown): Record<string, unknown> => {
-      const data = (payload as { data?: unknown } | null)?.data;
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error("The Harshmaur actor returned invalid run metadata.");
-      }
-      return data as Record<string, unknown>;
-    };
-
-    const str = (value: unknown): string =>
-      typeof value === "string" ? value.slice(0, 120) : "";
-
+    const requestIndex = ++this.actorRequestIndex;
+    const queries = "startUrls" in actorInput ? actorInput.startUrls.length : actorInput.searchTerms.length;
+    this.actorEvent({ phase: "start", requestIndex, queries });
+    let actorRunId: string | undefined;
     try {
-      const startEndpoint = new URL(
-        `/v2/actors/${encodeURIComponent(this.actorId)}/runs`,
-        "https://api.apify.com",
-      );
-      startEndpoint.searchParams.set("waitForFinish", "0");
-      startEndpoint.searchParams.set("timeout", String(Math.ceil(this.timeoutMs / 1000)));
-      // Platform-level guards. These bound cost and dataset size; they do not
-      // replace the actor's own maxPostsCount/maxCommentsCount fields.
-      startEndpoint.searchParams.set("maxItems", String(platformMaxItems));
-      startEndpoint.searchParams.set("maxTotalChargeUsd", this.maxChargeUsd.toFixed(2));
-
-      let startResponse: Response;
-      try {
-        startResponse = await this.fetchImpl(startEndpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(actorInput),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        // No response was ever received, so no run could have been billed --
-        // unlike the ambiguous-gateway-error case the module doc comment
-        // warns about, this is always safe to retry.
-        if (controller.signal.aborted) {
-          throw new ApifyTransientError(
-            `The Harshmaur actor could not be started within ${Math.ceil(this.timeoutMs / 1_000)} seconds.`,
-          );
-        }
-        throw new ApifyTransientError(
-          error instanceof Error
-            ? `The Harshmaur actor could not be started: ${error.message}`
-            : "The Harshmaur actor could not be started due to a network error.",
-        );
-      }
-      const started = runData(await readJson(startResponse));
-      const runId = str(started.id);
-      capturedRunId = runId;
-      let status = str(started.status).toUpperCase();
-      lastKnownStatus = status;
-      let datasetId = str(started.defaultDatasetId);
-      let statusMessage = str(started.statusMessage);
-      if (!runId || !status) {
-        throw new Error("The Harshmaur actor returned incomplete run metadata.");
-      }
-
-      while (!TERMINAL_RUN_STATUSES.has(status)) {
-        const statusEndpoint = new URL(
-          `/v2/actor-runs/${encodeURIComponent(runId)}`,
-          "https://api.apify.com",
-        );
-        statusEndpoint.searchParams.set("waitForFinish", "60");
-        const current = runData(await readJson(await safeGet(statusEndpoint)));
-        status = str(current.status).toUpperCase();
-        lastKnownStatus = status;
-        statusMessage = str(current.statusMessage);
-        datasetId = str(current.defaultDatasetId) || datasetId;
-        if (!status) throw new Error("The Harshmaur actor returned incomplete run status.");
-      }
-
-      // A timed-out run that still produced records is usable; discarding it
-      // would waste a paid run.
-      const usablePartial = status === "TIMED-OUT" && Boolean(datasetId);
-      if (status !== "SUCCEEDED" && !usablePartial) {
-        const message = `The Harshmaur run ended with status ${status}${statusMessage ? `: ${statusMessage}` : ""}.`;
-        throw APIFY_RETRYABLE_RUN_STATUSES.has(status) ? new ApifyTransientError(message) : new Error(message);
-      }
-      if (!datasetId) throw new ApifyTransientError("The Harshmaur run completed without a dataset.");
-
-      const pageSize = 100;
-      const payload: unknown[] = [];
-      for (let offset = 0; offset < platformMaxItems; offset += pageSize) {
-        const limit = Math.min(pageSize, platformMaxItems - offset);
-        const datasetEndpoint = new URL(
-          `/v2/datasets/${encodeURIComponent(datasetId)}/items`,
-          "https://api.apify.com",
-        );
-        datasetEndpoint.searchParams.set("clean", "true");
-        datasetEndpoint.searchParams.set("format", "json");
-        datasetEndpoint.searchParams.set("limit", String(limit));
-        datasetEndpoint.searchParams.set("offset", String(offset));
-
-        const page = await readJson(await safeGet(datasetEndpoint));
-        if (!Array.isArray(page)) {
-          throw new Error("The Harshmaur actor returned an invalid dataset.");
-        }
-        payload.push(...page);
-        if (page.length < limit) break;
-      }
-      // A timed-out run whose dataset never actually received any records
-      // is not a usable partial result -- it is a failed run that happened
-      // to have a datasetId allocated. Treating it as success previously let
-      // a full-timeout, zero-record run flow through as an ordinary
-      // "searched and found nothing" result, indistinguishable from a
-      // genuine zero. Mirrors the same guard already proven in the Trudax
-      // provider (ApifyRedditTestProvider.runActor).
-      if (usablePartial && payload.length === 0) {
-        throw new ApifyTransientError(
-          "The timed-out Harshmaur run did not retain any usable records.",
-        );
-      }
+      const payload = await this.runRecovery.run({ actorId: this.actorId, actorInput, platformMaxItems,
+        wantedItems: platformMaxItems, maxChargeUsd: this.maxChargeUsd, timeoutMs: this.timeoutMs,
+        maxStarts: Math.max(3, this.discoveryRetryAttempts), token: this.token, fetchImpl: this.fetchImpl, signal: this.signal,
+        label: "Harshmaur", onStarted: async checkpoint => { actorRunId = checkpoint.actorRunId; await this.onActorStarted?.(checkpoint); } });
+      this.actorEvent({ phase: "end", requestIndex, queries, actorRunId, outcome: "succeeded", candidates: payload.length });
       return payload;
     } catch (error) {
-      // Invariant: this call may retry (via withRetry, one layer up) only
-      // after the run it started is conclusively finished -- either it
-      // reached a terminal status on its own, or this abort call put it
-      // there. Scoped to "capturedRunId is known and not already terminal"
-      // rather than just the timeout branch, so a retry is never started
-      // while an earlier live run (READY or RUNNING) is still out there --
-      // whatever the reason this attempt is giving up on it, including
-      // exhausted status-check retries that are not a timeout at all.
-      // Never let this delay or mask the real error thrown below.
-      if (capturedRunId && !TERMINAL_RUN_STATUSES.has(lastKnownStatus)) {
-        const abortEndpoint = new URL(
-          `/v2/actor-runs/${encodeURIComponent(capturedRunId)}/abort`,
-          "https://api.apify.com",
-        );
-        await this.fetchImpl(abortEndpoint, {
-          method: "POST",
-          headers,
-          signal: AbortSignal.timeout(5_000),
-        }).catch(() => {});
-      }
-      if (controller.signal.aborted) {
-        throw new ApifyTransientError(
-          `The Harshmaur run timed out after ${Math.ceil(this.timeoutMs / 1_000)} seconds.`,
-        );
-      }
-      if (error instanceof ApifyTransientError || error instanceof Error) throw error;
-      throw new ApifyTransientError("The Harshmaur request failed with a network error.");
-    } finally {
-      clearTimeout(timer);
+      this.actorEvent({ phase: "end", requestIndex, queries, actorRunId, outcome: "failed" }); throw error;
     }
   }
 
@@ -1101,14 +940,19 @@ export class HarshmaurRedditProvider implements RedditProvider {
     request: RedditSearchRequest,
     searchPlan: RedditSearchPlanEntry[],
     targetTotal: number,
-    onRetry?: (notice: RedditDiscoveryRetryNotice) => void,
+    onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>,
+    onAttempt?: () => Promise<void>,
   ): Promise<RedditDiscoveryResponse> {
     // Headroom over the target so per-query rounding cannot silently
     // truncate, while still capping spend at the platform level.
     const platformMaxItems = Math.min(1_000, Math.ceil(targetTotal * 1.3));
     let retryAttempts = 0;
-    const payload = await withRetry(() => this.runActor(actorInput, platformMaxItems), {
+    const payload = await withRetry(async () => {
+      await onAttempt?.();
+      return this.runActor(actorInput, platformMaxItems);
+    }, {
       attempts: this.discoveryRetryAttempts,
+      signal: this.signal,
       initialDelayMs: 1_500,
       maximumDelayMs: 8_000,
       shouldRetry: (error) => error instanceof ApifyTransientError,
@@ -1182,6 +1026,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
     if (this.discoveryMode === "direct-url") {
       const allFamilies = redditQueryFamilies(request, { maxQueries: this.maxQueries });
       if (allFamilies.length > 0) {
+        const reportProgress = discoveryProgress(allFamilies.map(row => row.query), options);
+        await reportProgress([], "pending");
         // Resuming after an interruption: only the queries not already
         // present in the checkpoint are still outstanding. See
         // RedditDiscoverOptions.resumeFrom's doc comment.
@@ -1193,7 +1039,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
           // Every query this business would search for is already covered
           // by the checkpoint -- nothing left to fetch, so this costs zero
           // new Apify calls.
-          return options.resumeFrom;
+          return { ...options.resumeFrom, diagnostics: { ...options.resumeFrom.diagnostics,
+            queryCount: allFamilies.length, queriesSucceeded: allFamilies.length, queriesFailed: 0, degraded: false } };
         }
         return this.runChunkedDirectDiscovery(
           request,
@@ -1201,6 +1048,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
           options?.onRetry,
           options?.resumeFrom,
           options?.onChunkSucceeded,
+          reportProgress,
         );
       }
     }
@@ -1217,7 +1065,17 @@ export class HarshmaurRedditProvider implements RedditProvider {
       query: term,
       seed: term,
     }));
-    return this.runDiscovery(actorInput, request, searchPlan, targetTotal, options?.onRetry);
+    const queries = searchPlan.map(row => row.query);
+    // Legacy search-terms mode runs the whole plan as one actor.
+    const reportProgress = discoveryProgress(queries, { ...options, resumeFrom: undefined });
+    await reportProgress([], "pending");
+    try {
+      const result = await this.runDiscovery(actorInput, request, searchPlan, targetTotal, async notice => {
+        await reportProgress(queries, "retrying"); await options?.onRetry?.(notice);
+      }, () => reportProgress(queries, "active"));
+      await reportProgress(queries, "succeeded");
+      return result;
+    } catch (error) { await reportProgress(queries, "failed"); throw error; }
   }
 
   /**
@@ -1231,9 +1089,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
   private async runChunkedDirectDiscovery(
     request: RedditSearchRequest,
     families: RedditQueryFamily[],
-    onRetry?: (notice: RedditDiscoveryRetryNotice) => void,
+    onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>,
     resumeFrom?: RedditDiscoveryResponse,
     onChunkSucceeded?: (partial: RedditDiscoveryResponse) => void | Promise<void>,
+    reportProgress?: ReportQueryState,
   ): Promise<RedditDiscoveryResponse> {
     // `families` here is already the remaining, not-yet-covered set (see
     // discover()) -- chunking only ever splits genuinely outstanding work.
@@ -1267,7 +1126,7 @@ export class HarshmaurRedditProvider implements RedditProvider {
       return checkpoint ?? mergeDiscoveryResponses([], this.sourceMode);
     }
 
-    const runChunk = (chunkFamilies: RedditQueryFamily[], chunkIndex: number) => {
+    const runChunk = async (chunkFamilies: RedditQueryFamily[], chunkIndex: number) => {
       // Scales with how many queries are actually in this chunk, not with
       // the overall scan-wide acquisition target -- more queries means more
       // total posts requested, not a thinner slice of a fixed pie.
@@ -1278,21 +1137,21 @@ export class HarshmaurRedditProvider implements RedditProvider {
         query: family.query,
         seed: family.query,
       }));
-      return this.runDiscovery(directInput, request, searchPlan, perChunkTarget, (notice) =>
-        onRetry?.({
+      const queries = searchPlan.map(row => row.query);
+      try {
+        const result = await this.runDiscovery(directInput, request, searchPlan, perChunkTarget, async (notice) => {
+          await reportProgress?.(queries, "retrying");
+          await onRetry?.({
           ...notice,
           reason: chunks.length > 1
             ? `[query batch ${chunkIndex + 1}/${chunks.length}] ${notice.reason}`
             : notice.reason,
-        }),
-      );
+          });
+        }, () => reportProgress?.(queries, "active") ?? Promise.resolve());
+        await reportProgress?.(queries, "succeeded");
+        return result;
+      } catch (error) { await reportProgress?.(queries, "failed"); throw error; }
     };
-
-    if (chunks.length === 1) {
-      const result = await runChunk(families, 0);
-      await checkpointNewChunk(result);
-      return checkpoint!;
-    }
 
     // Worker pool bounded by maxConcurrentDiscoveryRuns (default: every
     // chunk at once). The pool itself is not what prevents duplicate runs
@@ -1320,28 +1179,32 @@ export class HarshmaurRedditProvider implements RedditProvider {
 
     const succeeded: RedditDiscoveryResponse[] = [];
     const failures: unknown[] = [];
-    let queriesSucceeded = 0;
     let queriesFailed = 0;
     outcomes.forEach((outcome, index) => {
       if (outcome.status === "fulfilled") {
         succeeded.push(outcome.value);
-        queriesSucceeded += chunks[index].length;
       } else {
         failures.push(outcome.reason);
         queriesFailed += chunks[index].length;
       }
     });
 
+    const nonrecoverable = failures.find(error => error instanceof ApifyRecoveryError);
+    if (nonrecoverable) throw nonrecoverable;
+
     if (succeeded.length === 0) {
-      if (resumeFrom) {
+      if (resumeFrom && chunks.length > 1) {
         // Every chunk in this attempt failed, but a prior attempt's
         // checkpointed results are still valid -- return those rather
         // than discarding real, already-paid-for progress.
-        return resumeFrom;
+        return { ...resumeFrom, diagnostics: { ...resumeFrom.diagnostics, degraded: true,
+          queryCount: new Set([...resumeFrom.searchPlan.map(row => row.query), ...families.map(row => row.query)]).size,
+          queriesSucceeded: new Set(resumeFrom.searchPlan.map(row => row.query)).size, queriesFailed } };
       }
       // Every batch exhausted its retries. Surface the first failure as-is
       // -- the caller classifies it by type (ApifyTransientError vs not),
-      // not by this message text.
+      // not by this message text. Preserve the existing single-chunk failure
+      // path so a saved sibling never suppresses that job-level retry.
       throw failures[0] instanceof Error
         ? failures[0]
         : new Error("Reddit discovery failed for every query batch.");
@@ -1352,11 +1215,12 @@ export class HarshmaurRedditProvider implements RedditProvider {
     // above. Recomputing from `succeeded` alone here would silently drop
     // resumeFrom's candidates on a resumed attempt.
     const merged = checkpoint ?? mergeDiscoveryResponses(succeeded, this.sourceMode);
-    // These two counts intentionally describe only this attempt's chunks,
-    // not the cumulative total across a resumed scan's earlier attempts --
-    // diagnostics-only, does not affect which candidates are returned.
-    merged.diagnostics.queriesSucceeded = queriesSucceeded;
+    // Cumulative unique queries: a retry is not extra coverage, and recovering
+    // all remaining queries clears a prior attempt's degraded flag.
+    merged.diagnostics.queriesSucceeded = new Set(merged.searchPlan.map(row => row.query)).size;
+    merged.diagnostics.queryCount = new Set([...(resumeFrom?.searchPlan ?? []).map(row => row.query), ...families.map(row => row.query)]).size;
     merged.diagnostics.queriesFailed = queriesFailed;
+    merged.diagnostics.degraded = queriesFailed > 0;
     if (queriesFailed > 0) {
       merged.diagnostics.degraded = true;
       console.error(
@@ -1452,6 +1316,8 @@ export class HarshmaurRedditProvider implements RedditProvider {
       payload = await this.runActor(enrichmentInput, platformMaxItems);
     } catch (error) {
       console.error("Harshmaur Reddit thread enrichment failed", error);
+      this.signal?.throwIfAborted();
+      if (error instanceof ApifyRecoveryError) throw error;
       const message = error instanceof Error ? error.message : "Unknown Harshmaur enrichment failure.";
       return {
         conversations: candidates.map(harshmaurDiscoveryOnlyConversation),

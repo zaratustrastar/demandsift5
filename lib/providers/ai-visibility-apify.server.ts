@@ -36,6 +36,13 @@ export type VisibilityActorRunResult = {
   error: string | null;
 };
 
+type ActorCapacity = {
+  acquire(input: {
+    pool: "apify-actor"; holderKey: string; workspaceId: string;
+    limit: number; leaseMs: number; signal?: AbortSignal;
+  }): Promise<{ release(): Promise<boolean> }>;
+};
+
 /**
  * How long a batched, 3-question Actor run is given before Apify itself
  * kills it (the "timeout" query param on the start call, below) and before
@@ -157,6 +164,10 @@ export async function runVisibilityActor(input: {
   actorId?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  workspaceId?: string;
+  holderKey?: string;
+  actorCapacity?: ActorCapacity;
+  actorCapacityLimit?: number;
 }): Promise<VisibilityActorRunResult> {
   const actorId = apifyActorId(input.actorId ?? defaultActorIdFor(input.provider));
   const token = input.token.trim();
@@ -171,6 +182,16 @@ export async function runVisibilityActor(input: {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
   };
+  const capacityLease = input.actorCapacity && input.workspaceId && input.holderKey
+    ? await input.actorCapacity.acquire({
+        pool: "apify-actor",
+        holderKey: input.holderKey,
+        workspaceId: input.workspaceId,
+        limit: input.actorCapacityLimit ?? 1,
+        leaseMs: timeoutMs + 120_000,
+        signal: controller.signal,
+      })
+    : null;
 
   const readJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
     const raw = await response.text();
@@ -220,6 +241,8 @@ export async function runVisibilityActor(input: {
 
   let runId = "";
   let status = "NOT_STARTED";
+  let startOutcome: "not_sent" | "ambiguous" | "known" = "not_sent";
+  let startAccepted = false;
 
   try {
     const startEndpoint = new URL(`/v2/actors/${encodeURIComponent(actorId)}/runs`, "https://api.apify.com");
@@ -228,6 +251,7 @@ export async function runVisibilityActor(input: {
     startEndpoint.searchParams.set("maxItems", "50");
     startEndpoint.searchParams.set("maxTotalChargeUsd", "1.00");
 
+    startOutcome = "ambiguous";
     const startResponse = await fetchImpl(startEndpoint, {
       method: "POST",
       headers,
@@ -236,6 +260,8 @@ export async function runVisibilityActor(input: {
       body: JSON.stringify({ queries: input.questions.join("\n") }),
       signal: controller.signal,
     });
+    if (startResponse.status < 500) startOutcome = "known";
+    startAccepted = startResponse.ok;
     const started = runData(await readJson(startResponse, 1_000_000));
     runId = stringField(started.id);
     status = stringField(started.status).toUpperCase();
@@ -345,6 +371,10 @@ export async function runVisibilityActor(input: {
     throw error;
   } finally {
     clearTimeout(timeout);
+    if (startOutcome === "not_sent" || ["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"].includes(status)
+      || (startOutcome === "known" && !startAccepted)) {
+      await capacityLease?.release().catch(() => false);
+    }
   }
 }
 
@@ -354,6 +384,10 @@ export async function runAllVisibilityActors(input: {
   token: string;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
+  workspaceId?: string;
+  actorCapacity?: ActorCapacity;
+  actorCapacityLimit?: number;
+  holderPrefix?: string;
 }): Promise<VisibilityActorRunResult[]> {
   const providers: AiVisibilityAiProvider[] = ["chatgpt", "gemini", "perplexity"];
   const env = input.env ?? process.env;
@@ -365,6 +399,10 @@ export async function runAllVisibilityActors(input: {
         token: input.token,
         actorId: actorIdFromEnv(provider, env),
         fetchImpl: input.fetchImpl,
+        workspaceId: input.workspaceId,
+        holderKey: input.holderPrefix ? `${input.holderPrefix}:${provider}` : undefined,
+        actorCapacity: input.actorCapacity,
+        actorCapacityLimit: input.actorCapacityLimit,
       }),
     ),
   );

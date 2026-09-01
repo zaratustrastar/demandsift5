@@ -1,7 +1,8 @@
 import { ApiError, apiErrorResponse, requireWorkspace } from "@/lib/server/http";
 import { presentScan, requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
-import { runScan } from "@/lib/server/scan-workflow";
+import { enqueueScanAnalysis, runScan } from "@/lib/server/scan-workflow";
+import { getStateRepository } from "@/lib/server/repository";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
@@ -34,6 +35,12 @@ export async function POST(request: Request, context: RouteContext) {
       return Response.json(await presentScan(scan), {
         headers: { "Cache-Control": "no-store" },
       });
+    }
+
+    if (process.env.BACKGROUND_WORKER_MODE?.trim().toLowerCase() === "queue" && getStateRepository().kind === "postgres") {
+      const accepted = await enqueueScanAnalysis(scan);
+      return Response.json({ ...(await presentScan(accepted.scan)), job: { id: accepted.job.id, status: accepted.job.status } },
+        { status: 202, headers: { "Cache-Control": "no-store" } });
     }
 
     let analyzed;

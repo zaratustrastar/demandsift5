@@ -951,26 +951,53 @@ export function jobExecutionConfiguration(environment = process.env) {
   };
 }
 
-export async function refreshJobLease(sql, jobId, workerIdValue) {
+export function workerQueueConfiguration(environment = process.env) {
+  const parsedConcurrency = Number(environment.BACKGROUND_WORKER_CONCURRENCY ?? 1);
+  if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1 || parsedConcurrency > 2) {
+    throw new Error("BACKGROUND_WORKER_CONCURRENCY must be 1 or 2.");
+  }
+  const concurrency = parsedConcurrency;
+  const role = String(environment.BACKGROUND_WORKER_ROLE ?? "combined").trim().toLowerCase();
+  if (!["combined", "executor", "scheduler"].includes(role)) {
+    throw new Error("BACKGROUND_WORKER_ROLE must be `combined`, `executor`, or `scheduler`.");
+  }
+  if (role !== "scheduler" && concurrency > 1 && environment.PROVIDER_GLOBAL_CAPS !== "1") {
+    throw new Error("BACKGROUND_WORKER_CONCURRENCY=2 requires PROVIDER_GLOBAL_CAPS=1.");
+  }
+  const parsedAgingSeconds = Number(environment.BACKGROUND_JOB_AGING_SECONDS ?? 300);
+  if (!Number.isInteger(parsedAgingSeconds) || parsedAgingSeconds < 60 || parsedAgingSeconds > 3_600) {
+    throw new Error("BACKGROUND_JOB_AGING_SECONDS must be an integer from 60 to 3600.");
+  }
+  return {
+    concurrency,
+    role,
+    agingSeconds: parsedAgingSeconds,
+  };
+}
+
+export async function refreshJobLease(sql, jobId, workerIdValue, attempt) {
+  if (!Number.isInteger(attempt) || attempt < 1) return false;
   const rows = await sql`
     UPDATE background_jobs
     SET locked_at = now(), updated_at = now()
     WHERE id = ${jobId}
       AND status = 'running'
       AND locked_by = ${workerIdValue}
+      AND attempts = ${attempt}
     RETURNING id
   `;
   return rows.length > 0;
 }
 
-export async function maintainJobLease(sql, job, workerIdValue, signal, heartbeatMs) {
+export async function maintainJobLease(sql, job, workerIdValue, signal, heartbeatMs, onLost = () => {}) {
   while (!signal.aborted) {
     await waitForNextPoll(signal, heartbeatMs);
     if (signal.aborted) return;
     try {
-      const refreshed = await refreshJobLease(sql, job.id, workerIdValue);
+      const refreshed = await refreshJobLease(sql, job.id, workerIdValue, job.attempts);
       if (!refreshed) {
         log("warn", "job_lease_lost", { jobId: job.id });
+        onLost();
         return;
       }
     } catch (error) {
@@ -982,21 +1009,44 @@ export async function maintainJobLease(sql, job, workerIdValue, signal, heartbea
   }
 }
 
-export async function claimJob(sql, workerIdValue) {
+export async function claimJob(sql, workerIdValue, options = {}) {
   const { staleSeconds: boundedStaleSeconds } = jobExecutionConfiguration();
+  const selection = options.selection === "interactive" ? "interactive" : "all";
+  const agingSeconds = Number.isFinite(options.agingSeconds)
+    ? Math.max(60, Math.min(options.agingSeconds, 3_600))
+    : 300;
   const staleBefore = new Date(Date.now() - boundedStaleSeconds * 1_000);
   const rows = await sql`
     WITH candidate AS (
-      SELECT id
-      FROM background_jobs
+      SELECT job.id
+      FROM background_jobs AS job
+      LEFT JOIN LATERAL (
+        SELECT count(*) AS active_count
+        FROM background_jobs AS active_job
+        WHERE active_job.status = 'running'
+          AND active_job.locked_at > ${staleBefore}
+          AND active_job.payload ->> 'workspaceId' = job.payload ->> 'workspaceId'
+      ) AS workspace_load ON true
       WHERE (
-        (status IN ('queued', 'retrying') AND run_at <= now())
-        OR (status = 'running' AND locked_at <= ${staleBefore})
+        (job.status IN ('queued', 'retrying') AND job.run_at <= now())
+        OR (job.status = 'running' AND job.locked_at <= ${staleBefore})
       )
-      AND type IN ('scan.run', 'reddit_monitor_scan', 'ai_visibility_scan')
+      AND job.type IN ('scan.run', 'scan.analyze', 'reddit_monitor_scan', 'ai_visibility_scan')
+      AND (${selection} = 'all' OR job.type IN ('scan.run', 'scan.analyze'))
       AND attempts < max_attempts
-      ORDER BY run_at ASC, created_at ASC
-      FOR UPDATE SKIP LOCKED
+      ORDER BY
+        CASE
+          WHEN job.status = 'running' THEN -100
+          ELSE greatest(
+            CASE job.type WHEN 'scan.analyze' THEN -1 WHEN 'scan.run' THEN 0 ELSE 4 END
+              - floor(extract(epoch FROM (now() - job.created_at)) / ${agingSeconds}),
+            -2
+          )
+        END ASC,
+        workspace_load.active_count ASC,
+        job.run_at ASC,
+        job.created_at ASC
+      FOR UPDATE OF job SKIP LOCKED
       LIMIT 1
     )
     UPDATE background_jobs AS job
@@ -1012,7 +1062,7 @@ export async function claimJob(sql, workerIdValue) {
   return rows[0] ?? null;
 }
 
-async function completeJob(sql, job) {
+export async function completeJob(sql, job, workerIdValue = workerId) {
   await sql`
     UPDATE background_jobs
     SET status = 'succeeded',
@@ -1021,14 +1071,26 @@ async function completeJob(sql, job) {
         last_error = NULL,
         finished_at = now(),
         updated_at = now()
-    WHERE id = ${job.id} AND locked_by = ${workerId}
+    WHERE id = ${job.id} AND locked_by = ${workerIdValue} AND attempts = ${job.attempts} AND status = 'running'
   `;
 }
 
 const TERMINAL_SCAN_ERROR_CODES = new Set([
+  "scan_review_required",
+  "scan_review_changed",
+  "scan_configuration_invalid",
+  "triage_coverage_incomplete",
+  "website_snapshot_mismatch",
   "reddit_enrichment_failed",
   "openai_structured_output_failed",
   "scan_execution_timeout",
+  "ai_recovery_exhausted",
+  "provider_auth_failed",
+  "provider_invalid_request",
+  "provider_quota_exhausted",
+  "apify_start_ambiguous",
+  "apify_recovery_exhausted",
+  "apify_reconciliation_required",
 ]);
 
 function executorErrorCode(responseText) {
@@ -1110,7 +1172,7 @@ export function jobFailureDisposition(job, error, now = new Date()) {
   };
 }
 
-async function failJob(sql, job, error, disposition = jobFailureDisposition(job, error)) {
+export async function failJob(sql, job, error, disposition = jobFailureDisposition(job, error), workerIdValue = workerId) {
   const message = error instanceof Error ? error.message : String(error);
   await sql`
     UPDATE background_jobs
@@ -1121,7 +1183,7 @@ async function failJob(sql, job, error, disposition = jobFailureDisposition(job,
         last_error = ${message.slice(0, 4_000)},
         finished_at = ${disposition.finishedAt},
         updated_at = now()
-    WHERE id = ${job.id} AND locked_by = ${workerId}
+    WHERE id = ${job.id} AND locked_by = ${workerIdValue} AND attempts = ${job.attempts} AND status = 'running'
   `;
 }
 
@@ -1191,7 +1253,7 @@ export function postJsonWithLongTimeout(urlValue, options) {
   });
 }
 
-export async function executeScanJob(job, signal) {
+export async function executeScanJob(job, signal, workerIdValue = workerId) {
   const workerSecret = requiredEnvironment("BACKGROUND_WORKER_SECRET");
   if (workerSecret.length < 32) {
     throw new Error("BACKGROUND_WORKER_SECRET must contain at least 32 characters.");
@@ -1211,7 +1273,7 @@ export async function executeScanJob(job, signal) {
       executeUrl,
       {
         headers,
-        body: { workerId },
+        body: { workerId: workerIdValue, attempt: job.attempts },
         signal: combinedSignal,
         timeoutMs: 30_000,
         maxResponseBytes: 1_000_000,
@@ -1226,7 +1288,7 @@ export async function executeScanJob(job, signal) {
         executeUrl,
         {
           headers,
-          body: { workerId },
+          body: { workerId: workerIdValue, attempt: job.attempts },
           signal: combinedSignal,
           timeoutMs: 30_000,
           maxResponseBytes: 1_000_000,
@@ -1241,9 +1303,58 @@ export async function executeScanJob(job, signal) {
   }
 }
 
+async function runExecutorLane(sql, queueSignal, pollMs, laneId, selection, agingSeconds) {
+  const laneWorkerId = `${workerId}:${laneId}`;
+  while (!queueSignal.aborted) {
+    const job = await claimJob(sql, laneWorkerId, { selection, agingSeconds });
+    if (!job) {
+      await waitForNextPoll(queueSignal, pollMs);
+      continue;
+    }
+    log("info", "job_claimed", {
+      laneId,
+      selection,
+      jobId: job.id,
+      type: job.type,
+      attempt: job.attempts,
+      maxAttempts: job.max_attempts,
+      queueWaitMs: Math.max(0, Date.now() - new Date(job.run_at).getTime()) || 0,
+      ageMs: Math.max(0, Date.now() - new Date(job.created_at).getTime()) || 0,
+    });
+    const executionStarted = performance.now();
+    const leaseController = new AbortController();
+    const leaseSignal = AbortSignal.any([queueSignal, leaseController.signal]);
+    const { heartbeatSeconds } = jobExecutionConfiguration();
+    const leaseTask = maintainJobLease(sql, job, laneWorkerId, leaseSignal, heartbeatSeconds * 1_000,
+      () => leaseController.abort(new Error("Job ownership was lost.")));
+    try {
+      const result = await executeScanJob(job, leaseSignal, laneWorkerId);
+      await completeJob(sql, job, laneWorkerId);
+      log("info", "job_succeeded", { laneId, jobId: job.id, scanId: result.scanId, attempt: job.attempts,
+        durationMs: Math.max(0, performance.now() - executionStarted) });
+    } catch (error) {
+      const disposition = jobFailureDisposition(job, error);
+      await failJob(sql, job, error, disposition, laneWorkerId);
+      log("error", "job_failed", {
+        laneId,
+        jobId: job.id,
+        attempt: job.attempts,
+        retryable: disposition.retryable,
+        terminal: disposition.terminal,
+        durationMs: Math.max(0, performance.now() - executionStarted),
+        category: disposition.retryable ? "retryable_execution_failure" : "terminal_execution_failure",
+      });
+    } finally {
+      leaseController.abort("job finished");
+      await leaseTask;
+    }
+  }
+}
+
 async function runQueueWorker(databaseUrl, signal) {
+  const queue = workerQueueConfiguration();
   const sql = postgres(databaseUrl, {
-    max: 2,
+    max: Math.max(4, queue.concurrency + 3),
     idle_timeout: 20,
     connect_timeout: 10,
     prepare: false,
@@ -1252,61 +1363,36 @@ async function runQueueWorker(databaseUrl, signal) {
   const boundedPollMs = Number.isFinite(pollMs) ? Math.max(250, Math.min(pollMs, 30_000)) : 2_000;
   const queueController = new AbortController();
   const queueSignal = AbortSignal.any([signal, queueController.signal]);
-  const scheduler = monitoringSchedulerEnabled()
+  const runsSchedulers = queue.role !== "executor";
+  const runsExecutors = queue.role !== "scheduler";
+  const scheduler = runsSchedulers && monitoringSchedulerEnabled()
     ? runMonitoringScheduler(sql, queueSignal)
     : Promise.resolve();
-  const redditMonitorScheduler = redditMonitorSchedulerEnabled()
+  const redditMonitorScheduler = runsSchedulers && redditMonitorSchedulerEnabled()
     ? runRedditMonitorScheduler(sql, queueSignal)
     : Promise.resolve();
-  const aiVisibilityScheduler = aiVisibilitySchedulerEnabled()
+  const aiVisibilityScheduler = runsSchedulers && aiVisibilitySchedulerEnabled()
     ? runAiVisibilityScheduler(sql, queueSignal)
     : Promise.resolve();
-  if (!monitoringSchedulerEnabled()) {
-    log("info", "monitor_scheduler_disabled", { reason: "single_on_demand_scan_mvp" });
+  if (!runsSchedulers || !monitoringSchedulerEnabled()) {
+    log("info", "monitor_scheduler_disabled", { reason: runsSchedulers ? "single_on_demand_scan_mvp" : "worker_role" });
   }
-  if (!redditMonitorSchedulerEnabled()) {
-    log("info", "reddit_monitor_scheduler_disabled");
-  }
-  if (!aiVisibilitySchedulerEnabled()) {
-    log("info", "ai_visibility_scheduler_disabled");
-  }
-  log("info", "queue_worker_started", { pollMs: boundedPollMs });
+  if (!runsSchedulers || !redditMonitorSchedulerEnabled()) log("info", "reddit_monitor_scheduler_disabled");
+  if (!runsSchedulers || !aiVisibilitySchedulerEnabled()) log("info", "ai_visibility_scheduler_disabled");
+  log("info", "queue_worker_started", { pollMs: boundedPollMs, role: queue.role,
+    concurrency: runsExecutors ? queue.concurrency : 0, agingSeconds: queue.agingSeconds });
   try {
-    while (!queueSignal.aborted) {
-      const job = await claimJob(sql, workerId);
-      if (!job) {
-        await waitForNextPoll(queueSignal, boundedPollMs);
-        continue;
-      }
-      log("info", "job_claimed", {
-      jobId: job.id,
-      type: job.type,
-      attempt: job.attempts,
-      maxAttempts: job.max_attempts,
-    });
-    const leaseController = new AbortController();
-    const leaseSignal = AbortSignal.any([queueSignal, leaseController.signal]);
-    const { heartbeatSeconds } = jobExecutionConfiguration();
-    const leaseTask = maintainJobLease(sql, job, workerId, leaseSignal, heartbeatSeconds * 1_000);
-    try {
-      const result = await executeScanJob(job, queueSignal);
-      await completeJob(sql, job);
-      log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
-    } catch (error) {
-      const disposition = jobFailureDisposition(job, error);
-      await failJob(sql, job, error, disposition);
-      log("error", "job_failed", {
-        jobId: job.id,
-        attempt: job.attempts,
-        retryable: disposition.retryable,
-        terminal: disposition.terminal,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      leaseController.abort("job finished");
-      await leaseTask;
-    }
-    }
+    const lanes = runsExecutors
+      ? Array.from({ length: queue.concurrency }, (_, index) => runExecutorLane(
+          sql,
+          queueSignal,
+          boundedPollMs,
+          `lane-${index + 1}`,
+          queue.concurrency > 1 && index === 0 ? "interactive" : "all",
+          queue.agingSeconds,
+        ))
+      : [waitInStandby(queueSignal)];
+    await Promise.all([...lanes, scheduler, redditMonitorScheduler, aiVisibilityScheduler]);
   } finally {
     queueController.abort("queue worker stopping");
     await Promise.all([scheduler, redditMonitorScheduler, aiVisibilityScheduler]);

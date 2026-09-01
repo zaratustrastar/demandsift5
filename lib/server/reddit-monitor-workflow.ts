@@ -15,6 +15,7 @@ import {
 } from "@/lib/server/reddit-monitor-repository";
 import { getStateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
+import { sharedProviderCapacity } from "@/lib/server/provider-capacity";
 
 const MONITOR_PROGRESS: ScanStage[] = [
   { id: "website", label: "Reusing your business context", status: "pending", detail: "Using the verified business profile from your Market Scan." },
@@ -133,10 +134,15 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
 
     run = { ...run, status: "running", error: null, updatedAt: new Date().toISOString() };
     await saveRedditMonitorRun(run);
+    const providerCapacity = sharedProviderCapacity();
     const fetched = await fetchRedditMonitorCandidates({
       watchTerms,
       from: new Date(run.windowStartedAt),
       to: new Date(run.windowEndedAt),
+      workspaceId: run.workspaceId,
+      holderKey: `reddit-monitor:${run.id}`,
+      actorCapacity: providerCapacity?.capacity,
+      actorCapacityLimit: providerCapacity?.configuration.apifyActorLimit,
     });
     const unseen = await ingestRedditMonitorMatches({
       workspaceId: run.workspaceId,

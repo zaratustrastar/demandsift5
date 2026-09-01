@@ -14,10 +14,8 @@ import styles from "./DiscoveryProfile.module.css";
  * field starts empty. And Boolean syntax is never shown — the user curates
  * plain terms, DemandSift compiles the searches.
  *
- * This screen is only ever reached after the upstream "refining" wait screen
- * (see ThreadlineExperience.tsx's RefiningProfile) has confirmed the full,
- * multi-page business analysis is ready -- the fast homepage-only preview
- * that made the initial /analyze call return quickly is never shown here.
+ * This screen is reached only after durable analysis reports the full profile
+ * ready. There is no timed shortcut to a thinner homepage-only preview.
  *
  * Competitor websites are a separate, earlier step (see CompetitorsSetup.tsx)
  * and are not edited on this screen.
@@ -36,6 +34,7 @@ export type DiscoveryDerived = {
 
 export type DiscoveryProfileResponse = {
   analyzed: boolean;
+  reviewVersion?: string | null;
   editable: boolean;
   profile: { name?: string; summary?: string; productCategory?: string } | null;
   derived: DiscoveryDerived | null;
@@ -117,7 +116,7 @@ export function DiscoveryProfile({
 }: {
   scanId: string;
   websiteUrl: string;
-  onStartScan: () => void;
+  onStartScan: (reviewVersion: string) => void | Promise<void>;
   onBack: () => void;
 }) {
   const [data, setData] = useState<DiscoveryProfileResponse | null>(null);
@@ -219,6 +218,7 @@ export function DiscoveryProfile({
     setSaving(true);
     setError("");
     try {
+      let reviewVersion = data?.reviewVersion;
       // Only send overrides when something actually changed, so an untouched
       // profile stays attributed to the crawl rather than to the user.
       if (edited && terms) {
@@ -231,8 +231,10 @@ export function DiscoveryProfile({
           },
         );
         if (!response.ok) throw new Error("We could not save your changes.");
+        reviewVersion = ((await response.json()) as { reviewVersion?: string }).reviewVersion;
       }
-      onStartScan();
+      if (!reviewVersion) throw new Error("Reload the complete profile before starting the scan.");
+      await onStartScan(reviewVersion);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Something went wrong.");
       setSaving(false);

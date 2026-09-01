@@ -1,5 +1,10 @@
 import type { AiOperation, ModelPrice, ModelPriceCatalog, TokenUsage } from "@/lib/ai/usage";
 import { combineTokenUsage, estimateAiCostUsd } from "@/lib/ai/usage";
+import { RequestGate, BoundedBatchDispatcher, abortableDelay } from "@/lib/ai/bounded-dispatcher";
+import { aiCapacityFromEnv, aiCapacityFromOptions, sharedAiRequestGate } from "@/lib/ai/capacity";
+import { createHash } from "node:crypto";
+import { canonicalJson, triageInputVersion } from "@/lib/ai/triage-dispatcher";
+import { AiRecoveryBudget, AiRecoveryExhaustedError, retryAfterMs, type AiRecoveryScope } from "@/lib/ai/recovery-budget";
 import type {
   BusinessUnderstanding,
   CitedValue,
@@ -38,11 +43,15 @@ import type {
   QualifyConversationsRequest,
   TriagedConversation,
   TriageConversationsRequest,
+  TriageConversationsResult,
+  TriageProcessingOutcome,
   VisibilityMentionAnalysis,
 } from "@/lib/providers/contracts";
 
 type JsonObject = Record<string, unknown>;
 type JsonSchema = Record<string, unknown>;
+type AiRequestControl = { signal?: AbortSignal; gate: RequestGate; scope?: AiRecoveryScope };
+const recoveryKey = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 
 export const DEFAULT_OPENAI_MODELS: ModelConfiguration = {
   analysisModel: "gpt-5.6-sol",
@@ -64,6 +73,8 @@ export interface OpenAiUsageEvent {
 type StructuredFinishReason = "length" | "stop" | "content_filter" | "tool_calls" | "missing" | "other";
 
 export type OpenAiProviderDiagnosticEvent =
+  | { kind: "structured_output_failed" | "triage_coverage_incomplete" | "qualification_coverage_incomplete";
+      operation: AiOperation; model: string; unresolved?: number }
   | {
       kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry" | "structured_chat_invalid_retry";
       operation: AiOperation;
@@ -94,6 +105,9 @@ export interface OpenAiProviderOptions {
   onUsage?: (event: OpenAiUsageEvent) => void | Promise<void>;
   /** Sanitized provider-boundary metadata only; never includes prompts or model text. */
   onDiagnostic?: (event: OpenAiProviderDiagnosticEvent) => void | Promise<void>;
+  /** Attempt metadata only. Called even on transport failure without usage. */
+  onRequest?: (event: OpenAiRequestEvent) => void | Promise<void>;
+  traceRoute?: "primary" | "direct-fallback";
   /**
    * A fully separate OpenAiProvider instance (typically pointed at real
    * OpenAI directly) to call as a last resort when this provider's own
@@ -120,7 +134,23 @@ export interface OpenAiProviderOptions {
    * this, for the one instance that genuinely talks to real OpenAI.
    */
   useMaxCompletionTokens?: boolean;
+  signal?: AbortSignal;
+  /** Shared across provider fallback and persisted by the owned scan. */
+  recovery?: AiRecoveryBudget;
+  /** Validated 1..30; default 25. */
+  triageBatchSize?: number;
+  /** Validated 1..8; default 4. Also bounds every nested HTTP request. */
+  requestConcurrency?: number;
+  /** Factory-injected process-wide ceiling; direct construction stays isolated. */
+  requestGate?: RequestGate;
 }
+
+export type OpenAiRequestEvent = {
+  phase: "start" | "end"; requestIndex: number; operation: AiOperation; model?: string;
+  route: "primary" | "direct-fallback"; attempt: number; statusCode?: number;
+  endpointKind: "surplus" | "openai-direct" | "compatible";
+  category?: "http_success" | "http_error" | "transport_error";
+};
 
 interface ResponsesApiPayload {
   id?: string;
@@ -166,6 +196,7 @@ interface ChatCompletionsPayload {
 export class OpenAiProviderError extends Error {
   readonly status?: number;
   readonly requestId?: string;
+  code?: string;
 
   constructor(message: string, status?: number, requestId?: string) {
     super(message);
@@ -926,7 +957,6 @@ const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
 // processBatch() below already recursively bisects it on length-exhaustion
 // and retries, so raising this has a built-in safety net rather than a
 // hard cliff.
-const TRIAGE_BATCH_SIZE = 25;
 // How many triage batches run at once. Batches are fully independent --
 // nothing in batch N depends on batch N-1 having finished -- so running
 // them one at a time was pure wasted wall-clock time; a 235-candidate scan
@@ -936,7 +966,6 @@ const TRIAGE_BATCH_SIZE = 25;
 // (see post() above) absorbs occasional rate-limit contention from firing
 // several requests at once, but firing dozens simultaneously would just
 // shift that contention from "wasted time" to "wasted retries."
-const TRIAGE_CONCURRENCY = 4;
 // Marketplace gateways can temporarily have no seller for an otherwise valid
 // model. Retrying those responses over a short backoff window is cheaper and
 // safer than failing the entire scan after an immediate burst of requests.
@@ -1037,14 +1066,8 @@ function isRefusedStructuredChatResponse(error: unknown): error is OpenAiProvide
     && error.message === "OpenAI refused the structured chat request.";
 }
 
-/**
- * Whether a batch's failure is specific to that batch's own content rather
- * than systemic. All underlying checks already require `status` to be
- * undefined -- a real HTTP/network/auth/rate-limit failure always carries a
- * status and is never matched here, so gating on this is safe: it can only
- * ever mean "OpenAI answered, but the content of that answer was unusable,"
- * never "something is broadly broken with OpenAI right now."
- */
+/** Known unusable-output shapes, never a judgment about relevance. Transport
+ * errors can also lack HTTP status and are recognized separately below. */
 function isUnrecoverableStructuredOutputError(error: unknown): error is OpenAiProviderError {
   return isMalformedStructuredJson(error)
     || isRetryableStructuredOutputError(error)
@@ -1061,9 +1084,9 @@ function isUnrecoverableStructuredOutputError(error: unknown): error is OpenAiPr
 // unreachable." Unlike isUnrecoverableStructuredOutputError, this is not
 // content-specific to one batch -- it is systemic in the sense that it could
 // mean OpenAI (or the network path to it) is broadly degraded right now --
-// but a stall lasting a couple of minutes is common enough, and retrying the
-// exact same pending ids costs nothing extra (no new candidates, same
-// prompt), that it is still worth a few batch-level attempts with real
+// but a stall lasting a couple of minutes can merit bounded recovery of the
+// same pending IDs. A timed-out request may still have been billed; retries
+// are not assumed free. The existing batch-level attempts use real
 // backoff before giving up and failing the whole scan attempt. See
 // processBatch's and qualifyConversations' use of this below.
 function isNetworkTransportError(error: unknown): error is OpenAiProviderError {
@@ -1072,30 +1095,27 @@ function isNetworkTransportError(error: unknown): error is OpenAiProviderError {
     && /^OpenAI network request failed/.test(error.message);
 }
 
-/**
- * A safe, permanent stand-in for a candidate whose batch could not be
- * resolved by OpenAI after every retry and model fallback (see
- * tolerateUnrecoverableBatches on TriageConversationsRequest). Always
- * worthEnriching=false -- the candidate is simply never shown, enriched, or
- * promoted as a lead, exactly like any other negative triage verdict.
- */
-function unresolvedTriage(externalId: string, error: unknown): TriagedConversation {
-  const message = error instanceof Error ? error.message : String(error);
-  return {
-    externalId,
-    triage: {
-      externalId,
-      relevant: false,
-      intent: "informational",
-      demandSignal: "none",
-      problem: undefined,
-      productFit: "unknown",
-      timing: "unknown",
-      replyability: "unknown",
-      worthEnriching: false,
-      reason: `Skipped: OpenAI could not return usable structured output for this candidate after every retry (${message}).`.slice(0, 500),
-    },
-  };
+function isGatewayRecoveryEligible(error: unknown): boolean {
+  if (!(error instanceof OpenAiProviderError) || error.code) return false;
+  const status = error.status;
+  return isNetworkTransportError(error) || (status !== undefined
+    && (status === 408 || status === 429 || status >= 500));
+}
+
+/** Recognize only the exact legacy failure marker, not ordinary negatives. */
+export function isLegacyUnresolvedTriage(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Partial<ConversationTriage>;
+  return row.relevant === false && row.worthEnriching === false && row.intent === "informational"
+    && row.demandSignal === "none" && row.problem == null && row.productFit === "unknown"
+    && row.timing === "unknown" && row.replyability === "unknown" && typeof row.reason === "string"
+    && row.reason.startsWith("Skipped: OpenAI could not return usable structured output for this candidate after every retry (");
+}
+
+export function isUsableTriageJudgment(value: unknown, externalId: string): value is ConversationTriage {
+  if (isLegacyUnresolvedTriage(value)) return false;
+  try { return triageValue(value, "triage checkpoint").externalId === externalId; }
+  catch { return false; }
 }
 
 function apiErrorMessage(payload: unknown, status: number): string {
@@ -1118,10 +1138,6 @@ function isMarketplaceCapacityError(payload: unknown, status: number): boolean {
 function isNetworkTimeoutError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.name === "TimeoutError" || /timeout|timed out|aborted due to timeout/i.test(error.message);
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function parsePrice(value: string | undefined, fallback: number): number {
@@ -1247,6 +1263,15 @@ export class OpenAiProvider implements AiProvider {
   private readonly pricing: ModelPriceCatalog;
   private readonly onUsage?: OpenAiProviderOptions["onUsage"];
   private readonly onDiagnostic?: OpenAiProviderOptions["onDiagnostic"];
+  private readonly onRequest?: OpenAiProviderOptions["onRequest"];
+  private readonly traceRoute: "primary" | "direct-fallback";
+  private requestIndex = 0;
+  private readonly requestGate: RequestGate;
+  private readonly triageBatchSize: number;
+  private readonly requestConcurrency: number;
+  private readonly signal?: AbortSignal;
+  private readonly recovery?: AiRecoveryBudget;
+  private cooldownUntil = 0;
   private readonly directFallback: OpenAiProvider | null;
   private readonly useMaxCompletionTokens: boolean;
 
@@ -1266,12 +1291,45 @@ export class OpenAiProvider implements AiProvider {
     this.pricing = options.pricing ?? {};
     this.onUsage = options.onUsage;
     this.onDiagnostic = options.onDiagnostic;
+    this.onRequest = options.onRequest;
+    this.traceRoute = options.traceRoute ?? "primary";
     this.directFallback = options.directFallback ?? null;
     this.useMaxCompletionTokens = options.useMaxCompletionTokens ?? false;
+    this.signal = options.signal;
+    this.recovery = options.recovery;
+    const capacity = aiCapacityFromOptions(options);
+    this.triageBatchSize = capacity.triageBatchSize;
+    this.requestConcurrency = capacity.requestConcurrency;
+    this.requestGate = options.requestGate ?? new RequestGate(capacity.requestConcurrency);
+    if (this.requestGate.limit > capacity.requestConcurrency) this.requestGate.capAt(capacity.requestConcurrency);
   }
 
   private get maxTokensField(): "max_tokens" | "max_completion_tokens" {
     return this.useMaxCompletionTokens ? "max_completion_tokens" : "max_tokens";
+  }
+
+  configurationForDiagnostics() {
+    return { endpointKind: this.endpointKind, apiStyle: this.apiStyle, timeoutMs: this.timeoutMs, maxRetries: this.maxRetries,
+      triageBatchSize: this.triageBatchSize, triageConcurrency: this.requestConcurrency,
+      structuredAttempts: STRUCTURED_CHAT_MAX_ATTEMPTS, marketplaceRetryFloor: MARKETPLACE_CAPACITY_RETRY_FLOOR,
+      coordinatedRetries: Boolean(this.recovery), recoveryMaxRequests: this.recovery?.maxRequests,
+      recoveryDeadlineMs: this.recovery?.deadlineMs,
+      directFallbackEnabled: Boolean(this.directFallback), modelFallbacks: this.modelFallbacks };
+  }
+
+  private get endpointKind(): OpenAiRequestEvent["endpointKind"] {
+    if (isSurplusGateway(this.baseUrl)) return "surplus";
+    return new URL(this.baseUrl).hostname.toLowerCase() === "api.openai.com" ? "openai-direct" : "compatible";
+  }
+
+  private requestEvent(event: Omit<OpenAiRequestEvent, "route" | "endpointKind">) {
+    try { void Promise.resolve(this.onRequest?.({ ...event, route: this.traceRoute, endpointKind: this.endpointKind })).catch(() => {}); }
+    catch { /* Telemetry must not delay or fail a provider request. */ }
+  }
+
+  private diagnostic(event: OpenAiProviderDiagnosticEvent) {
+    try { void Promise.resolve(this.onDiagnostic?.(event)).catch(() => {}); }
+    catch { /* Diagnostics cannot change recovery or its timing. */ }
   }
 
   private headers(): HeadersInit {
@@ -1287,6 +1345,8 @@ export class OpenAiProvider implements AiProvider {
     path: string,
     body: JsonObject,
     operation: AiOperation,
+    control: AiRequestControl = { gate: this.requestGate, signal: this.signal,
+      scope: this.recovery?.scope([recoveryKey({ path, body, operation })]) },
   ): Promise<{ payload: unknown; requestId?: string; model?: string }> {
     let lastError: OpenAiProviderError | undefined;
     const primaryModel = typeof body.model === "string" ? body.model : undefined;
@@ -1298,25 +1358,42 @@ export class OpenAiProvider implements AiProvider {
       const model = models[modelIndex];
       const requestBody = model ? { ...body, model } : body;
       for (let attempt = 0; attempt <= Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR); attempt += 1) {
+        const routeKey = recoveryKey({ endpoint: this.baseUrl, model });
+        const now = this.recovery?.now() ?? Date.now();
+        if (this.cooldownUntil > now) await this.waitForRetry(this.cooldownUntil - now, control);
+        await control.scope?.waitUntilReady(routeKey, control.signal);
         let response: Response;
+        let payload: unknown;
+        let requestIndex = 0;
         try {
-          response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-            method: "POST",
-            headers: this.headers(),
-            body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(this.timeoutMs),
-          });
+          ({ response, payload } = await control.gate.run(async () => {
+            await control.scope?.reserve(control.signal);
+            requestIndex = ++this.requestIndex;
+            this.requestEvent({ phase: "start", requestIndex, operation, model, attempt: attempt + 1 });
+            const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(this.timeoutMs, control.scope?.remaining() ?? this.timeoutMs))));
+            const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+              method: "POST", headers: this.headers(), body: JSON.stringify(requestBody),
+              signal: control?.signal ? AbortSignal.any([timeout, control.signal]) : timeout,
+            });
+            const payload: unknown = await response.json().catch(() => null);
+            control?.signal?.throwIfAborted();
+            return { response, payload };
+          }, control?.signal));
         } catch (error) {
+          if (requestIndex) this.requestEvent({ phase: "end", requestIndex, operation, model, attempt: attempt + 1, category: "transport_error" });
+          control?.signal?.throwIfAborted();
+          control.scope?.remaining();
+          if (error instanceof AiRecoveryExhaustedError || !requestIndex) throw error;
           lastError = new OpenAiProviderError(
             error instanceof Error ? `OpenAI network request failed: ${error.message}` : "OpenAI network request failed.",
           );
           if (attempt < this.maxRetries) {
-            await sleep(Math.min(500 * 2 ** attempt, 5_000));
+            await this.waitForRetry(Math.min(500 * 2 ** attempt, 5_000), control);
             continue;
           }
           const fallbackModel = models[modelIndex + 1];
           if (isNetworkTimeoutError(error) && model && fallbackModel) {
-            await this.onDiagnostic?.({
+            this.diagnostic({
               kind: "model_network_timeout_fallback",
               operation,
               model,
@@ -1327,19 +1404,30 @@ export class OpenAiProvider implements AiProvider {
           throw lastError;
         }
         const requestId = response.headers.get("x-request-id") ?? undefined;
-        const payload = (await response.json().catch(() => null)) as unknown;
+        this.requestEvent({ phase: "end", requestIndex, operation, model, attempt: attempt + 1,
+          statusCode: response.status, category: response.ok ? "http_success" : "http_error" });
         if (response.ok) return { payload, requestId, model };
 
         lastError = new OpenAiProviderError(apiErrorMessage(payload, response.status), response.status, requestId);
+        const errorType = (payload as { error?: { code?: string; type?: string } } | null)?.error;
+        if (response.status === 401 || response.status === 403) lastError.code = "provider_auth_failed";
+        else if (response.status === 400 || response.status === 404 || response.status === 422) lastError.code = "provider_invalid_request";
+        else if (response.status === 402 || (response.status === 429 && /(?:insufficient_quota|billing|quota_exceeded)/i.test(`${errorType?.code ?? ""} ${errorType?.type ?? ""}`))) lastError.code = "provider_quota_exhausted";
+        if (lastError.code) throw lastError;
+        const retryAfter = retryAfterMs(response.headers.get("retry-after"), this.recovery?.now());
+        if (retryAfter !== undefined) {
+          this.cooldownUntil = Math.max(this.cooldownUntil, (this.recovery?.now() ?? Date.now()) + retryAfter);
+          await control.scope?.defer(routeKey, retryAfter);
+        }
         const marketplaceCapacityError = isMarketplaceCapacityError(payload, response.status);
-        const retryLimit = marketplaceCapacityError
+        const retryLimit = marketplaceCapacityError && !(this.recovery && this.directFallback)
           ? Math.max(this.maxRetries, MARKETPLACE_CAPACITY_RETRY_FLOOR)
           : this.maxRetries;
         const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
         if (!retryable || attempt >= retryLimit) {
           const fallbackModel = models[modelIndex + 1];
           if (marketplaceCapacityError && model && fallbackModel) {
-            await this.onDiagnostic?.({
+            this.diagnostic({
               kind: "model_capacity_fallback",
               operation,
               model,
@@ -1349,15 +1437,22 @@ export class OpenAiProvider implements AiProvider {
           }
           throw lastError;
         }
-        const retryAfterHeader = response.headers.get("retry-after");
-        const retryAfter = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
         const fallbackDelay = marketplaceCapacityError
           ? Math.min(2_000 * 2 ** attempt, 10_000)
           : Math.min(500 * 2 ** attempt, 5_000);
-        await sleep(Number.isFinite(retryAfter) ? Math.min(retryAfter * 1_000, 10_000) : fallbackDelay);
+        await this.waitForRetry(retryAfter
+          ?? Math.round(fallbackDelay * (0.8 + Math.random() * 0.4)), control);
       }
     }
     throw lastError ?? new OpenAiProviderError("OpenAI request failed.");
+  }
+
+  private async waitForRetry(ms: number, control: AiRequestControl) {
+    if (control.scope) return control.scope.wait(ms, control.signal);
+    // Do not retry earlier than an enormous server cooldown or overflow a JS
+    // timer. Uncoordinated legacy calls have no durable delayed-job contract.
+    if (ms > 300_000) throw new AiRecoveryExhaustedError("deadline");
+    await abortableDelay(ms, control.signal);
   }
 
   private async recordUsage(
@@ -1382,6 +1477,7 @@ export class OpenAiProvider implements AiProvider {
   }
 
   private async structured<T>(options: {
+    control?: AiRequestControl;
     model: string;
     operation: AiOperation;
     schemaName: string;
@@ -1393,6 +1489,9 @@ export class OpenAiProvider implements AiProvider {
     context: { workspaceId?: EntityId; businessId?: EntityId };
     parse: (value: unknown) => T;
   }): Promise<AiProviderResult<T>> {
+    options.control ??= { gate: this.requestGate, signal: this.signal,
+      scope: this.recovery?.scope([recoveryKey({ version: "structured-v1", operation: options.operation, model: options.model,
+        schema: options.schema, system: options.system, user: options.user })]) };
     if (this.apiStyle === "chat") {
       const modelCandidates = [...new Set([
         options.model,
@@ -1423,8 +1522,11 @@ export class OpenAiProvider implements AiProvider {
               { role: "user", content: options.user },
             ],
             [this.maxTokensField]: maxTokens,
-          }, options.operation);
+          }, options.operation, options.control);
           activeModel = result.model ?? activeModel;
+          // post() may already have moved to a configured model. Do not
+          // restart that same fallback model's repair loop a second time.
+          modelIndex = Math.max(modelIndex, modelCandidates.indexOf(activeModel));
           const payload = objectValue(result.payload, "Chat Completions API payload") as ChatCompletionsPayload;
           const usage = chatUsage(payload);
           const providerRequestId = typeof payload.id === "string" ? payload.id : result.requestId;
@@ -1451,9 +1553,10 @@ export class OpenAiProvider implements AiProvider {
               };
             } catch (error) {
               if (!isRetryableStructuredOutputError(error)) throw error;
-              lastStructuredError = error;
+              lastStructuredError = normalizedFinishReason(payload.choices?.[0]?.finish_reason) === "length"
+                ? new OpenAiProviderError("OpenAI structured output exhausted its allowance (finish_reason=length).") : error;
               if (attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) break;
-              await this.onDiagnostic?.({
+              this.diagnostic({
                 kind: isMalformedStructuredJson(error)
                   ? "structured_chat_malformed_retry"
                   : "structured_chat_invalid_retry",
@@ -1478,7 +1581,7 @@ export class OpenAiProvider implements AiProvider {
           const retryMaxTokens = chatResult.finishReason === "length"
             ? Math.min(STRUCTURED_CHAT_MAX_OUTPUT_TOKENS, Math.max(maxTokens + 1_000, maxTokens * 2))
             : maxTokens;
-          await this.onDiagnostic?.({
+          this.diagnostic({
             kind: "structured_chat_empty_retry",
             operation: options.operation,
             model: activeModel,
@@ -1492,10 +1595,11 @@ export class OpenAiProvider implements AiProvider {
 
         const fallbackModel = modelCandidates[modelIndex + 1];
         if (!fallbackModel || fallbackModel === activeModel) {
+          this.diagnostic({ kind: "structured_output_failed", operation: options.operation, model: activeModel });
           throw lastStructuredError
             ?? new OpenAiProviderError("OpenAI structured chat retry did not return a result.");
         }
-        await this.onDiagnostic?.({
+        this.diagnostic({
           kind: "model_structured_output_fallback",
           operation: options.operation,
           model: activeModel,
@@ -1523,7 +1627,7 @@ export class OpenAiProvider implements AiProvider {
       reasoning: { effort: options.reasoningEffort },
       max_output_tokens: options.maxOutputTokens,
       store: false,
-    }, options.operation);
+    }, options.operation, options.control);
     const activeModel = result.model ?? options.model;
     const payload = objectValue(result.payload, "Responses API payload") as ResponsesApiPayload;
     const usage = responseUsage(payload);
@@ -1639,9 +1743,31 @@ export class OpenAiProvider implements AiProvider {
   private async triageAttempt(
     request: TriageConversationsRequest,
     pendingIds: ReadonlySet<string>,
+    gate = this.requestGate,
+    recovery = this.recovery,
   ): Promise<AiProviderResult<TriagedConversation[]>> {
     const candidates = request.candidates.filter((candidate) => pendingIds.has(candidate.externalId));
+    const compactInstruction = request.compactOutput
+      ? " Output efficiency: keep problem to one short clause (about 160 characters or fewer) and reason to one short clause (about 200 characters or fewer). Preserve every categorical judgment and all distinctions; never omit or weaken a decision to shorten the text."
+      : "";
+    const userInput = {
+      business: request.business,
+      candidates: candidates.map((candidate) => ({
+        externalId: candidate.externalId,
+        subreddit: candidate.subreddit,
+        kind: candidate.kind,
+        title: candidate.title,
+        body: candidate.body,
+        author: candidate.author,
+        createdAt: candidate.createdAt,
+        metrics: candidate.metrics,
+        discoveryLanes: candidate.discoveryLanes,
+        matchedQueries: candidate.matchedQueries,
+      })),
+    };
     return this.structured({
+      control: { signal: request.signal ?? this.signal, gate,
+        scope: recovery?.scope(candidates.map(candidate => triageInputVersion(request, candidate))) },
       model: request.models.economyModel,
       operation: "conversation_triage",
       schemaName: "reddit_candidate_triage",
@@ -1652,22 +1778,11 @@ export class OpenAiProvider implements AiProvider {
       system:
         "High-recall triage for Reddit demand intelligence. Return exactly one item for every supplied externalId and no other IDs. Decide whether each lightweight candidate is promising enough to justify fetching full thread context. Interpret meaning, not just keywords: indirect descriptions of a verified customer problem can be highly relevant even when the brand/product category is absent. Conversely, semantic/topical similarity alone is not commercial intent: research, academic comparison, news, promotion, or generic discussion should be informational/promotional/irrelevant. demandSignal describes evidence in the author's own text. productFit asks whether the verified business could plausibly address that problem. " +
         "worthEnriching is a RELEVANCE gate, not a buyer-intent gate: mark it true whenever the conversation is meaningfully about the business's product category, a direct competitor or substitute, a workflow/use-case the product addresses, or a genuine problem/experience/opinion involving that category -- even when the author shows no purchase intent, is not the one with the problem, or is simply discussing, criticizing, comparing or reacting to something in that category. Full thread context can still surface competitor intelligence, market insight, or a reply-worthy discussion even when there is no lead. Only set worthEnriching false when the conversation is not meaningfully about the product's category, competitors, or use-cases at all. " +
-        "Hard-reject as irrelevant (relevant=false, worthEnriching=false) obvious semantic noise that merely shares surface keywords: unrelated job/hiring/recruitment posts, gaming/entertainment/media discussion, pet/animal care, dating/relationships/astrology, generic AI hype or news with no connection to the business's specific category or a named competitor, and any other topic a careful human would immediately recognize as unrelated to the verified business even though a keyword happened to match. When genuinely unsure whether a topical-but-ambiguous conversation belongs, prefer worthEnriching=true and let deep qualification with full context decide -- but do not enrich conversations you can already tell are noise. Do not infer facts outside the supplied business/candidate records.",
-      user: JSON.stringify({
-        business: request.business,
-        candidates: candidates.map((candidate) => ({
-          externalId: candidate.externalId,
-          subreddit: candidate.subreddit,
-          kind: candidate.kind,
-          title: candidate.title,
-          body: candidate.body,
-          author: candidate.author,
-          createdAt: candidate.createdAt,
-          metrics: candidate.metrics,
-          discoveryLanes: candidate.discoveryLanes,
-          matchedQueries: candidate.matchedQueries,
-        })),
-      }),
+        "Hard-reject as irrelevant (relevant=false, worthEnriching=false) obvious semantic noise that merely shares surface keywords: unrelated job/hiring/recruitment posts, gaming/entertainment/media discussion, pet/animal care, dating/relationships/astrology, generic AI hype or news with no connection to the business's specific category or a named competitor, and any other topic a careful human would immediately recognize as unrelated to the verified business even though a keyword happened to match. When genuinely unsure whether a topical-but-ambiguous conversation belongs, prefer worthEnriching=true and let deep qualification with full context decide -- but do not enrich conversations you can already tell are noise. Do not infer facts outside the supplied business/candidate records." + compactInstruction,
+      // Compact mode also canonicalizes the stable context. This changes no
+      // evidence values and makes identical prefixes deterministic for routes
+      // that support prefix caching. Legacy mode stays byte-compatible.
+      user: request.compactOutput ? canonicalJson(userInput) : JSON.stringify(userInput),
       parse: (raw) => parseExactBatch({
         raw,
         arrayKey: "triage",
@@ -1680,166 +1795,139 @@ export class OpenAiProvider implements AiProvider {
     });
   }
 
-  async triageConversations(
-    request: TriageConversationsRequest,
-  ): Promise<AiProviderResult<TriagedConversation[]>> {
-    if (request.candidates.length === 0) {
-      return {
-        value: [],
-        model: request.models.economyModel,
-        operation: "conversation_triage",
-        usage: { inputTokens: 0, outputTokens: 0 },
-        estimatedCostUsd: 0,
-      };
-    }
-    const expectedIds = request.candidates.map((candidate) => candidate.externalId);
+  async triageConversations(request: TriageConversationsRequest): Promise<TriageConversationsResult> {
+    request.signal?.throwIfAborted();
+    const expectedIds = request.candidates.map(candidate => candidate.externalId);
     if (new Set(expectedIds).size !== expectedIds.length) {
       throw new OpenAiProviderError("Triage input contains duplicate externalIds.");
     }
     const collected = new Map<string, TriagedConversation>();
-    // Seed with whatever an earlier, interrupted attempt already triaged
-    // successfully -- these are never resubmitted, see resumeFrom's doc
-    // comment. Only candidates missing from here go into `batches` below.
-    if (request.resumeFrom) {
-      for (const externalId of expectedIds) {
-        const triage = request.resumeFrom.get(externalId);
-        if (triage) collected.set(externalId, { externalId, triage });
+    const processing = new Map<string, TriageProcessingOutcome>();
+    for (const externalId of expectedIds) {
+      const saved = request.resumeFrom?.get(externalId);
+      const priorAttempts = request.resumeProcessing?.get(externalId)?.attempts ?? 0;
+      const attempts = Number.isFinite(priorAttempts) ? Math.max(0, priorAttempts) : 0;
+      if (isUsableTriageJudgment(saved, externalId)) {
+        collected.set(externalId, { externalId, triage: saved });
+        processing.set(externalId, { externalId, status: "succeeded", attempts });
+      } else {
+        processing.set(externalId, { externalId, status: "pending", attempts });
       }
     }
     const attempts: AiProviderResult<TriagedConversation[]>[] = [];
     const retries = Math.max(0, Math.min(request.coverageRetries ?? 2, 3));
+    const notifyProcessing = async (items: TriageProcessingOutcome[]) => {
+      try { await request.onProcessingUpdated?.(items); }
+      catch { console.error("Failed to checkpoint triage processing status."); }
+    };
+    await notifyProcessing([...processing.values()]);
 
-    const finalizeBatch = async (batchIds: readonly string[]): Promise<void> => {
-      if (!request.onBatchSucceeded) return;
-      // Reached only once every id in this batch (or bisected sub-batch, or
-      // skipped-as-unrecoverable batch) has a final verdict in `collected`.
-      const items = batchIds.map((id) => collected.get(id)!);
-      try {
-        await request.onBatchSucceeded(items);
-      } catch (error) {
-        // Best-effort persistence: a checkpoint write failing must never
-        // fail (or discard) this batch's own already-resolved triage.
-        console.error("Failed to checkpoint a successfully triaged batch.", error);
+    const beginSubmission = (ids: ReadonlySet<string>) => {
+      for (const externalId of ids) {
+        processing.set(externalId, { externalId, status: "pending", attempts: (processing.get(externalId)?.attempts ?? 0) + 1 });
       }
     };
+    const checkpointJudgments = async (items: TriagedConversation[]) => {
+      if (items.length === 0) return;
+      for (const item of items) {
+        collected.set(item.externalId, item);
+        processing.set(item.externalId, { externalId: item.externalId, status: "succeeded", attempts: processing.get(item.externalId)?.attempts ?? 0 });
+      }
+      try { await request.onBatchSucceeded?.(items); }
+      catch { console.error("Failed to checkpoint a successfully triaged batch."); }
+      await notifyProcessing(items.map(item => processing.get(item.externalId)!));
+    };
+    const unresolved = async (ids: ReadonlySet<string>, error: unknown, coverageFailure = false) => {
+      const code = coverageFailure ? "ai_coverage_incomplete"
+        : isRefusedStructuredChatResponse(error) ? "ai_refused"
+        : isUnrecoverableStructuredOutputError(error) ? "ai_structured_output"
+        : isNetworkTransportError(error) ? "ai_transport" : "ai_provider_failure";
+      const recoverable = code === "ai_transport" || code === "ai_coverage_incomplete"
+        || (error instanceof OpenAiProviderError && error.status !== undefined && (error.status === 429 || error.status >= 500));
+      const items: TriageProcessingOutcome[] = [...ids].filter(id => !collected.has(id)).map(externalId => ({
+        externalId, status: "unresolved", code, recoverable, attempts: processing.get(externalId)?.attempts ?? 0,
+      }));
+      for (const item of items) processing.set(item.externalId, item);
+      await notifyProcessing(items);
+    };
 
-    // Keep marketplace requests small. If even a bounded structured response
-    // exhausts the gateway's output budget, recursively split only that batch.
-    // One oversized provider response must never discard the rest of a scan.
     const processBatch = async (batchIds: readonly string[]): Promise<void> => {
+      request.signal?.throwIfAborted();
       const pending = new Set(batchIds);
       try {
         for (let attempt = 0; attempt <= retries && pending.size > 0; attempt += 1) {
           let result: AiProviderResult<TriagedConversation[]>;
+          beginSubmission(pending);
           try {
             result = await this.triageAttempt(request, pending);
           } catch (error) {
-            // See isNetworkTransportError's doc comment: a pure transport
-            // stall gets a real retry (same pending ids, same prompt, with
-            // backoff) out of the same budget coverageRetries already
-            // grants for incomplete-coverage responses, instead of
-            // immediately falling through to the catch below and killing
-            // every other batch still running concurrently. Once that
-            // budget is truly exhausted it still surfaces as a real
-            // failure exactly as before -- a stall outlasting several
-            // backed-off attempts is exactly when the caller should know.
-            if (isNetworkTransportError(error) && attempt < retries) {
-              await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
-              continue;
+            request.signal?.throwIfAborted();
+            if (this.recovery && this.directFallback && isGatewayRecoveryEligible(error)) {
+              beginSubmission(pending);
+              result = await this.directFallback.triageAttempt(request, pending, this.requestGate, this.recovery);
+            } else {
+              if (isNetworkTransportError(error) && attempt < retries) {
+                await this.waitForRetry(Math.min(1_000 * 2 ** attempt, 8_000), { gate: this.requestGate, signal: request.signal ?? this.signal,
+                  scope: this.recovery?.scope(request.candidates.filter(row => pending.has(row.externalId)).map(row => triageInputVersion(request, row))) });
+                continue;
+              }
+              if (!isNetworkTransportError(error) || !this.directFallback) throw error;
+              beginSubmission(pending);
+              result = await this.directFallback.triageAttempt(request, pending, this.requestGate, this.recovery);
             }
-            if (!isNetworkTransportError(error) || !this.directFallback) {
-              throw error;
-            }
-            // Surplus's own retry budget for this batch is exhausted.
-            // Surplus's buyer-side "Final Fallback" provider (configured in
-            // their own dashboard) cannot be relied on here: production
-            // evidence (2026-08-27/28) shows it only engages once Surplus's
-            // server has internally decided every marketplace seller
-            // failed, which can take longer than this provider's own
-            // client-side timeout allows -- the request aborts before
-            // Surplus's fallback logic ever runs. This bypasses Surplus's
-            // marketplace routing entirely for this one batch and calls a
-            // directly-configured OpenAI key instead, one last time, before
-            // truly giving up. If this also fails, that error (not the
-            // original) is what surfaces.
-            result = await this.directFallback.triageAttempt(request, pending);
           }
           attempts.push(result);
-          for (const item of result.value) {
-            collected.set(item.externalId, item);
-            pending.delete(item.externalId);
-          }
+          // Save valid partial coverage immediately, not only after every ID
+          // in this batch succeeds. Recovery submits only the missing IDs.
+          const judgments = result.value.filter(item => isUsableTriageJudgment(item.triage, item.externalId));
+          await checkpointJudgments(judgments);
+          for (const item of judgments) pending.delete(item.externalId);
         }
       } catch (error) {
+        request.signal?.throwIfAborted();
         if (isStructuredLengthExhaustion(error) && pending.size > 1) {
           const remaining = [...pending];
           const middle = Math.ceil(remaining.length / 2);
-          // Both halves are independent recoveries of the same oversized
-          // batch -- no reason to await one before starting the other.
-          await Promise.all([
-            processBatch(remaining.slice(0, middle)),
-            processBatch(remaining.slice(middle)),
+          const halves = await Promise.allSettled([
+            processBatch(remaining.slice(0, middle)), processBatch(remaining.slice(middle)),
           ]);
+          const failure = halves.find(result => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
           return;
         }
-        if (request.tolerateUnrecoverableBatches && isUnrecoverableStructuredOutputError(error)) {
-          // See tolerateUnrecoverableBatches's doc comment: this batch's
-          // remaining candidates could not be triaged by OpenAI at all, but
-          // that failure is specific to this batch's content, not systemic
-          // -- so the rest of the scan (everything already collected, and
-          // every other batch still running concurrently) is left intact
-          // instead of failing the entire triage stage over it.
-          const skippedIds = [...pending];
-          for (const externalId of skippedIds) {
-            collected.set(externalId, unresolvedTriage(externalId, error));
-          }
-          pending.clear();
-          console.warn(
-            `Triage batch unresolved after every retry; ${skippedIds.length} candidate(s) marked not worth enriching: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          await finalizeBatch(skippedIds);
-          return;
-        }
+        await unresolved(pending, error);
+        if (request.tolerateUnrecoverableBatches && isUnrecoverableStructuredOutputError(error)) return;
         throw error;
       }
       if (pending.size > 0) {
-        throw new OpenAiProviderError(
+        const error = new OpenAiProviderError(
           `OpenAI triage coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
         );
+        this.diagnostic({ kind: "triage_coverage_incomplete", operation: "conversation_triage", model: request.models.economyModel, unresolved: pending.size });
+        await unresolved(pending, error, true);
+        if (!request.tolerateUnrecoverableBatches) throw error;
       }
-      await finalizeBatch(batchIds);
     };
 
-    // Only candidates resumeFrom didn't already cover need to go to OpenAI
-    // at all.
-    const idsNeedingTriage = expectedIds.filter((id) => !collected.has(id));
-    const batches: string[][] = [];
-    for (let offset = 0; offset < idsNeedingTriage.length; offset += TRIAGE_BATCH_SIZE) {
-      batches.push(idsNeedingTriage.slice(offset, offset + TRIAGE_BATCH_SIZE));
-    }
-    // Fan out across a small worker pool instead of awaiting each batch in
-    // turn -- see TRIAGE_CONCURRENCY's doc comment above. Mirrors the same
-    // bounded worker-pool pattern already used for independent Reddit
-    // discovery query chunks (runChunkedDirectDiscovery in
-    // reddit-harshmaur.server.ts).
-    let nextBatchIndex = 0;
-    const runNextBatch = async (): Promise<void> => {
-      for (;;) {
-        const index = nextBatchIndex;
-        nextBatchIndex += 1;
-        if (index >= batches.length) return;
-        await processBatch(batches[index]);
-      }
-    };
-    await Promise.all(
-      Array.from({ length: Math.min(TRIAGE_CONCURRENCY, batches.length) }, () => runNextBatch()),
-    );
-    const usage = combineTokenUsage(attempts.map((attempt) => attempt.usage));
+    const idsNeedingTriage = expectedIds.filter(id => !collected.has(id));
+    const dispatcher = new BoundedBatchDispatcher<string, void>({
+      batchSize: this.triageBatchSize, concurrency: this.requestConcurrency, signal: request.signal,
+      process: items => processBatch(items.map(item => item.value)),
+    });
+    try {
+      dispatcher.submit(idsNeedingTriage.map(id => ({ key: id, value: id })));
+      await dispatcher.drain();
+    } finally { dispatcher.dispose(); }
+    const outcomes = expectedIds.map(id => processing.get(id)!);
+    const succeeded = collected.size;
     return {
-      value: expectedIds.map((id) => collected.get(id)!),
+      value: expectedIds.flatMap(id => collected.has(id) ? [collected.get(id)!] : []),
+      processing: outcomes,
+      coverage: { expected: expectedIds.length, succeeded, unresolved: outcomes.filter(item => item.status === "unresolved").length,
+        pending: outcomes.filter(item => item.status === "pending").length, complete: succeeded === expectedIds.length },
       model: attempts.at(-1)?.model ?? request.models.economyModel,
       operation: "conversation_triage",
-      usage,
+      usage: combineTokenUsage(attempts.map(attempt => attempt.usage)),
       estimatedCostUsd: attempts.reduce((sum, attempt) => sum + attempt.estimatedCostUsd, 0),
       providerRequestId: attempts.at(-1)?.providerRequestId,
     };
@@ -1848,10 +1936,14 @@ export class OpenAiProvider implements AiProvider {
   private async qualifyAttempt(
     request: QualifyConversationsRequest,
     pendingIds: ReadonlySet<string>,
+    gate = this.requestGate,
+    recovery = this.recovery,
   ): Promise<AiProviderResult<DeepQualifiedConversation[]>> {
     const conversations = request.conversations.filter((conversation) => pendingIds.has(conversation.externalId));
     const byId = new Map(conversations.map((conversation) => [conversation.externalId, conversation]));
     return this.structured({
+      control: { signal: this.signal, gate, scope: recovery?.scope(conversations.map(conversation =>
+        recoveryKey({ version: "qualification-v1", business: request.business, models: request.models, conversation }))) },
       model: request.models.analysisModel,
       operation: "deep_qualification",
       schemaName: "reddit_deep_qualification",
@@ -1918,24 +2010,21 @@ export class OpenAiProvider implements AiProvider {
       try {
         result = await this.qualifyAttempt(request, pending);
       } catch (error) {
-        // Same reasoning as triageConversations' processBatch: a pure
-        // transport stall (see isNetworkTransportError) gets a real retry
-        // out of this same coverage-retry budget instead of immediately
-        // failing the whole scan attempt over what is often just a
-        // transient network hiccup.
-        if (isNetworkTransportError(error) && attempt < retries) {
-          await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
-          continue;
+        this.signal?.throwIfAborted();
+        if (this.recovery && this.directFallback && isGatewayRecoveryEligible(error)) {
+          result = await this.directFallback.qualifyAttempt(request, pending, this.requestGate, this.recovery);
+        } else {
+          // Legacy mode retains the existing coverage/transport policy.
+          // Coordinated mode still charges every submission to one budget.
+          if (isNetworkTransportError(error) && attempt < retries) {
+            await this.waitForRetry(Math.min(1_000 * 2 ** attempt, 8_000), { gate: this.requestGate, signal: this.signal,
+              scope: this.recovery?.scope(request.conversations.filter(row => pending.has(row.externalId)).map(conversation =>
+                recoveryKey({ version: "qualification-v1", business: request.business, models: request.models, conversation }))) });
+            continue;
+          }
+          if (!isNetworkTransportError(error) || !this.directFallback) throw error;
+          result = await this.directFallback.qualifyAttempt(request, pending, this.requestGate, this.recovery);
         }
-        if (!isNetworkTransportError(error) || !this.directFallback) {
-          throw error;
-        }
-        // See triageConversations' processBatch for the full reasoning:
-        // Surplus's own retry budget is exhausted and its buyer-side
-        // fallback provider cannot be relied on to engage before this
-        // provider's own client-side timeout aborts the request, so call a
-        // directly-configured OpenAI key once as a last resort.
-        result = await this.directFallback.qualifyAttempt(request, pending);
       }
       attempts.push(result);
       for (const item of result.value) {
@@ -1944,6 +2033,7 @@ export class OpenAiProvider implements AiProvider {
       }
     }
     if (pending.size > 0) {
+      this.diagnostic({ kind: "qualification_coverage_incomplete", operation: "deep_qualification", model: request.models.analysisModel, unresolved: pending.size });
       throw new OpenAiProviderError(
         `OpenAI deep-qualification coverage remained incomplete after retries; missing externalIds: ${[...pending].join(", ")}.`,
       );
@@ -2202,10 +2292,12 @@ export class OpenAiProvider implements AiProvider {
  * maxTokensField for the one real difference (real OpenAI needs
  * max_completion_tokens, not max_tokens, for this app's models).
  */
-function directOpenAiFallbackFromEnv(env: NodeJS.ProcessEnv): OpenAiProvider | undefined {
+function directOpenAiFallbackFromEnv(env: NodeJS.ProcessEnv, hooks: Pick<OpenAiProviderOptions, "onRequest" | "onUsage" | "onDiagnostic" | "fetchImpl" | "signal" | "recovery" | "triageBatchSize" | "requestConcurrency" | "requestGate"> = {}): OpenAiProvider | undefined {
   const apiKey = env.OPENAI_DIRECT_FALLBACK_API_KEY?.trim();
   if (!apiKey) return undefined;
   return new OpenAiProvider({
+    ...hooks,
+    traceRoute: "direct-fallback",
     apiKey,
     baseUrl: env.OPENAI_DIRECT_FALLBACK_BASE_URL?.trim() || "https://api.openai.com/v1",
     apiStyle: "chat",
@@ -2225,6 +2317,8 @@ export function createOpenAiProviderFromEnv(
 ): OpenAiProvider {
   const apiKey = env.OPENAI_API_KEY?.trim();
   if (!apiKey) throw new Error("OPENAI_API_KEY is required for real website analysis and AI generation.");
+  const capacity = aiCapacityFromEnv(env);
+  const requestGate = options.requestGate ?? sharedAiRequestGate(capacity.requestConcurrency);
   return new OpenAiProvider({
     ...options,
     apiKey,
@@ -2241,6 +2335,15 @@ export function createOpenAiProviderFromEnv(
     maxRetries: options.maxRetries ?? optionalFiniteNumber(env.OPENAI_MAX_RETRIES),
     modelFallbacks: options.modelFallbacks ?? openAiModelFallbacksFromEnv(env),
     pricing: openAiPricingFromEnv(env),
-    directFallback: options.directFallback ?? directOpenAiFallbackFromEnv(env),
+    triageBatchSize: options.triageBatchSize ?? capacity.triageBatchSize,
+    requestConcurrency: options.requestConcurrency ?? capacity.requestConcurrency,
+    requestGate,
+    directFallback: options.directFallback ?? directOpenAiFallbackFromEnv(env, {
+      onRequest: options.onRequest, onUsage: options.onUsage, onDiagnostic: options.onDiagnostic, fetchImpl: options.fetchImpl,
+      signal: options.signal, recovery: options.recovery,
+      triageBatchSize: options.triageBatchSize ?? capacity.triageBatchSize,
+      requestConcurrency: options.requestConcurrency ?? capacity.requestConcurrency,
+      requestGate,
+    }),
   });
 }

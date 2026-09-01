@@ -3,6 +3,7 @@ import { requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
 import { getStateRepository } from "@/lib/server/repository";
 import { sanitizeDiscoveryOverrides } from "@/lib/intelligence/discovery-overrides";
+import { scanReviewVersion } from "@/lib/server/scan-lifecycle";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
@@ -24,7 +25,7 @@ export async function PUT(request: Request, context: RouteContext) {
     // Editable between website analysis and Reddit retrieval. Requiring only
     // "queued" was not enough on its own: before analysis there is nothing to
     // review, and once retrieval has begun an edit would silently not apply.
-    if (scan.status === "running" || scan.status === "retrying" || scan.status === "complete") {
+    if (scan.approval || scan.status === "running" || scan.status === "retrying" || scan.status === "complete") {
       throw new ApiError(
         "Discovery terms can only be edited before the Reddit scan starts.",
         409,
@@ -48,8 +49,9 @@ export async function PUT(request: Request, context: RouteContext) {
       );
     }
 
-    await getStateRepository().saveScan({ ...scan, discoveryOverrides: overrides, updatedAt: new Date().toISOString() });
-    return Response.json({ discoveryOverrides: overrides }, { headers: { "Cache-Control": "no-store" } });
+    const updated = { ...scan, discoveryOverrides: overrides, updatedAt: new Date().toISOString() };
+    await getStateRepository().saveScan(updated);
+    return Response.json({ discoveryOverrides: overrides, reviewVersion: scanReviewVersion(updated) }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return apiErrorResponse(error);
   }
@@ -70,8 +72,10 @@ export async function GET(request: Request, context: RouteContext) {
     return Response.json(
       {
         analyzed: Boolean(analysis),
+        reviewVersion: scanReviewVersion(scan),
         editable:
           Boolean(analysis) &&
+          !scan.approval &&
           scan.status !== "running" &&
           scan.status !== "retrying" &&
           scan.status !== "complete",

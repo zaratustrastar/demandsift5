@@ -112,7 +112,8 @@ test("runScan branches only at the understanding step -- everything after is unc
 
   assert.match(runScanBody, /scan\.inputMode === "context"/);
   assert.match(runScanBody, /runContextUnderstanding\(scan\)/);
-  assert.match(runScanBody, /crawlWebsite\(scan\.websiteUrl/);
+  assert.match(runScanBody, /observedCrawl\(scan\)/);
+  assert.match(scanWorkflow, /return crawlWebsite\(scan\.websiteUrl, \{ maxPages: 4, signal: execution\?\.guard\.signal \}\)/);
 
   // Query planning, Reddit discovery, triage, ranking, insights and
   // monitoring must never re-branch on inputMode -- only the understanding
@@ -135,7 +136,7 @@ test("context mode never crawls a website", () => {
 
 test("the context branch of stopAfterUnderstanding never touches website understanding or crawling", () => {
   const stopAfterIndex = scanWorkflow.indexOf("if (options.stopAfterUnderstanding) {");
-  const afterBlock = scanWorkflow.indexOf("\n    const models = openAiModelsFromEnv();", stopAfterIndex);
+  const afterBlock = scanWorkflow.indexOf("\n    const isContextScan =", stopAfterIndex);
   const stopAfterBlock = scanWorkflow.slice(stopAfterIndex, afterBlock);
   const contextBranchIndex = stopAfterBlock.indexOf('if (scan.inputMode === "context") {');
   assert.ok(contextBranchIndex > -1, "expected a context-mode branch inside stopAfterUnderstanding");

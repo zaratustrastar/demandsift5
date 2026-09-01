@@ -7,6 +7,8 @@ import {
 } from "@/lib/providers/openai.server";
 import { ApiError, apiErrorResponse, requireWorkspace } from "@/lib/server/http";
 import { getStateRepository } from "@/lib/server/repository";
+import { aiCapacityFromEnv } from "@/lib/ai/capacity";
+import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 
 /**
  * Temporary, workspace-protected acceptance probe. The normal mode replays only
@@ -121,7 +123,10 @@ export async function POST(request: Request) {
       },
     }));
 
+    const capacity = aiCapacityFromEnv();
     const provider = createOpenAiProviderFromEnv(process.env, {
+      requestGate: globallyBoundedAiRequestGate({ workspaceId: actor.workspaceId,
+        localLimit: capacity.requestConcurrency, holderPrefix: `acceptance:${scan.id}` }),
       onDiagnostic: (event) => {
         diagnosticEvents.push(event);
       },

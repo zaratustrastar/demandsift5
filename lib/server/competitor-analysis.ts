@@ -1,4 +1,6 @@
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
+import { aiCapacityFromEnv } from "@/lib/ai/capacity";
+import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 import { crawlWebsite } from "@/lib/security/website-crawler";
 import type { CompetitorProfile } from "./contracts";
 import { createId } from "./ids";
@@ -66,7 +68,11 @@ async function analyzeOneCompetitor(
 
   const homepage = crawl.pages[0];
   const analyzedAt = new Date().toISOString();
-  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+  const capacity = aiCapacityFromEnv();
+  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv(process.env, {
+    requestGate: globallyBoundedAiRequestGate({ workspaceId, localLimit: capacity.requestConcurrency,
+      holderPrefix: `competitor:${workspaceId}:${crawl.canonicalDomain}` }),
+  }) : null;
 
   if (!aiProvider) {
     // Same conservative-fallback policy as the primary business's own

@@ -11,14 +11,16 @@ export interface RetryOptions {
 function wait(delayMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason);
+      reject(signal?.reason);
       return;
     }
-    const timeout = setTimeout(resolve, delayMs);
-    signal?.addEventListener("abort", () => {
+    const timeout = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, delayMs);
+    const abort = () => {
       clearTimeout(timeout);
-      reject(signal.reason);
-    }, { once: true });
+      signal?.removeEventListener("abort", abort);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
   });
 }
 

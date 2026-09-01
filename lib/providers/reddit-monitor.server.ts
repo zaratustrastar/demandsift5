@@ -30,6 +30,13 @@ export type RedditMonitorFetchResult = {
   rejected: number;
 };
 
+type ActorCapacity = {
+  acquire(input: {
+    pool: "apify-actor"; holderKey: string; workspaceId: string;
+    limit: number; leaseMs: number; signal?: AbortSignal;
+  }): Promise<{ release(): Promise<boolean> }>;
+};
+
 function boundedInteger(value: string | undefined, fallback: number, min: number, max: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) ? Math.max(min, Math.min(parsed, max)) : fallback;
@@ -182,6 +189,10 @@ export async function fetchRedditMonitorCandidates(input: {
   to: Date;
   environment?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
+  workspaceId?: string;
+  holderKey?: string;
+  actorCapacity?: ActorCapacity;
+  actorCapacityLimit?: number;
 }): Promise<RedditMonitorFetchResult> {
   const environment = input.environment ?? process.env;
   const token = environment.APIFY_TOKEN?.trim();
@@ -196,21 +207,38 @@ export async function fetchRedditMonitorCandidates(input: {
     to: input.to,
     environment,
   });
+  const timeoutMs = boundedInteger(environment.REDDIT_MONITOR_TIMEOUT_SECONDS, 600, 60, 1_200) * 1_000;
+  const capacityLease = input.actorCapacity && input.workspaceId && input.holderKey
+    ? await input.actorCapacity.acquire({
+        pool: "apify-actor",
+        holderKey: input.holderKey,
+        workspaceId: input.workspaceId,
+        limit: input.actorCapacityLimit ?? 1,
+        leaseMs: timeoutMs + 120_000,
+      })
+    : null;
+  let startOutcome: "not_sent" | "ambiguous" | "known" = "not_sent";
+  let startAccepted = false;
+  let terminalStatus = "";
+  try {
   const startUrl = new URL(`/v2/acts/${encodeURIComponent(actorId)}/runs`, "https://api.apify.com");
   startUrl.searchParams.set("waitForFinish", "60");
+  startOutcome = "ambiguous";
   const startResponse = await fetchImpl(startUrl, {
     method: "POST",
     headers,
     body: JSON.stringify(actorInput),
     signal: AbortSignal.timeout(90_000),
   });
+  if (startResponse.status < 500) startOutcome = "known";
+  startAccepted = startResponse.ok;
   if (!startResponse.ok) {
     throw new Error(`Reddit monitoring Actor could not start (HTTP ${startResponse.status}).`);
   }
   let run = dataObject(await responseJson(startResponse));
   const actorRunId = stringValue(run.id, 160);
   if (!actorRunId) throw new Error("Reddit monitoring Actor returned no run ID.");
-  const deadline = Date.now() + boundedInteger(environment.REDDIT_MONITOR_TIMEOUT_SECONDS, 600, 60, 1_200) * 1_000;
+  const deadline = Date.now() + timeoutMs;
   while (!["SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"].includes(stringValue(run.status, 40))) {
     if (Date.now() >= deadline) throw new Error("Reddit monitoring Actor timed out.");
     const statusUrl = new URL(`/v2/actor-runs/${encodeURIComponent(actorRunId)}`, "https://api.apify.com");
@@ -222,8 +250,9 @@ export async function fetchRedditMonitorCandidates(input: {
     if (!response.ok) throw new Error(`Reddit monitoring Actor status failed (HTTP ${response.status}).`);
     run = dataObject(await responseJson(response));
   }
-  if (stringValue(run.status, 40) !== "SUCCEEDED") {
-    throw new Error(`Reddit monitoring Actor ended with status ${stringValue(run.status, 40) || "unknown"}.`);
+  terminalStatus = stringValue(run.status, 40);
+  if (terminalStatus !== "SUCCEEDED") {
+    throw new Error(`Reddit monitoring Actor ended with status ${terminalStatus || "unknown"}.`);
   }
   const datasetId = stringValue(run.defaultDatasetId, 160);
   if (!datasetId) throw new Error("Reddit monitoring Actor completed without a dataset.");
@@ -250,4 +279,11 @@ export async function fetchRedditMonitorCandidates(input: {
     fetched: limitedItems.length,
     rejected: limitedItems.length - parsed.length,
   };
+  } finally {
+    // A lost/5xx start response may have launched paid work. Preserve its
+    // slot until lease expiry; all known terminal outcomes release at once.
+    if (startOutcome === "not_sent" || terminalStatus || (startOutcome === "known" && !startAccepted)) {
+      await capacityLease?.release().catch(() => false);
+    }
+  }
 }

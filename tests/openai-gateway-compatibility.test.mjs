@@ -1,38 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
-function moduleUrl(source) {
-  return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-}
-
-async function compile(relativePath, replacements = {}) {
-  let source = await readFile(new URL(relativePath, import.meta.url), "utf8");
-  for (const [specifier, replacement] of Object.entries(replacements)) {
-    source = source.replaceAll(`"${specifier}"`, JSON.stringify(replacement));
-  }
-  return moduleUrl(ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    fileName: relativePath,
-  }).outputText);
-}
-
-const directAi = await import(await compile("../lib/server/ai.ts"));
-const usageModule = moduleUrl(`
-  export function estimateAiCostUsd() { return 0; }
-  export function combineTokenUsage(records) {
-    return records.reduce((total, row) => ({
-      inputTokens: total.inputTokens + (row.inputTokens || 0),
-      outputTokens: total.outputTokens + (row.outputTokens || 0),
-      cachedInputTokens: (total.cachedInputTokens || 0) + (row.cachedInputTokens || 0),
-      cacheWriteInputTokens: (total.cacheWriteInputTokens || 0) + (row.cacheWriteInputTokens || 0),
-    }), { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 });
-  }
-`);
-const providerModule = await import(await compile("../lib/providers/openai.server.ts", {
-  "@/lib/ai/usage": usageModule,
-}));
+const directAi = await loadTsModule("lib/server/ai.ts");
+const providerModule = await loadTsModule("lib/providers/openai.server.ts");
 
 test("a compatible non-OpenAI gateway uses the basic chat payload for website analysis", async () => {
   const previous = {

@@ -55,13 +55,14 @@ test("every displayed acquisition opportunity passes deterministic lead invarian
   assert.match(pipeline, /qualification\.evidenceQuality === "high"/);
   assert.match(pipeline, /qualification\.productFit === "medium" \|\| qualification\.productFit === "high"/);
   assert.match(pipeline, /qualification\.replyability === "medium" \|\| qualification\.replyability === "high"/);
-  // Reply drafting runs replyEligible through mapConcurrently (bounded
-  // parallel, not a plain sequential for loop) but every item still goes
-  // through the same per-item function -- a throw for any one of them
-  // still fails the whole call, same as a for loop with no try/catch.
-  assert.match(workflow, /mapConcurrently\(replyEligible, REPLY_GENERATION_CONCURRENCY, async \(opportunity\) => \{/);
+  // Lead and non-lead replies share one bounded queue, while lead tasks retain
+  // strict failure semantics so no displayed acquisition result can finish
+  // without its complete grounded reply.
+  assert.match(workflow, /const replyTasks = \[\.\.\.leadTasks, \.\.\.relevantTasks\]/);
+  assert.match(workflow, /mapConcurrently\(replyTasks, REPLY_GENERATION_CONCURRENCY/);
+  assert.match(workflow, /if \(task\.strict\) throw error/);
   assert.doesNotMatch(workflow, /Create empty placeholders only for additional reply-eligible paid results/);
-  assert.match(workflow, /all qualified opportunities/);
+  assert.match(workflow, /const leadTasks: ReplyTask\[\] = replyEligible\.flatMap/);
 });
 
 
@@ -72,8 +73,8 @@ test("market-intelligence review has a bounded full-context floor independent of
   ]);
   // The floor is now independent of the lookback window as well as of lead
   // triage: shortening the window to 7 days must not lower review depth.
-  assert.match(workflow, /function minimumFullContextReviews\(\): number/);
-  assert.match(workflow, /minimumFullContextReviews\(\)/);
+  assert.match(workflow, /function minimumFullContextReviews\(env: NodeJS.ProcessEnv = process.env\): number/);
+  assert.match(workflow, /minimumFullContextReviews\(env\)/);
   assert.equal(/minimumFullContextReviews\(lookbackDays\)/.test(workflow), false);
   // Enrichment must be over-selected so one miss cannot fail a healthy scan.
   assert.match(workflow, /enrichmentSelectionTarget/);

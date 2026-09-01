@@ -26,7 +26,7 @@ test("creating a scan for review does not start Reddit retrieval", () => {
   assert.match(createRoute, /body\.reviewFirst === true/);
   const reviewBranch = createRoute.indexOf("body.reviewFirst === true");
   // The call site, not the import at the top of the file.
-  const enqueue = createRoute.indexOf("await enqueueScanRun(scan)");
+  const enqueue = createRoute.indexOf("await enqueueScanAnalysis(scan)");
   assert.ok(enqueue > -1, "expected an enqueue call site");
   assert.ok(
     reviewBranch < enqueue,
@@ -77,12 +77,9 @@ test("all five understanding concepts reach the review screen", () => {
   }
 });
 
-test("the client flow is analyze then competitors then refining then review then scan", () => {
-  // competitors and refining are both new, optional steps inserted between
-  // the analyze call and the review screen -- the fast/preliminary profile
-  // is never shown on its own, only after "refining" confirms it's the full
-  // one.
-  assert.match(experience, /type View =[\s\S]*"analyzing"[\s\S]*"competitors"[\s\S]*"refining"[\s\S]*"profile"/);
+test("the client flow is full analysis then competitors then review then approved scan", () => {
+  assert.match(experience, /type View =[\s\S]*"analyzing"[\s\S]*"competitors"[\s\S]*"profile"/);
+  assert.doesNotMatch(experience, /"refining"|MAX_ATTEMPTS = 56/);
   assert.match(experience, /reviewFirst: true/);
   assert.match(experience, /\/analyze`/);
 
@@ -91,21 +88,20 @@ test("the client flow is analyze then competitors then refining then review then
   // a false-positive textual match.
   const main = experience.slice(experience.indexOf("export function ThreadlineExperience()"));
   const analyze = main.indexOf("/analyze`");
-  const setCompetitors = main.indexOf('setView("competitors")');
+  const setCompetitors = main.indexOf('setView("competitors")', analyze);
   assert.ok(analyze > -1 && setCompetitors > -1, "expected both the analyze call and the competitors transition");
   assert.ok(analyze < setCompetitors, "the competitors step must follow analysis, not precede it");
 
   // And the render branches themselves must appear in flow order.
   const competitorsBranch = main.indexOf('view === "competitors"');
-  const refiningBranch = main.indexOf('view === "refining"');
   const profileBranch = main.indexOf('view === "profile"');
   assert.ok(
-    competitorsBranch > -1 && refiningBranch > -1 && profileBranch > -1,
-    "expected competitors, refining, and profile render branches",
+    competitorsBranch > -1 && profileBranch > -1,
+    "expected competitors and profile render branches",
   );
   assert.ok(
-    competitorsBranch < refiningBranch && refiningBranch < profileBranch,
-    "render branches must appear in flow order: competitors, then refining, then profile",
+    competitorsBranch < profileBranch,
+    "render branches must appear in flow order: competitors then profile",
   );
 });
 

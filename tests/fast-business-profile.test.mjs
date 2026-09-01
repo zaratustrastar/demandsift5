@@ -61,7 +61,8 @@ test("website understanding crawls through the same SSRF-protected crawler, with
   assert.match(workflow, /async function runFullWebsiteUnderstanding/);
   const fnStart = workflow.indexOf("async function runFullWebsiteUnderstanding");
   const fnBody = workflow.slice(fnStart, workflow.indexOf("\n/**", fnStart));
-  assert.match(fnBody, /crawlWebsite\(scan\.websiteUrl, \{ maxPages: 4 \}\)/);
+  assert.match(fnBody, /observedCrawl\(scan\)/);
+  assert.match(workflow, /return crawlWebsite\(scan\.websiteUrl, \{ maxPages: 4, signal: execution\?\.guard\.signal \}\)/);
   assert.equal(/maxPages: 1/.test(fnBody), false, "the full understanding pass must not use the old homepage-only page budget");
   // No second, unprotected fetch/http/https import or call anywhere in this
   // file -- crawlWebsite is the only network entry point website analysis uses.
@@ -75,9 +76,9 @@ test("a website scan's persisted profileStage is always full, and is therefore a
 });
 
 test("stopAfterUnderstanding runs the full analysis synchronously and returns, with no background job fired", () => {
-  const tryBlock = workflow.slice(workflow.indexOf("try {\n    await setStage(scan, \"website\", \"active\");"));
+  const tryBlock = workflow.slice(workflow.indexOf("export async function runScan("));
   const stopBranch = tryBlock.indexOf("if (options.stopAfterUnderstanding) {");
-  const afterStopBranch = tryBlock.indexOf("\n    const models = openAiModelsFromEnv();", stopBranch);
+  const afterStopBranch = tryBlock.indexOf("\n    const isContextScan =", stopBranch);
   assert.ok(stopBranch > -1 && afterStopBranch > stopBranch, "expected the stopAfterUnderstanding branch in runScan");
   const stopBranchBody = tryBlock.slice(stopBranch, afterStopBranch);
   assert.match(stopBranchBody, /runFullWebsiteUnderstanding\(scan\)/);
@@ -89,8 +90,8 @@ test("stopAfterUnderstanding runs the full analysis synchronously and returns, w
 test("the review screen and its API still expose profileStage, always reporting full for a persisted analysis", () => {
   assert.match(termsRoute, /profileStage: analysis\?\.profileStage \?\? \(analysis \? "full" : null\)/);
   assert.match(profileUi, /profileStage\?: "fast" \| "full" \| null;/);
-  assert.match(experience, /function RefiningProfile/);
-  assert.match(experience, /payload\.profileStage === "full"/);
+  assert.doesNotMatch(experience, /function RefiningProfile|MAX_ATTEMPTS = 56/);
+  assert.match(experience, /if \(!latest\.scan\.analysisReady\) throw new Error/);
 });
 
 test("discoveryProfile's stored shape documents profileStage for future readers", () => {

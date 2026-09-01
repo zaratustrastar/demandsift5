@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
 /**
  * triageConversations() used to await each TRIAGE_BATCH_SIZE-sized batch
@@ -16,35 +15,7 @@ import ts from "typescript";
  * change in scheduling.
  */
 
-function moduleUrl(source) {
-  return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-}
-
-async function compileOpenAiProvider() {
-  let source = await readFile(
-    new URL("../lib/providers/openai.server.ts", import.meta.url),
-    "utf8",
-  );
-  const usageModule = moduleUrl(`
-    export function estimateAiCostUsd() { return 0; }
-    export function combineTokenUsage(records) {
-      return records.reduce((total, row) => ({
-        inputTokens: total.inputTokens + (row.inputTokens || 0),
-        outputTokens: total.outputTokens + (row.outputTokens || 0),
-        cachedInputTokens: (total.cachedInputTokens || 0) + (row.cachedInputTokens || 0),
-        cacheWriteInputTokens: (total.cacheWriteInputTokens || 0) + (row.cacheWriteInputTokens || 0),
-      }), { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 });
-    }
-  `);
-  source = source.replaceAll('"@/lib/ai/usage"', JSON.stringify(usageModule));
-  const javascript = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    fileName: "openai.server.ts",
-  }).outputText;
-  return import(moduleUrl(javascript));
-}
-
-const openai = await compileOpenAiProvider();
+const openai = await loadTsModule("lib/providers/openai.server.ts");
 const cited = (value) => ({ value, confidence: 0.9, provenanceIds: ["web_1"] });
 const business = {
   businessId: "biz_1",

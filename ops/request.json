@@ -1,5 +1,5 @@
 {
-  "id": "set-reddit-year-2026-09-02",
+  "id": "verify-vps-state-2026-09-02",
   "ops": [
     "set-reddit-config APIFY_REDDIT_TIME_RANGE year",
     "reddit-config",

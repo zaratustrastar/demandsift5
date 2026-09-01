@@ -22,7 +22,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 25
     outputs:
-      out_b64: ${{ steps.run.outputs.out_b64 }}
+      out_b64: ${{ steps.export.outputs.out_b64 }}
     steps:
       - uses: actions/checkout@v4
         with:

@@ -6,6 +6,8 @@ import {
 } from "@/lib/intelligence/reddit-pipeline";
 import type { DeepQualification, QualifiedOpportunity } from "@/lib/domain/types";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
+import { aiCapacityFromEnv } from "@/lib/ai/capacity";
+import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 import type {
   MarketIntelligenceRecord,
   ProcessedRedditState,
@@ -175,7 +177,11 @@ export async function createCandidateReply(input: {
   let content: string;
   let usage: ReturnType<typeof usageRecord> | null = null;
   try {
-    const provider = createOpenAiProviderFromEnv();
+    const capacity = aiCapacityFromEnv();
+    const provider = createOpenAiProviderFromEnv(process.env, { requestGate: globallyBoundedAiRequestGate({
+      workspaceId: scan.workspaceId, localLimit: capacity.requestConcurrency,
+      holderPrefix: `candidate-reply:${scan.id}:${state.externalId}`,
+    }) });
     const generated = await provider.generateReply({
       business,
       opportunity: candidate,

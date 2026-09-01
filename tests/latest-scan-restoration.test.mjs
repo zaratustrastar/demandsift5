@@ -13,7 +13,7 @@ test("workspace restoration considers the newest scan regardless of completion s
 });
 
 test("failed and unfinished latest scans cannot reveal an older completed report", () => {
-  const restore = experience.indexOf("async function restoreLatestWorkspace");
+  const restore = experience.indexOf("const restoration = startScanPolling");
   const failed = experience.indexOf('latest.scan.status === "failed"', restore);
   const report = experience.indexOf('latest.scan.status === "complete" && latest.report', restore);
   const scanning = experience.indexOf('setView("scanning")', restore);

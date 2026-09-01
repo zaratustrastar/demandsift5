@@ -14,23 +14,29 @@ import {
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
+  type ApiPartialResponse,
   type ApiScanResponse,
 } from "./demand-intelligence/from-scan";
+import {
+  emptyLivePartialState,
+  mergeLivePartialState,
+  preserveLiveReplyEdits,
+  refreshLiveResultOrder,
+  type LivePartialState,
+} from "./demand-intelligence/live-scan";
 import { DiscoveryProfile } from "./DiscoveryProfile";
 import { CompetitorsSetup } from "./CompetitorsSetup";
 import { OnboardingHeader } from "./OnboardingHeader";
 import styles from "./ThreadlineExperience.module.css";
+import { startScanPolling, readScanResponse } from "@/lib/client/scan-polling";
+import { scanElapsedMs, durationLabel, progressDetail } from "@/lib/client/scan-progress-view";
 
-// "competitors" is a dedicated, optional step (Back/Skip/Continue) between
-// the fast analysis and the review screen. "refining" is a brief wait screen
-// after it: the fast, homepage-only profile is never shown to the user --
-// this waits for the fuller background analysis so "profile" always shows
-// the complete picture. See RefiningProfile's doc comment.
+// Full analysis completes before the optional competitors step and review.
+// There is no second analysis/refining wait and no timeout to a partial profile.
 type View =
   | "landing"
   | "analyzing"
   | "competitors"
-  | "refining"
   | "profile"
   | "scanning"
   | "restoring"
@@ -41,7 +47,6 @@ type View =
   | "error";
 type AccessLevel = "free" | "pass" | "core";
 
-const SCAN_POLL_INTERVAL_MS = 3_000;
 /**
  * Daily Reddit monitoring and AI visibility tracking both run in the
  * background (a Postgres-backed scheduler polling every 60s / 5min, see
@@ -55,8 +60,19 @@ const SCAN_POLL_INTERVAL_MS = 3_000;
  * every 15 minutes-to-a-week, not multiple times a second.
  */
 const BACKGROUND_STATUS_POLL_INTERVAL_MS = 20_000;
-const SCAN_POLL_BACKOFF_BASE_MS = 1_500;
-const SCAN_POLL_BACKOFF_MAX_MS = 10_000;
+
+function keepStableScanUrl(scanId: string, remove: string[] = []) {
+  const stable = new URL(window.location.href);
+  for (const name of remove) stable.searchParams.delete(name);
+  stable.searchParams.set("scan_id", scanId);
+  window.history.replaceState({}, "", `${stable.pathname}${stable.search}`);
+}
+
+function clearStableScanUrl() {
+  const setup = new URL(window.location.href);
+  for (const name of ["scan_id", "checkout", "reddit"]) setup.searchParams.delete(name);
+  window.history.replaceState({}, "", `${setup.pathname}${setup.search}`);
+}
 
 const disconnectedReddit: RedditConnectionStatus = {
   configured: false,
@@ -104,8 +120,8 @@ const STAGE_META: Record<string, { label: string; detail: string }> = {
     detail: "Filtering for genuine buying intent before reading full conversations.",
   },
   enrichment: {
-    label: "Opening the strongest conversations",
-    detail: "Fetching useful thread context only for candidates worth deeper review.",
+    label: "Preparing evidence for deeper checks",
+    detail: "Selecting conversations and preparing the available evidence.",
   },
   qualification: {
     label: "Identifying potential customers",
@@ -135,77 +151,84 @@ function stageRowsFor(
   progress: ApiScanResponse["scan"]["progress"],
 ): StageRow[] {
   const reported = new Map(progress.map((item) => [item.id, item]));
-  return stageIds.map((id, index) => {
+  return stageIds.map((id) => {
     const real = reported.get(id);
     const meta = STAGE_META[id];
     return {
       id,
       label: real?.label ?? meta.label,
       detail: real?.detail ?? meta.detail,
-      status: real?.status ?? (index === 0 ? "active" : "pending"),
+      status: real?.status ?? "pending",
     };
   });
 }
 
-/** Ticks up once a second for as long as `active` stays true, resetting whenever it flips back on -- a real, locally-measured "how long has this screen been waiting" clock, not a fabricated one. */
-function useElapsedSeconds(active: boolean): number {
-  const [seconds, setSeconds] = useState(0);
+function useProgressClock(): number {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!active) return;
-    const startedAt = Date.now();
-    const timer = window.setInterval(() => {
-      setSeconds(Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [active]);
-  return seconds;
+  }, []);
+  return now;
 }
 
-/**
- * The stage list, progress bar and step/elapsed-time footer shared by the
- * "analyzing" and "scanning"/"restoring" screens -- each passes in its own
- * slice of the real pipeline (see PRE_INPUT_STAGE_IDS / POST_INPUT_STAGE_IDS
- * above) so the two screens stay honest about which stages could possibly
- * be true at that point, instead of both showing the same seven-stage list.
- */
-function StageProgress({ rows, closeTabNote }: { rows: StageRow[]; closeTabNote: string }) {
-  const completed = rows.filter((row) => row.status === "complete").length;
-  const total = rows.length;
-  const pct = total === 0 ? 0 : Math.round((completed / total) * 100);
-  const allDone = total > 0 && completed === total;
-  const elapsed = useElapsedSeconds(!allDone);
+function StageProgress({ rows, scan, connected }: { rows: StageRow[]; scan?: ApiScanResponse["scan"]; connected: boolean }) {
+  const progress = scan?.runtimeProgress;
+  const now = useProgressClock();
+  const elapsed = scanElapsedMs(progress, now);
+  const queued = scan?.phase === "analysis_queued" || scan?.phase === "scan_queued";
+  const retrying = scan?.status === "retrying";
+  const age = (time: string | null | undefined) => time && Number.isFinite(Date.parse(time)) ? durationLabel(now - Date.parse(time)) : null;
+  const heartbeat = age(progress?.heartbeatAt), lastWork = age(progress?.lastWorkAt);
+  const heartbeatDelayed = !!progress?.heartbeatAt && now - Date.parse(progress.heartbeatAt) > 90_000;
+  const [copied, setCopied] = useState(false);
+  const message = !connected ? "Connection interrupted. Showing the last saved status; reconnecting automatically."
+    : queued ? "Accepted and waiting for an available worker."
+    : retrying ? "A retry is scheduled. Completed work is saved."
+    : !scan?.durable && (!scan || scan.phase === "created") ? "Confirming that background work has been accepted…"
+    : heartbeatDelayed ? "The worker heartbeat is delayed. Checking for recovery; saved progress is still available."
+    : "Updates appear as each check finishes.";
 
   return (
     <>
-      <div className={styles.stageBarTrack}>
-        <div className={styles.stageBarFill} style={{ width: `${pct}%` }} />
-      </div>
-      <div className={styles.progressList}>
+      <p className={styles.progressStatus} role="status" aria-live="polite">{message}</p>
+      <div className={styles.progressList} role="list" aria-label="Scan stages">
         {rows.map((row) => (
           <div
-            className={`${styles.progressItem} ${row.status === "complete" ? styles.done : ""} ${row.status === "active" ? styles.active : ""}`}
+            className={`${styles.progressItem} ${row.status === "complete" ? styles.done : ""} ${row.status === "active" && !queued && !retrying ? styles.active : ""}`}
             key={row.id}
+            role="listitem"
+            aria-label={`${row.label}: ${queued && row.status !== "complete" ? "queued" : retrying && row.status === "active" ? "retry scheduled" : row.status}`}
           >
-            <span>{row.status === "complete" ? "✓" : row.status === "active" ? "•" : ""}</span>
+            <span aria-hidden="true">{row.status === "complete" ? "✓" : row.status === "active" && !queued ? "•" : ""}</span>
             <div>
               <strong>{row.label}</strong>
-              <small>{row.detail}</small>
+              <small>{progressDetail(row.id, progress, row.detail)}</small>
             </div>
             {row.status === "active" && (
               <>
-                <span className={styles.stageWorking}>working…</span>
-                <i />
+                <span className={styles.stageWorking}>{queued ? "queued" : retrying ? "retry scheduled" : "in progress"}</span>
+                {!queued && !retrying && <i aria-hidden="true" />}
               </>
             )}
           </div>
         ))}
       </div>
+      {progress && progress.insights !== "unknown" && rows.some(row => row.id === "qualification") && (
+        <p className={styles.progressStatus}>Findings summary: {progress.insights === "fallback" ? "sourced fallback ready" : progress.insights === "active" ? "being prepared" : progress.insights}.</p>
+      )}
       <div className={styles.stageFooter}>
-        <span>
-          Step {Math.min(completed + 1, total)} of {total} &middot; {elapsed}s elapsed
-        </span>
+        {elapsed !== null && <span>Scan time: {durationLabel(elapsed)} · excludes time awaiting your review</span>}
+        {lastWork && <span>Last saved progress: {lastWork} ago</span>}
+        {heartbeat && <span>Worker last seen: {heartbeat} ago</span>}
       </div>
-      <p className={styles.stageCloseNote}>{closeTabNote}</p>
+      <p className={styles.stageCloseNote}>{scan?.durable
+        ? "Your scan is saved and runs on the server. Return in this browser; if you signed in, the same account can open it on another device."
+        : "Keep this tab open until background work is confirmed. This session has not confirmed durable acceptance."}</p>
+      {scan?.durable && <button className={styles.returnLink} type="button" onClick={async () => {
+        const link = new URL(window.location.pathname, window.location.origin); link.searchParams.set("scan_id", scan.id);
+        setCopied(await copyText(link.toString()));
+      }}>{copied ? "Return link copied" : "Copy private return link"}</button>}
     </>
   );
 }
@@ -217,12 +240,6 @@ function safeDomain(value: string) {
   } catch {
     return "your website";
   }
-}
-
-function isTransientPollFailure(error: unknown): boolean {
-  if (error instanceof TypeError) return true;
-  if (!(error instanceof Error)) return false;
-  return /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(error.message);
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -253,7 +270,7 @@ const MIN_CONTEXT_TEXT_LENGTH = 20;
 const landingStats = [
   { value: "1,412", label: "Scans run since launch" },
   { value: "62k", label: "Conversations read and filtered" },
-  { value: "2 min", label: "Average time to your first results" },
+  { value: "Live", label: "Saved progress as your scan runs" },
   { value: "94%", label: "Of what we read never reaches you" },
 ];
 
@@ -611,8 +628,8 @@ function Landing({
             ) : (
               <p className={styles.slFormNote} id="sl-scan-note">
                 {mode === "website"
-                  ? "No card required · Public same-domain pages only · Usually several minutes"
-                  : "No card required · No website needed · Usually several minutes"}
+                  ? "No card required · Public same-domain pages only · Saved scan progress"
+                  : "No card required · No website needed · Saved scan progress"}
               </p>
             )}
           </form>
@@ -1197,7 +1214,7 @@ function Landing({
       <section className={styles.slClosing}>
         <h2 className={styles.slClosingTitle}>Put in your website. See who&rsquo;s asking for it.</h2>
         <p className={styles.slClosingLead}>
-          The first scan takes about two minutes and costs nothing. No card, no account until you&rsquo;ve
+          Your first scan is free, with progress updates while it runs. No card, no account until you&rsquo;ve
           seen it.
         </p>
         <form className={styles.slClosingForm} onSubmit={submit} noValidate>
@@ -1242,6 +1259,8 @@ function Scanning({
   progress,
   stepIndex,
   stageIds,
+  scan,
+  connected,
 }: {
   url: string;
   inputMode: "website" | "context";
@@ -1249,10 +1268,14 @@ function Scanning({
   stepIndex: number;
   /** Which slice of the real pipeline this screen is honest about showing -- PRE_INPUT_STAGE_IDS or POST_INPUT_STAGE_IDS. */
   stageIds: string[];
+  scan?: ApiScanResponse["scan"];
+  connected: boolean;
 }) {
   const isContext = inputMode === "context";
   const domain = useMemo(() => safeDomain(url), [url]);
-  const rows = stageRowsFor(stageIds, progress);
+  const rows = stageRowsFor(stageIds, progress).map(row => isContext && row.id === "website"
+    ? { ...row, label: "Using your business description", detail: row.status === "complete" ? row.detail : "Using your description; no website crawl is needed." }
+    : row);
   const allDone = rows.length > 0 && rows.every((row) => row.status === "complete");
   const isPreInput = stageIds === PRE_INPUT_STAGE_IDS;
 
@@ -1264,20 +1287,17 @@ function Scanning({
           <div className={styles.orbit}><i /><i /><i /></div>
           <span>↗</span>
         </div>
-        <div className={styles.scanKicker}>{isContext ? "Analyzing your description" : `Analyzing ${domain}`}</div>
-        <h1>{isContext ? "Turning your description into a demand map" : "Turning your website into a demand map"}</h1>
+        <div className={styles.scanKicker}>{isPreInput ? (isContext ? "Analyzing your description" : `Analyzing ${domain}`) : "Your Market Scan"}</div>
+        <h1>{isPreInput ? "Understanding your business" : "Finding and checking relevant conversations"}</h1>
         <p>
           {isPreInput
-            ? "Usually done in under half a minute."
-            : "This is the longer wait -- usually a minute or two, since it's reading real Reddit conversations."}
+            ? "We’ll prepare the complete business profile for your review before searching Reddit."
+            : "Search and AI response times vary. We keep the full search and review depth, and show completed checks below."}
         </p>
         <StageProgress
           rows={rows}
-          closeTabNote={
-            isPreInput
-              ? "You can close this tab -- we'll keep going either way."
-              : "You can close this tab -- we keep going and hold the results for you."
-          }
+          scan={scan}
+          connected={connected}
         />
         {!isContext && (
           <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
@@ -1287,95 +1307,202 @@ function Scanning({
   );
 }
 
-/**
- * Waits for the background full business analysis (see scan-workflow.ts's
- * refineDiscoveryProfile) before showing the review screen, so the user
- * only ever sees the complete, multi-page profile -- never the thinner
- * fast-pass preview that made the earlier /analyze call return quickly.
- *
- * The competitors step the user just came from already gave that
- * background work a head start, so this is usually brief. Polling gives up
- * after ~90s and shows whatever is ready either way: the full analysis
- * still runs synchronously the moment the real scan starts regardless (see
- * scan-workflow.ts's canReusePersistedAnalysis check), so this screen only
- * ever affects how soon the user sees the better profile, never whether
- * discovery ends up using it.
- */
-function RefiningProfile({
-  scanId,
+function liveReplyLabel(state: "ready" | "pending" | "failed" | undefined): string {
+  if (state === "ready") return "Reply ready";
+  if (state === "failed") return "Reply needs another attempt";
+  return "Reply being prepared";
+}
+
+function LiveScanDashboard({
   url,
   inputMode,
-  setView,
+  scan,
+  progress,
+  connected,
+  partial,
+  replyEdits,
+  onReplyEdit,
+  onRefreshOrder,
 }: {
-  scanId: string;
   url: string;
   inputMode: "website" | "context";
-  setView: (view: View) => void;
+  scan?: ApiScanResponse["scan"];
+  progress: ApiScanResponse["scan"]["progress"];
+  connected: boolean;
+  partial: LivePartialState;
+  replyEdits: Record<string, string>;
+  onReplyEdit: (replyId: string, value: string) => void;
+  onRefreshOrder: () => void;
 }) {
-  const isContext = inputMode === "context";
-  const domain = useMemo(() => safeDomain(url), [url]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let attempts = 0;
-    const MAX_ATTEMPTS = 56; // ~2.5s * 56 ~= 140s -- headroom for a 4-page
-    // crawl plus a real analysisModel call under production latency, now that
-    // refineDiscoveryProfile also retries once on a transient failure.
-
-    const check = async () => {
-      attempts += 1;
-      try {
-        const response = await fetch(
-          `/api/scans/${encodeURIComponent(scanId)}/discovery-terms`,
-          { cache: "no-store" },
-        );
-        if (response.ok && !cancelled) {
-          const payload = (await response.json()) as { profileStage?: "fast" | "full" | null };
-          if (!cancelled && payload.profileStage === "full") {
-            clearInterval(timer);
-            setView("profile");
-            return;
-          }
-        }
-      } catch {
-        // Best-effort; a persistent failure just falls through to the
-        // MAX_ATTEMPTS timeout below.
-      }
-      if (attempts >= MAX_ATTEMPTS && !cancelled) {
-        clearInterval(timer);
-        setView("profile");
-      }
-    };
-
-    const timer = setInterval(check, 2_500);
-    void check();
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [scanId, setView]);
-
-  const elapsed = useElapsedSeconds(true);
+  const rows = stageRowsFor(POST_INPUT_STAGE_IDS, progress);
+  const replyByOpportunity = new Map(partial.replies.map(reply => [reply.opportunityId, reply]));
+  const replyStateByOpportunity = new Map(partial.replyStates.map(reply => [reply.opportunityId, reply.state]));
+  const conversationCount = partial.opportunities.length + partial.relevantConversations.length;
+  const reviewed = scan?.runtimeProgress?.triage.succeeded ?? partial.foundSoFar.reviewedCandidates;
+  const stopped = scan?.status === "failed";
+  const retrying = scan?.status === "retrying";
+  const coverageIssue = (scan?.runtimeProgress?.queries.failed ?? 0) > 0
+    || (scan?.runtimeProgress?.triage.unresolved ?? 0) > 0;
+  const profile = scan?.approvedProfile;
 
   return (
-    <main className={styles.scanScreen}>
-      <OnboardingHeader activeIndex={3} />
-      <section className={styles.scanPanel}>
-        <div className={styles.scanVisual} aria-hidden="true">
-          <div className={styles.orbit}><i /><i /><i /></div>
-          <span>↗</span>
-        </div>
-        <div className={styles.scanKicker}>{isContext ? "Analyzing your description" : `Analyzing ${domain}`}</div>
-        <h1>Proposing search terms</h1>
-        <p>{isContext ? "Turning what we found into terms we'll search Reddit with." : "Reading a few more pages and turning what we found into terms we'll search Reddit with."}</p>
-        <div className={styles.stageFooter}>
-          <span>{elapsed}s elapsed</span>
-        </div>
-        <p className={styles.stageCloseNote}>You can close this tab &mdash; we&apos;ll keep going either way.</p>
-        {!isContext && (
-          <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
-        )}
-      </section>
+    <main className={styles.liveScanPage}>
+      <OnboardingHeader activeIndex={4} statusLabel={stopped ? "Partial scan saved" : "Market Scan running"} />
+      <div className={styles.liveScanLayout}>
+        <aside className={styles.liveScanSidebar}>
+          <div className={styles.scanKicker}>{inputMode === "context" ? "Your market" : safeDomain(url)}</div>
+          <h1>{stopped ? "Saved results from this scan" : "Results are arriving now"}</h1>
+          <p>{stopped
+            ? "The scan stopped before every check finished. Everything below passed its stated review stage and remains available."
+            : "Keep reading while the remaining conversations are checked. New cards append without moving what you are viewing."}</p>
+          {profile && (
+            <section className={styles.liveProfile} aria-label="Approved business profile">
+              <span>Searching for</span>
+              <strong>{profile.name}</strong>
+              <p>{profile.summary}</p>
+              {profile.targetAudience.length > 0 && <small>{profile.targetAudience.slice(0, 3).join(" · ")}</small>}
+            </section>
+          )}
+          <StageProgress rows={rows} scan={scan} connected={connected} />
+        </aside>
+
+        <section className={styles.liveResults} aria-label="Live scan results">
+          <header className={styles.liveResultsHeader}>
+            <div>
+              <div className={styles.scanKicker}>Live, saved results</div>
+              <h2>{stopped ? "Available findings" : "What we have found so far"}</h2>
+              <p>These are interim counts, not the final scan totals.</p>
+            </div>
+            {partial.newResultsSinceOrder > 0 && (
+              <button type="button" className={styles.liveRefreshOrder} onClick={onRefreshOrder}>
+                Refresh order · {partial.newResultsSinceOrder} new
+              </button>
+            )}
+          </header>
+
+          <p className={styles.liveAnnouncement} role="status" aria-live="polite">
+            {partial.newResultsSinceOrder > 0
+              ? `${partial.newResultsSinceOrder} new result${partial.newResultsSinceOrder === 1 ? "" : "s"} ${partial.newResultsSinceOrder === 1 ? "was" : "were"} added below.`
+              : stopped ? "Showing the latest safely saved findings." : "Waiting for the next saved result…"}
+          </p>
+
+          {(!connected || retrying || coverageIssue || stopped) && (
+            <div className={styles.liveNotice} role="status">
+              {!connected
+                ? "Connection interrupted. The saved results below remain available while we reconnect."
+                : retrying
+                  ? "A retry is scheduled. Completed searches, reviews and replies have been saved."
+                  : stopped
+                    ? "Coverage is incomplete, so these findings are not presented as a definitive final report."
+                    : "Some provider work is being retried. Ready results remain visible while coverage recovers."}
+            </div>
+          )}
+
+          <div className={styles.liveMetrics} aria-label="Results found so far">
+            <div><strong>{partial.foundSoFar.qualifiedPeople}</strong><span>potential customers found so far</span></div>
+            <div><strong>{conversationCount}</strong><span>relevant conversations found so far</span></div>
+            <div><strong>{reviewed ?? "—"}</strong><span>credible conversations checked</span></div>
+            <div><strong>{partial.foundSoFar.repliesReady}</strong><span>replies ready so far</span></div>
+          </div>
+
+          {partial.previews.length > 0 && (
+            <section className={styles.liveSection}>
+              <div className={styles.liveSectionHeading}>
+                <div><span>Screened, not yet qualified</span><h3>Conversations being checked</h3></div>
+                <b>{partial.previews.length}</b>
+              </div>
+              <div className={styles.liveCardGrid}>
+                {partial.previews.map(preview => (
+                  <article className={`${styles.liveCard} ${styles.livePreviewCard}`} key={preview.id}>
+                    <div className={styles.liveCardMeta}><span>r/{preview.subreddit.replace(/^r\//, "")}</span><em>Qualification pending</em></div>
+                    <h4>{preview.title}</h4>
+                    <p>{preview.problem || preview.excerpt}</p>
+                    <small>{preview.demandSignal.replaceAll("_", " ")} · {preview.productFit} product fit</small>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {partial.opportunities.length > 0 && (
+            <section className={styles.liveSection}>
+              <div className={styles.liveSectionHeading}>
+                <div><span>Deep review passed</span><h3>Potential customers</h3></div>
+                <b>{partial.opportunities.length}</b>
+              </div>
+              <div className={styles.liveCardGrid}>
+                {partial.opportunities.map(opportunity => {
+                  const reply = replyByOpportunity.get(opportunity.id);
+                  const replyState = replyStateByOpportunity.get(opportunity.id) ?? (reply ? "ready" : "pending");
+                  return (
+                    <article className={styles.liveCard} key={opportunity.id}>
+                      <div className={styles.liveCardMeta}><span>r/{opportunity.subreddit.replace(/^r\//, "")}</span><em>Potential customer · {opportunity.qualificationScore}%</em></div>
+                      <h4>{opportunity.title}</h4>
+                      <p>{opportunity.whyItMatters}</p>
+                      <small>{opportunity.author} · {opportunity.potentialCustomerIntent?.replaceAll("_", " ") ?? "qualified demand"}</small>
+                      {opportunity.permalink && <a href={opportunity.permalink} target="_blank" rel="noreferrer">Open source conversation ↗</a>}
+                      <div className={`${styles.liveReply} ${replyState === "failed" ? styles.liveReplyFailed : ""}`}>
+                        <strong>{liveReplyLabel(replyState)}</strong>
+                        {reply && replyState === "ready" ? (
+                          <textarea aria-label={`Reply draft for ${opportunity.title}`} value={replyEdits[reply.id] ?? reply.content}
+                            onChange={event => onReplyEdit(reply.id, event.target.value)} />
+                        ) : <p>{replyState === "failed" ? "The saved conversation is still usable; reply generation can retry safely."
+                          : replyState === "ready" ? "The reply is ready but its text is not included with the current access level."
+                            : "The verified conversation is ready while its grounded draft is generated."}</p>}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {partial.relevantConversations.length > 0 && (
+            <section className={styles.liveSection}>
+              <div className={styles.liveSectionHeading}>
+                <div><span>Useful evidence, not a lead</span><h3>Relevant conversations</h3></div>
+                <b>{partial.relevantConversations.length}</b>
+              </div>
+              <div className={styles.liveCardGrid}>
+                {partial.relevantConversations.map(conversation => {
+                  const reply = replyByOpportunity.get(conversation.id);
+                  const replyState = conversation.replyId
+                    ? replyStateByOpportunity.get(conversation.id) ?? (reply ? "ready" : "pending")
+                    : undefined;
+                  return (
+                    <article className={`${styles.liveCard} ${styles.liveRelevantCard}`} key={conversation.id}>
+                      <div className={styles.liveCardMeta}><span>r/{conversation.subreddit.replace(/^r\//, "")}</span><em>Relevant conversation</em></div>
+                      <h4>{conversation.title}</h4>
+                      <p>{conversation.summary}</p>
+                      <small>{conversation.author ?? "Reddit participant"} · not counted as a potential customer</small>
+                      {conversation.permalink && <a href={conversation.permalink} target="_blank" rel="noreferrer">Open source conversation ↗</a>}
+                      {conversation.replyId && (
+                        <div className={`${styles.liveReply} ${replyState === "failed" ? styles.liveReplyFailed : ""}`}>
+                          <strong>{liveReplyLabel(replyState)}</strong>
+                          {reply && replyState === "ready" ? (
+                            <textarea aria-label={`Reply draft for ${conversation.title}`} value={replyEdits[reply.id] ?? reply.content}
+                              onChange={event => onReplyEdit(reply.id, event.target.value)} />
+                          ) : <p>{replyState === "failed" ? "The conversation remains available without a draft."
+                            : replyState === "ready" ? "The reply is ready but its text is not included with the current access level."
+                              : "A grounded reply is being prepared independently of lead status."}</p>}
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {partial.previews.length === 0 && conversationCount === 0 && (
+            <div className={styles.liveEmpty}>
+              <div className={styles.orbit} aria-hidden="true"><i /><i /><i /></div>
+              <h3>Reading the first credible conversations</h3>
+              <p>Candidate previews appear only after relevance screening. Potential customers appear only after full-context qualification.</p>
+            </div>
+          )}
+        </section>
+      </div>
     </main>
   );
 }
@@ -1590,7 +1717,16 @@ export function ThreadlineExperience() {
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("free");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [scanConnected, setScanConnected] = useState(true);
+  const [livePartial, setLivePartial] = useState<LivePartialState | null>(null);
+  const [liveReplyEdits, setLiveReplyEdits] = useState<Record<string, string>>({});
+  const navigationVersionRef = useRef(0);
   const resumedScanRef = useRef<ApiScanResponse | null>(null);
+  const partialScanIdRef = useRef("");
+  const partialVersionRef = useRef(0);
+  const partialHasVisibleResultsRef = useRef(false);
+  // Reuse the same creation promise across effect restarts; never create on polling.
+  const analysisScanRef = useRef<Promise<ApiScanResponse> | null>(null);
   const [redditConnection, setRedditConnection] =
     useState<RedditConnectionStatus>(disconnectedReddit);
   const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
@@ -1633,10 +1769,10 @@ export function ThreadlineExperience() {
       // clean up here even if the request failed.
     }
   }
-  const dashboardData = useMemo(
-    () => (scanResponse ? scanResponseToDashboard(scanResponse) : null),
-    [scanResponse],
-  );
+  const dashboardData = useMemo(() => {
+    const complete = scanResponse ? scanResponseToDashboard(scanResponse) : null;
+    return preserveLiveReplyEdits(complete, liveReplyEdits);
+  }, [scanResponse, liveReplyEdits]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1672,21 +1808,31 @@ export function ThreadlineExperience() {
     if (redditState) {
       const cleanUrl = new URL(window.location.href);
       cleanUrl.searchParams.delete("reddit");
-      cleanUrl.searchParams.delete("scan_id");
       window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}`);
     }
 
     if (!scanId || (checkoutState !== "success" && checkoutState !== "canceled")) {
-      async function restoreLatestWorkspace() {
-        try {
-          const [response, userAccount] = await Promise.all([
-            fetch("/api/scans/latest", { cache: "no-store" }),
-            fetchAccountProfile(),
-          ]);
-          if (!cancelled) setAccount(userAccount);
-          if (response.status === 401 || response.status === 404) return;
-          const latest = (await response.json()) as ApiScanResponse;
-          if (!response.ok || cancelled || !latest.scan?.id) return;
+      const navigationVersion = navigationVersionRef.current;
+      const accountRequest = fetchAccountProfile();
+      void accountRequest.then(userAccount => {
+        if (!cancelled && navigationVersion === navigationVersionRef.current) setAccount(userAccount);
+      });
+      if (scanId) queueMicrotask(() => { if (!cancelled && navigationVersion === navigationVersionRef.current) setView("restoring"); });
+      const restoration = startScanPolling({
+        onConnectionChange: setScanConnected,
+        onError: error => {
+          if (cancelled || navigationVersion !== navigationVersionRef.current || !scanId) return;
+          setErrorMessage(error instanceof Error ? error.message : "The saved scan could not be opened.");
+          setView("error");
+        },
+        run: async signal => {
+          if (navigationVersion !== navigationVersionRef.current) return true;
+          const response = await fetch(scanId ? `/api/scans/${encodeURIComponent(scanId)}` : "/api/scans/latest", { cache: "no-store", signal });
+          if (!scanId && (response.status === 401 || response.status === 404)) return true;
+          const latest = await readScanResponse<ApiScanResponse>(response);
+          signal.throwIfAborted();
+          if (cancelled || navigationVersion !== navigationVersionRef.current) return true;
+          if (!latest.scan?.id) throw new TypeError("The saved status is temporarily unavailable.");
           setUrl(latest.scan.websiteUrl);
           setInputMode(latest.scan.inputMode ?? "website");
           setContextText(latest.scan.contextText ?? "");
@@ -1694,9 +1840,11 @@ export function ThreadlineExperience() {
           setScanResponse(latest);
           setScanProgress(latest.scan.progress);
           setAccessLevel(effectiveAccessLevel(latest.access));
+          setReviewScanId(latest.scan.id);
+          keepStableScanUrl(latest.scan.id);
           if (latest.scan.status === "failed") {
-            setErrorMessage(latest.scan.error ?? "The latest Market Scan failed.");
-            setView("error");
+            setErrorMessage(latest.scan.error ?? "The latest Market Scan stopped before every check finished.");
+            setView((latest.scan.runtimeProgress?.partialResultsVersion ?? 0) > 0 ? "scanning" : "error");
           } else if (latest.scan.status === "complete" && latest.report) {
             // A signed-in visitor (returning, or just back from the Google
             // redirect) skips straight past the results/signup gate -- it
@@ -1704,18 +1852,25 @@ export function ThreadlineExperience() {
             // the first place. justSignedIn distinguishes "just completed
             // that round trip, show a confirmation" from "ordinary reload
             // of an already-claimed workspace, go straight to the report".
+            const userAccount = await accountRequest;
+            signal.throwIfAborted();
+            if (cancelled || navigationVersion !== navigationVersionRef.current) return true;
             setView(userAccount ? (justSignedIn ? "done" : "report") : "results");
+          } else if (latest.scan.phase === "awaiting_review") {
+            if (!latest.scan.analysisReady) throw new Error("This older scan has an incomplete profile. Start a new scan to review the full analysis.");
+            setView("competitors");
+          } else if (["created", "analysis_queued", "analyzing"].includes(latest.scan.phase ?? "")) {
+            analysisScanRef.current = Promise.resolve(latest);
+            setView("analyzing");
           } else {
             setView("scanning");
           }
-        } catch {
-          // The acquisition page remains usable if a prior private workspace
-          // cannot be restored; no claims or access are inferred client-side.
-        }
-      }
-      void restoreLatestWorkspace();
+          return true;
+        },
+      });
       return () => {
         cancelled = true;
+        restoration.stop();
       };
     }
     const restoredScanId = scanId;
@@ -1748,6 +1903,12 @@ export function ThreadlineExperience() {
           setAccessLevel(effectiveAccessLevel(latest.access));
 
           if (latest.scan.status === "failed") {
+            setErrorMessage(latest.scan.error ?? "The scan stopped before completion.");
+            if ((latest.scan.runtimeProgress?.partialResultsVersion ?? 0) > 0) {
+              resumedScanRef.current = latest;
+              setView("scanning");
+              return;
+            }
             throw new Error(latest.scan.error ?? "The scan stopped before completion.");
           }
           if (latest.scan.status === "complete" && latest.report) {
@@ -1756,7 +1917,7 @@ export function ThreadlineExperience() {
 
           if (checkoutState === "canceled") {
             setStatusMessage("Checkout canceled. Your free Market Scan is still available.");
-            window.history.replaceState({}, "", window.location.pathname);
+            keepStableScanUrl(restoredScanId, ["checkout"]);
             return;
           }
           if (latest.access?.unlocked && latest.access.verifiedByWebhook) {
@@ -1765,7 +1926,7 @@ export function ThreadlineExperience() {
                 ? "Core is active from a verified Stripe webhook."
                 : "Your 7-day pass is active from a verified Stripe webhook.",
             );
-            window.history.replaceState({}, "", window.location.pathname);
+            keepStableScanUrl(restoredScanId, ["checkout"]);
             return;
           }
 
@@ -1893,6 +2054,9 @@ export function ThreadlineExperience() {
   );
 
   function startScan(submission: LandingSubmission) {
+    navigationVersionRef.current += 1;
+    clearStableScanUrl();
+    setScanConnected(true);
     if (submission.mode === "context") {
       setInputMode("context");
       setContextText(submission.contextText);
@@ -1907,6 +2071,12 @@ export function ThreadlineExperience() {
     setAiVisibility(null);
     setVisibilityScans(null);
     resumedScanRef.current = null;
+    analysisScanRef.current = null;
+    partialScanIdRef.current = "";
+    partialVersionRef.current = 0;
+    partialHasVisibleResultsRef.current = false;
+    setLivePartial(null);
+    setLiveReplyEdits({});
     setScanResponse(null);
     setScanProgress([]);
     setErrorMessage("");
@@ -1914,187 +2084,190 @@ export function ThreadlineExperience() {
     setView("analyzing");
   }
 
-  // Phase one: create the scan without starting it, then analyze the website
-  // (or the user's own description, in context mode) only. Reddit retrieval
-  // waits until the user has reviewed the profile.
+  // Analysis acceptance and status are separate from the reviewed Reddit run.
   useEffect(() => {
     if (view !== "analyzing") return;
     let cancelled = false;
+    let polling: ReturnType<typeof startScanPolling> | undefined;
+    const fail = (error: unknown) => {
+      if (cancelled) return;
+      setErrorMessage(error instanceof Error ? error.message : "Website analysis could not be opened.");
+      setView("error");
+    };
     (async () => {
       try {
-        const createdResponse = await fetch("/api/scans", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(scanCreateBody({ reviewFirst: true })),
-        });
-        const created = (await createdResponse.json()) as ApiScanResponse;
-        if (!createdResponse.ok || !created.scan?.id) {
-          throw new Error(created.error?.message ?? "We could not safely read that website.");
-        }
+        analysisScanRef.current ??= (async () => {
+          const response = await fetch("/api/scans", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify(scanCreateBody({ reviewFirst: true })),
+          });
+          const payload = await readScanResponse<ApiScanResponse>(response);
+          if (!payload.scan?.id) throw new Error("We could not create the scan.");
+          return payload;
+        })();
+        const created = await analysisScanRef.current;
         if (cancelled) return;
         setScanResponse(created);
         setScanProgress(created.scan.progress);
         setAccessLevel(effectiveAccessLevel(created.access));
-
-        const analyzedResponse = await fetch(
-          `/api/scans/${encodeURIComponent(created.scan.id)}/analyze`,
-          { method: "POST" },
-        );
-        const analyzed = (await analyzedResponse.json()) as ApiScanResponse;
-        if (!analyzedResponse.ok) {
-          throw new Error(analyzed.error?.message ?? "We could not analyze that website.");
-        }
-        if (cancelled) return;
-        setScanProgress(analyzed.scan.progress);
         setReviewScanId(created.scan.id);
-        setView("competitors");
-      } catch (analysisError) {
-        if (cancelled) return;
-        setErrorMessage(
-          analysisError instanceof Error ? analysisError.message : "Website analysis failed.",
-        );
-        setView("error");
-      }
+        keepStableScanUrl(created.scan.id);
+        let requestAnalysis = !created.scan.phase || created.scan.phase === "created";
+        let acceptanceAttempted = false;
+        polling = startScanPolling({
+          onConnectionChange: setScanConnected,
+          onError: fail,
+          run: async signal => {
+            let latest: ApiScanResponse;
+            if (requestAnalysis) {
+              requestAnalysis = false;
+              acceptanceAttempted = true;
+              latest = await readScanResponse<ApiScanResponse>(await fetch(
+                `/api/scans/${encodeURIComponent(created.scan.id)}/analyze`, { method: "POST", signal },
+              ));
+            } else {
+              latest = await readScanResponse<ApiScanResponse>(await fetch(
+                `/api/scans/${encodeURIComponent(created.scan.id)}?statusOnly=1`, { cache: "no-store", signal },
+              ));
+            }
+            signal.throwIfAborted();
+            const merged = { ...created, scan: { ...created.scan, ...latest.scan }, access: latest.access };
+            analysisScanRef.current = Promise.resolve(merged);
+            setScanProgress(latest.scan.progress);
+            setScanResponse(current => current ? { ...current, scan: { ...current.scan, ...latest.scan }, access: latest.access } : merged);
+            if (latest.scan.status === "failed") throw new Error(latest.scan.error ?? "Website analysis failed.");
+            if (latest.scan.phase === "created" && acceptanceAttempted) {
+              throw new Error("Your scan was saved, but background work was not accepted. Reload this saved scan to retry acceptance.");
+            }
+            if (latest.scan.phase === "awaiting_review") {
+              if (!latest.scan.analysisReady) throw new Error("This older scan has an incomplete profile. Start a new scan to review the full analysis.");
+              setReviewScanId(created.scan.id);
+              setView("competitors");
+              return true;
+            }
+            return false;
+          },
+        });
+      } catch (error) { fail(error); }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; polling?.stop(); };
   }, [view, url, contextText, inputMode, scanCreateBody]);
 
-  // Phase two: the user approved the profile, so start Reddit retrieval.
-  async function beginRedditScan() {
-    try {
-      const response = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}/run`, {
-        method: "POST",
-      });
-      if (!response.ok && response.status !== 202) {
-        const failure = (await response.json()) as ApiScanResponse;
-        throw new Error(failure.error?.message ?? "The scan could not be started.");
-      }
-      setView("scanning");
-    } catch (startError) {
-      setErrorMessage(startError instanceof Error ? startError.message : "The scan could not be started.");
-      setView("error");
-    }
+  // Only the approval button can submit a Reddit run. Status/focus cannot.
+  async function beginRedditScan(reviewVersion: string) {
+    const response = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}/run`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reviewVersion }),
+    });
+    const accepted = await readScanResponse<ApiScanResponse>(response);
+    resumedScanRef.current = accepted;
+    setScanResponse(accepted);
+    setScanProgress(accepted.scan.progress);
+    setScanConnected(true);
+    setView("scanning");
   }
 
   useEffect(() => {
     if (view !== "scanning") return;
     let cancelled = false;
-    let pollTimer = 0;
-
+    let polling: ReturnType<typeof startScanPolling> | undefined;
+    const fail = (error: unknown) => {
+      if (cancelled) return;
+      setErrorMessage(error instanceof Error ? error.message : "The saved scan could not be opened.");
+      setView("error");
+    };
+    async function loadPartialIfChanged(scanId: string, advertisedVersion: number, signal: AbortSignal) {
+      if (advertisedVersion <= partialVersionRef.current) return partialHasVisibleResultsRef.current;
+      const payload = await readScanResponse<ApiPartialResponse>(await fetch(
+        `/api/scans/${encodeURIComponent(scanId)}/partial?afterVersion=${partialVersionRef.current}`,
+        { cache: "no-store", signal },
+      ));
+      signal.throwIfAborted();
+      if (payload.changed && payload.partial && payload.version > partialVersionRef.current) {
+        partialVersionRef.current = payload.version;
+        const hasVisibleResults = payload.partial.previews.length > 0
+          || payload.partial.opportunities.length > 0
+          || payload.partial.relevantConversations.length > 0
+          || payload.partial.replies.length > 0;
+        partialHasVisibleResultsRef.current = hasVisibleResults;
+        setLivePartial(current => mergeLivePartialState(current, payload.partial!));
+        setAccessLevel(effectiveAccessLevel(payload.access));
+      } else {
+        partialVersionRef.current = Math.max(partialVersionRef.current, payload.version);
+      }
+      return partialHasVisibleResultsRef.current;
+    }
     async function begin() {
       try {
         let created = resumedScanRef.current;
-        resumedScanRef.current = null;
         if (!created && reviewScanId) {
-          // Already created and started by the review step; just poll it.
-          const existing = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}`, {
-            cache: "no-store",
-          });
-          const payload = (await existing.json()) as ApiScanResponse;
-          if (existing.ok && payload.scan?.id) created = payload;
+          created = await readScanResponse<ApiScanResponse>(await fetch(
+            `/api/scans/${encodeURIComponent(reviewScanId)}`, { cache: "no-store" },
+          ));
         }
         const matchesCurrentInput = created
           ? inputMode === "context"
             ? created.scan.inputMode === "context" && created.scan.contextText === contextText
             : normalizedWebsiteForComparison(created.scan.websiteUrl) === normalizedWebsiteForComparison(url)
           : false;
-        if (!created || !matchesCurrentInput || created.scan.status === "failed") {
-          const createdResponse = await fetch("/api/scans", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(scanCreateBody({ defer: true })),
-          });
-          created = (await createdResponse.json()) as ApiScanResponse;
-          if (!createdResponse.ok || !created.scan?.id) {
-            throw new Error(created.error?.message ?? "We could not safely read that website.");
-          }
-        }
+        if (!created || !matchesCurrentInput) throw new Error("The saved scan could not be restored. Return to setup to start a new scan.");
         if (cancelled) return;
-        setScanResponse(created);
-        setScanProgress(created.scan.progress);
-        setAccessLevel(effectiveAccessLevel(created.access));
-        if (created.scan.status === "complete" && created.report) {
+        const accepted = created;
+        if (partialScanIdRef.current !== accepted.scan.id) {
+          partialScanIdRef.current = accepted.scan.id;
+          partialVersionRef.current = 0;
+          partialHasVisibleResultsRef.current = false;
+          setLivePartial(null);
+          setLiveReplyEdits({});
+        }
+        setScanResponse(accepted);
+        setScanProgress(accepted.scan.progress);
+        setAccessLevel(effectiveAccessLevel(accepted.access));
+        if (accepted.scan.status === "complete" && accepted.report) {
           setView(accountRef.current ? "report" : "results");
           return;
         }
-
-        let transientPollFailures = 0;
-        while (!cancelled) {
-          try {
-            const response = await fetch(
-              `/api/scans/${created.scan.id}?statusOnly=1`,
-              { cache: "no-store" },
-            );
-            if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
-              throw new TypeError(`Transient scan polling response (${response.status}).`);
-            }
-            const latest = (await response.json()) as ApiScanResponse;
-            if (!response.ok) {
-              throw new Error(latest.error?.message ?? "The scan could not be updated.");
-            }
+        polling = startScanPolling({
+          onConnectionChange: setScanConnected,
+          onError: fail,
+          run: async signal => {
+            const latest = await readScanResponse<ApiScanResponse>(await fetch(
+              `/api/scans/${accepted.scan.id}?statusOnly=1`, { cache: "no-store", signal },
+            ));
+            signal.throwIfAborted();
             setScanProgress(latest.scan.progress);
-
+            setScanResponse(current => current ? { ...current, scan: { ...current.scan, ...latest.scan }, access: latest.access } : latest);
+            const hasPartial = await loadPartialIfChanged(
+              accepted.scan.id,
+              latest.scan.runtimeProgress?.partialResultsVersion ?? 0,
+              signal,
+            );
+            if (latest.scan.status === "failed") {
+              if (hasPartial) {
+                setErrorMessage(latest.scan.error ?? "The scan stopped before completion.");
+                return true;
+              }
+              throw new Error(latest.scan.error ?? "The scan stopped before completion.");
+            }
             if (latest.scan.status === "complete") {
-              const reportResponse = await fetch(`/api/scans/${created.scan.id}`, { cache: "no-store" });
-              if (
-                reportResponse.status === 408 ||
-                reportResponse.status === 425 ||
-                reportResponse.status === 429 ||
-                reportResponse.status >= 500
-              ) {
-                throw new TypeError(`Transient scan report response (${reportResponse.status}).`);
-              }
-              const completed = (await reportResponse.json()) as ApiScanResponse;
-              if (!reportResponse.ok || !completed.report) {
-                throw new Error(completed.error?.message ?? "The completed scan report could not be loaded.");
-              }
+              const completed = await readScanResponse<ApiScanResponse>(await fetch(
+                `/api/scans/${accepted.scan.id}`, { cache: "no-store", signal },
+              ));
+              signal.throwIfAborted();
+              if (!completed.report) throw new TypeError("The completed report is not available yet; refreshing.");
               setScanResponse(completed);
               setScanProgress(completed.scan.progress);
               setAccessLevel(effectiveAccessLevel(completed.access));
               setView(accountRef.current ? "report" : "results");
-              return;
+              return true;
             }
-            if (latest.scan.status === "failed") {
-              throw new Error(latest.scan.error ?? "The scan stopped before completion.");
-            }
-            // "retrying" is not an error: a background job attempt failed but
-            // another is already scheduled. Keep polling -- the active
-            // stage's own `detail` text (already updated server-side) shows
-            // the retry message, so no separate error state is needed here.
-            transientPollFailures = 0;
-          } catch (pollError) {
-            if (!isTransientPollFailure(pollError)) throw pollError;
-            transientPollFailures += 1;
-            const retryDelay = Math.min(
-              SCAN_POLL_BACKOFF_MAX_MS,
-              SCAN_POLL_BACKOFF_BASE_MS * 2 ** Math.min(transientPollFailures - 1, 3),
-            );
-            await new Promise<void>((resolve) => {
-              pollTimer = window.setTimeout(resolve, retryDelay);
-            });
-            continue;
-          }
-
-          await new Promise<void>((resolve) => {
-            pollTimer = window.setTimeout(resolve, SCAN_POLL_INTERVAL_MS);
-          });
-        }
-      } catch (error) {
-        if (cancelled) return;
-        window.clearTimeout(pollTimer);
-        setErrorMessage(error instanceof Error ? error.message : "The scan stopped before completion.");
-        setView("error");
-      }
+            return false;
+          },
+        });
+      } catch (error) { fail(error); }
     }
-
     void begin();
-    return () => {
-      cancelled = true;
-      window.clearTimeout(pollTimer);
-    };
-  }, [view, url, contextText, inputMode, reviewScanId, scanCreateBody, normalizedWebsiteForComparison]);
+    return () => { cancelled = true; polling?.stop(); };
+  }, [view, url, contextText, inputMode, reviewScanId, normalizedWebsiteForComparison]);
 
   async function refreshScan(scanId: string) {
     const response = await fetch(`/api/scans/${scanId}`, { cache: "no-store" });
@@ -2102,6 +2275,31 @@ export function ThreadlineExperience() {
     if (!response.ok) throw new Error(latest.error?.message ?? "Could not refresh access.");
     setScanResponse(latest);
     setAccessLevel(effectiveAccessLevel(latest.access));
+    keepStableScanUrl(latest.scan.id);
+  }
+
+  async function acknowledgeCompletionNotice() {
+    const scan = scanResponse?.scan;
+    const notice = scan?.completionNotice;
+    if (!scan || !notice || notice.readAt) return;
+    try {
+      const response = await fetch(`/api/scans/${encodeURIComponent(scan.id)}/completion-notice`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: notice.version }),
+      });
+      const payload = (await response.json()) as { notice?: typeof notice; error?: { message?: string } };
+      if (!response.ok || !payload.notice) throw new Error(payload.error?.message ?? "The completion notice could not be dismissed.");
+      setScanResponse(current => current ? { ...current, scan: { ...current.scan, completionNotice: payload.notice } } : current);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "The completion notice could not be dismissed.");
+    }
+  }
+
+  function returnToSetup() {
+    navigationVersionRef.current += 1;
+    clearStableScanUrl();
+    setView("landing");
   }
 
   /**
@@ -2472,6 +2670,8 @@ export function ThreadlineExperience() {
         progress={scanProgress}
         stepIndex={1}
         stageIds={PRE_INPUT_STAGE_IDS}
+        scan={scanResponse?.scan}
+        connected={scanConnected}
       />
     );
   }
@@ -2480,13 +2680,10 @@ export function ThreadlineExperience() {
       <CompetitorsSetup
         scanId={reviewScanId}
         websiteUrl={url}
-        onContinue={() => setView("refining")}
-        onBack={() => setView("landing")}
+        onContinue={() => setView("profile")}
+        onBack={returnToSetup}
       />
     );
-  }
-  if (view === "refining") {
-    return <RefiningProfile scanId={reviewScanId} url={url} inputMode={inputMode} setView={setView} />;
   }
   if (view === "profile") {
     return (
@@ -2494,18 +2691,32 @@ export function ThreadlineExperience() {
         scanId={reviewScanId}
         websiteUrl={url}
         onStartScan={beginRedditScan}
-        onBack={() => setView("landing")}
+        onBack={returnToSetup}
       />
     );
   }
-  if (view === "scanning" || view === "restoring") {
+  if (view === "restoring") {
+    return <main className={styles.scanScreen}>
+      <OnboardingHeader activeIndex={0} statusLabel="Opening saved scan" />
+      <section className={styles.scanPanel}>
+        <h1>Opening your saved scan</h1>
+        <p role="status">{!scanConnected ? "Connection interrupted. Reconnecting to your saved scan automatically…" : statusMessage || "Checking its latest saved state. This does not start a new scan."}</p>
+        <button className={styles.returnLink} type="button" onClick={returnToSetup}>Back to setup</button>
+      </section>
+    </main>;
+  }
+  if (view === "scanning") {
     return (
-      <Scanning
+      <LiveScanDashboard
         url={url}
         inputMode={inputMode}
         progress={scanProgress}
-        stepIndex={4}
-        stageIds={POST_INPUT_STAGE_IDS}
+        scan={scanResponse?.scan}
+        connected={scanConnected}
+        partial={livePartial ?? emptyLivePartialState()}
+        replyEdits={liveReplyEdits}
+        onReplyEdit={(replyId, value) => setLiveReplyEdits(current => ({ ...current, [replyId]: value }))}
+        onRefreshOrder={() => setLivePartial(current => current ? refreshLiveResultOrder(current) : current)}
       />
     );
   }
@@ -2545,13 +2756,14 @@ export function ThreadlineExperience() {
   if (view === "error") {
     return (
       <main className={styles.scanScreen}>
-        <OnboardingHeader activeIndex={0} statusLabel="Market Scan paused" />
+        <OnboardingHeader activeIndex={0} statusLabel={scanResponse?.scan.status === "failed" ? "Market Scan stopped" : "Scan needs attention"} />
         <section className={`${styles.scanPanel} ${styles.errorPanel}`}>
           <div className={styles.errorMark}>!</div>
-          <div className={styles.scanKicker}>Safe analysis stopped</div>
-          <h1>The scan stopped before every check finished</h1>
+          <div className={styles.scanKicker}>Saved scan</div>
+          <h1>{scanResponse?.scan.status === "failed" ? "The scan stopped before every check finished" : "We couldn’t open the scan right now"}</h1>
           <p>{errorMessage}</p>
-          <button className={styles.tryAgain} type="button" onClick={() => setView("landing")}>Run another scan</button>
+          <button className={styles.tryAgain} type="button" onClick={returnToSetup}>Run another scan</button>
+          {scanResponse?.scan.id && <button className={styles.returnLink} type="button" onClick={() => window.location.reload()}>Reopen this saved scan</button>}
           <div className={styles.domainSafety}>Completed stages remain recorded. Unverified findings are never promoted as definitive leads.</div>
         </section>
       </main>
@@ -2559,7 +2771,11 @@ export function ThreadlineExperience() {
   }
   return (
     <div className={styles.reportFrame}>
-      {statusMessage && (
+      {scanResponse?.scan.completionNotice && !scanResponse.scan.completionNotice.readAt ? (
+        <button className={styles.statusToast} type="button" onClick={() => void acknowledgeCompletionNotice()}>
+          <span>✓</span> Your Market Scan is complete and saved. Return in this browser, or on another device with the same signed-in account. <b>Dismiss</b>
+        </button>
+      ) : statusMessage && (
         <button className={styles.statusToast} type="button" onClick={() => setStatusMessage("")}>
           <span>✓</span> {statusMessage} <b>×</b>
         </button>
@@ -2569,7 +2785,10 @@ export function ThreadlineExperience() {
         scanResult={dashboardData ?? undefined}
         accessLevel={accessLevel}
         initialSection={reportInitialSection}
-        onNewScan={() => setView("landing")}
+        onNewScan={() => {
+          setReportInitialSection("dashboard");
+          returnToSetup();
+        }}
         onCheckout={checkout}
         onRegenerateReply={regenerateReply}
         onPublishOpportunity={recordPublication}

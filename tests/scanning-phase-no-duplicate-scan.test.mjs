@@ -92,7 +92,7 @@ test("normalizedWebsiteForComparison is included in the scanning-phase effect's 
   const start = experienceSource.indexOf("useEffect(() => {\n    if (view !== \"scanning\") return;");
   assert.notEqual(start, -1, "the scanning-phase effect was not found");
   const depsIndex = experienceSource.indexOf(
-    "}, [view, url, contextText, inputMode, reviewScanId, scanCreateBody, normalizedWebsiteForComparison]);",
+    "}, [view, url, contextText, inputMode, reviewScanId, normalizedWebsiteForComparison]);",
     start,
   );
   assert.notEqual(depsIndex, -1, "normalizedWebsiteForComparison must be a listed dependency of the effect that uses it");

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
 /**
  * triageConversations() only ever guaranteed full coverage or a thrown
@@ -27,35 +26,7 @@ import ts from "typescript";
  * compile pattern already used by triage-batch-concurrency.test.mjs.
  */
 
-function moduleUrl(source) {
-  return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-}
-
-async function compileOpenAiProvider() {
-  let source = await readFile(
-    new URL("../lib/providers/openai.server.ts", import.meta.url),
-    "utf8",
-  );
-  const usageModule = moduleUrl(`
-    export function estimateAiCostUsd() { return 0; }
-    export function combineTokenUsage(records) {
-      return records.reduce((total, row) => ({
-        inputTokens: total.inputTokens + (row.inputTokens || 0),
-        outputTokens: total.outputTokens + (row.outputTokens || 0),
-        cachedInputTokens: (total.cachedInputTokens || 0) + (row.cachedInputTokens || 0),
-        cacheWriteInputTokens: (total.cacheWriteInputTokens || 0) + (row.cacheWriteInputTokens || 0),
-      }), { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 });
-    }
-  `);
-  source = source.replaceAll('"@/lib/ai/usage"', JSON.stringify(usageModule));
-  const javascript = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    fileName: "openai.server.ts",
-  }).outputText;
-  return import(moduleUrl(javascript));
-}
-
-const openai = await compileOpenAiProvider();
+const openai = await loadTsModule("lib/providers/openai.server.ts");
 const cited = (value) => ({ value, confidence: 0.9, provenanceIds: ["web_1"] });
 const business = {
   businessId: "biz_1",
@@ -288,7 +259,7 @@ test("a checkpoint write that throws does not fail or discard the batch's own su
   assert.equal(result.value.length, 2);
 });
 
-test("tolerateUnrecoverableBatches: a batch OpenAI can never usably answer is skipped, not fatal -- the rest of the scan still completes", async () => {
+test("tolerateUnrecoverableBatches: malformed batches remain unresolved while successful judgments survive", async () => {
   const succeededBatches = [];
   const provider = new openai.OpenAiProvider({
     apiKey: "test-key",
@@ -323,28 +294,27 @@ test("tolerateUnrecoverableBatches: a batch OpenAI can never usably answer is sk
     onBatchSucceeded: (items) => { succeededBatches.push(items.map((i) => i.externalId)); },
   });
 
-  // Full coverage is still guaranteed -- every candidate gets an entry --
-  // but the unresolved batch's entries are a safe, explicit "skip" verdict
-  // rather than the caller having to special-case a shorter array.
-  assert.equal(result.value.length, 50);
+  // Only actual judgments belong in value/checkpoints. An unresolved batch
+  // is coverage loss, not a set of fabricated negative relevance decisions.
+  assert.equal(result.value.length, 25);
+  assert.deepEqual(result.coverage, { expected: 50, succeeded: 25, unresolved: 25, pending: 0, complete: false });
   const byId = new Map(result.value.map((row) => [row.externalId, row]));
   for (let index = 1; index <= 25; index += 1) {
     assert.equal(byId.get(`c${index}`).triage.worthEnriching, true, `c${index} should carry its real triage verdict`);
   }
   for (let index = 26; index <= 50; index += 1) {
-    const triage = byId.get(`c${index}`).triage;
-    assert.equal(triage.worthEnriching, false, `c${index} should be skipped, not enriched`);
-    assert.match(triage.reason, /Skipped/);
+    assert.equal(byId.has(`c${index}`), false);
+    const outcome = result.processing.find(item => item.externalId === `c${index}`);
+    assert.equal(outcome.status, "unresolved");
+    assert.equal(outcome.code, "ai_structured_output");
   }
 
-  // Both the real batch and the skipped batch get checkpointed -- a future
-  // retry of this same scan must not resubmit either one.
-  assert.equal(succeededBatches.length, 2);
+  // Only the resolved batch can be reused; unresolved IDs need recovery.
+  assert.equal(succeededBatches.length, 1);
   assert.deepEqual(succeededBatches[0], candidates.slice(0, 25).map((c) => c.externalId));
-  assert.deepEqual(succeededBatches[1].sort(), candidates.slice(25).map((c) => c.externalId).sort());
 });
 
-test("tolerateUnrecoverableBatches: an empty structured response (finish_reason=stop, null content) is skipped too, not just malformed JSON", async () => {
+test("tolerateUnrecoverableBatches: empty structured responses remain unresolved too", async () => {
   // Real production finding: a second, distinct failure shape reached the
   // same triageConversations() call and was NOT caught by
   // tolerateUnrecoverableBatches -- OpenAI can also answer with finish_reason
@@ -382,17 +352,17 @@ test("tolerateUnrecoverableBatches: an empty structured response (finish_reason=
     onBatchSucceeded: (items) => { succeededBatches.push(items.map((i) => i.externalId)); },
   });
 
-  assert.equal(result.value.length, 50);
+  assert.equal(result.value.length, 25);
+  assert.equal(result.coverage.complete, false);
   const byId = new Map(result.value.map((row) => [row.externalId, row]));
   for (let index = 1; index <= 25; index += 1) {
     assert.equal(byId.get(`c${index}`).triage.worthEnriching, true, `c${index} should carry its real triage verdict`);
   }
   for (let index = 26; index <= 50; index += 1) {
-    const triage = byId.get(`c${index}`).triage;
-    assert.equal(triage.worthEnriching, false, `c${index} should be skipped, not enriched`);
-    assert.match(triage.reason, /Skipped/);
+    assert.equal(byId.has(`c${index}`), false);
+    assert.equal(result.processing.find(item => item.externalId === `c${index}`).status, "unresolved");
   }
-  assert.equal(succeededBatches.length, 2);
+  assert.equal(succeededBatches.length, 1);
 });
 
 test("without tolerateUnrecoverableBatches, an empty structured response still fails the whole call", async () => {

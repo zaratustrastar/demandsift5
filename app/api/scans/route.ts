@@ -2,7 +2,7 @@ import { validatePublicWebsiteUrl, UnsafeWebsiteUrlError } from "@/lib/security/
 import { apiErrorResponse, ApiError, createWorkspace, readJson, requireWorkspace, workspaceCookie, type WorkspaceActor } from "@/lib/server/http";
 import { presentScan, requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
-import { createScan, enqueueScanRun, runScan, type CreateScanInput } from "@/lib/server/scan-workflow";
+import { createScan, enqueueScanAnalysis, runScan, type CreateScanInput } from "@/lib/server/scan-workflow";
 import { getStateRepository } from "@/lib/server/repository";
 
 type CreateScanBody = {
@@ -85,7 +85,7 @@ export async function POST(request: Request) {
     } catch {
       actor = await createWorkspace();
     }
-    const scan = await createScan(actor.workspaceId, scanInput);
+    const scan = await createScan(actor.workspaceId, scanInput, { reviewRequired: true });
     if (body.reviewFirst === true) {
       // The discovery-profile step sits between analysis and Reddit retrieval,
       // so creation must not start the scan. Enqueuing here would have the
@@ -95,18 +95,18 @@ export async function POST(request: Request) {
     }
     const workerMode = process.env.BACKGROUND_WORKER_MODE?.trim().toLowerCase();
     const canDefer =
-      body.defer === true && workerMode === "queue" && getStateRepository().kind === "postgres";
+      workerMode === "queue" && getStateRepository().kind === "postgres";
     if (canDefer) {
-      const job = await enqueueScanRun(scan);
+      const accepted = await enqueueScanAnalysis(scan);
       return responseWithWorkspace(
-        { ...(await presentScan(scan)), job: { id: job.id, status: job.status } },
+        { ...(await presentScan(accepted.scan)), job: { id: accepted.job.id, status: accepted.job.status } },
         202,
         workspaceCookie(actor),
       );
     }
     let completed;
     try {
-      completed = await runScan(scan.id);
+      completed = await runScan(scan.id, { stopAfterUnderstanding: true });
     } catch (error) {
       const failed = await presentScan(await requireOwnedScan(actor.workspaceId, scan.id));
       const message = error instanceof Error ? error.message : "Website analysis failed.";

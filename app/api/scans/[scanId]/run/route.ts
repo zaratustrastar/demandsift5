@@ -1,15 +1,15 @@
-import { apiErrorResponse, ApiError, requireWorkspace } from "@/lib/server/http";
+import { apiErrorResponse, ApiError, readJson, requireWorkspace } from "@/lib/server/http";
 import { presentScan, requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
 import { getStateRepository } from "@/lib/server/repository";
 import { enqueueScanRun, runScan } from "@/lib/server/scan-workflow";
+import { approveScanRecord, assertReviewedVersion } from "@/lib/server/scan-lifecycle";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
 /**
- * Keeps the analysis request open while the browser polls the owned scan.
- * This exposes genuine backend stage transitions without granting access or
- * trusting client-side progress state.
+ * The review click accepts exactly the profile version the user saw.
+ * Production persists approval and the deduplicated job atomically.
  */
 export async function POST(request: Request, context: RouteContext) {
   try {
@@ -18,6 +18,8 @@ export async function POST(request: Request, context: RouteContext) {
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
     if (scan.status === "complete") return Response.json(await presentScan(scan));
+    const body = await readJson<{ reviewVersion?: string }>(request, 4_000);
+    assertReviewedVersion(scan, body.reviewVersion);
     if (scan.status === "running") {
       return Response.json(await presentScan(scan), {
         status: 202,
@@ -28,12 +30,14 @@ export async function POST(request: Request, context: RouteContext) {
     // here would hold the HTTP request open for the whole Reddit scan.
     const workerMode = process.env.BACKGROUND_WORKER_MODE?.trim().toLowerCase();
     if (workerMode === "queue" && getStateRepository().kind === "postgres") {
-      const job = await enqueueScanRun(scan);
+      const accepted = await enqueueScanRun(scan, body.reviewVersion);
       return Response.json(
-        { ...(await presentScan(scan)), job: { id: job.id, status: job.status } },
+        { ...(await presentScan(accepted.scan)), job: { id: accepted.job.id, status: accepted.job.status } },
         { status: 202, headers: { "Cache-Control": "no-store" } },
       );
     }
+    const approved = approveScanRecord(scan, body.reviewVersion);
+    if (approved !== scan) await getStateRepository().saveScan(approved);
     let completed;
     try {
       completed = await runScan(scan.id);

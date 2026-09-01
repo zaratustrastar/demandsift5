@@ -26,6 +26,8 @@ import type {
   ScanRecord,
 } from "@/lib/server/contracts";
 import { getStateRepository } from "@/lib/server/repository";
+import { globallyBoundedAiRequestGate, sharedProviderCapacity } from "@/lib/server/provider-capacity";
+import { aiCapacityFromEnv } from "@/lib/ai/capacity";
 
 /**
  * AI Visibility Tracking orchestration -- a sidecar, isolated from
@@ -78,8 +80,13 @@ function readableModels() {
   return openAiModelsFromEnv();
 }
 
-function readableAiProvider() {
-  return process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+function readableAiProvider(workspaceId: string) {
+  if (!process.env.OPENAI_API_KEY?.trim()) return null;
+  const capacity = aiCapacityFromEnv();
+  return createOpenAiProviderFromEnv(process.env, {
+    requestGate: globallyBoundedAiRequestGate({ workspaceId, localLimit: capacity.requestConcurrency,
+      holderPrefix: `ai-visibility:${workspaceId}` }),
+  });
 }
 
 function readyCompetitors(competitorProfiles: CompetitorProfile[] | null | undefined): CompetitorProfile[] {
@@ -102,7 +109,7 @@ async function generateQuestions(
   business: BusinessUnderstanding,
   competitors: CompetitorProfile[],
 ): Promise<string[]> {
-  const aiProvider = readableAiProvider();
+  const aiProvider = readableAiProvider(business.workspaceId);
   if (!aiProvider) return conservativeQuestions(business, competitors);
   const generated = await aiProvider.generateVisibilityQuestions({
     productCategory: business.productCategory.value,
@@ -161,8 +168,12 @@ export async function runAiVisibilityScan(visibilityScanId: string): Promise<AiV
 
     const apifyToken = process.env.APIFY_TOKEN?.trim();
     const missingTokenMessage = "APIFY_TOKEN is not configured on the server, so no AI visibility Actor could run.";
+    const providerCapacity = sharedProviderCapacity();
     const actorResults = apifyToken
-      ? await runAllVisibilityActors({ questions, token: apifyToken })
+      ? await runAllVisibilityActors({ questions, token: apifyToken, workspaceId: record.workspaceId,
+          holderPrefix: `ai-visibility:${record.id}`,
+          actorCapacity: providerCapacity?.capacity,
+          actorCapacityLimit: providerCapacity?.configuration.apifyActorLimit })
       : PROVIDERS.map((provider) => ({
           provider,
           actorRunId: null,
@@ -221,7 +232,7 @@ export async function runAiVisibilityScan(visibilityScanId: string): Promise<AiV
     const toClassify = draftAnswers
       .map((answer, index) => ({ answer, index }))
       .filter(({ answer }) => answer.brandMentioned && answer.answerText.trim());
-    const aiProvider = readableAiProvider();
+    const aiProvider = readableAiProvider(business.workspaceId);
     if (aiProvider && toClassify.length > 0) {
       // The index sent to OpenAI is toClassify's own dense position
       // (0..toClassify.length-1), never the sparse original draftAnswers

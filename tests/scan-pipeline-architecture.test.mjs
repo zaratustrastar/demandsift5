@@ -21,21 +21,23 @@ function position(fragment) {
   return index;
 }
 
-test("active scan orders discovery before triage before enrichment before deep qualification", () => {
-  const discovery = position("redditProvider.discover(");
-  const triage = position("aiProvider.triageConversations(");
+test("final reconciliation and required triage precede enrichment and deep qualification", () => {
+  // Early triage intentionally overlaps discovery. Behavioral tests in
+  // discovery-triage-overlap prove that all final evidence is still covered.
+  const reconciliation = position("discoveryTriage?.finish(prefilteredSurvivors)");
+  const finalTriage = position("aiProvider.triageConversations(");
   const enrichment = position("redditProvider.enrich(");
   const qualification = position("aiProvider.qualifyConversations(");
-  assert.ok(discovery < triage);
-  assert.ok(triage < enrichment);
+  assert.ok(reconciliation < finalTriage);
+  assert.ok(finalTriage < enrichment);
   assert.ok(enrichment < qualification);
 });
 
 test("long-running scans start durably and recover an orphaned running execution", () => {
   assert.equal(executorRoute.includes("ReadableStream"), false);
   assert.match(executorRoute, /activeScanExecutions/);
-  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, false, job\.attempts, job\.maxAttempts\)/);
-  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, true, job\.attempts, job\.maxAttempts\)/);
+  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, false, job\.attempts, job\.maxAttempts, job\.id, body\.workerId, job\.type\)/);
+  assert.match(executorRoute, /ensureClaimedScanExecution\(scan\.id, true, job\.attempts, job\.maxAttempts, job\.id, body\.workerId, job\.type\)/);
   assert.match(executorRoute, /status: "starting", complete: false/);
   assert.match(executorRoute, /export async function GET/);
   assert.match(executorRoute, /executionSnapshot\(job, scan\)/);
@@ -43,14 +45,18 @@ test("long-running scans start durably and recover an orphaned running execution
   assert.match(source, /stopAfterUnderstanding\?: boolean;/);
   assert.match(source, /jobAttempts\?: number;/);
   assert.match(source, /jobMaxAttempts\?: number;/);
-  assert.match(source, /claim\.state === "running" && !options\.resumeRunning/);
+  assert.match(source, /claim\.state === "running"\) return claim.scan/);
 });
 
 test("running scan polling does not invoke completed-report presentation", () => {
-  const statusGuard = scanStatusRoute.indexOf("if (statusOnly || !scan.result)");
+  const statusGuard = scanStatusRoute.indexOf("if (statusOnly)");
   const presenter = scanStatusRoute.indexOf("await presentScan(scan)");
   assert.ok(statusGuard >= 0);
   assert.ok(presenter > statusGuard);
+  const fullRead = scanStatusRoute.indexOf("await requireOwnedScan");
+  assert.ok(fullRead > statusGuard);
+  assert.match(scanStatusRoute.slice(statusGuard, fullRead), /getScanStatus\(scanId, actor\.workspaceId\)/);
+  assert.doesNotMatch(scanStatusRoute.slice(statusGuard, fullRead), /presentScan\(|requireOwnedScan\(/);
   assert.match(scanStatusRoute, /report: null/);
   assert.match(scanStatusRoute, /searchParams\.get\("statusOnly"\) === "1"/);
 });
@@ -84,7 +90,7 @@ test("completing a scan does not schedule another scan", () => {
 });
 
 test("acquisition retrieves a corpus rather than a handful of candidates", () => {
-  assert.match(source, /acquisitionCandidateTarget\(\)/);
+  assert.match(source, /acquisitionCandidateTarget\(env\)/);
   assert.equal(source.includes("limit: 25,"), false);
 });
 
@@ -101,10 +107,10 @@ test("active scan does not use legacy deterministic ranking", () => {
  * return strictly as a high-recall prefilter: they order candidates and drop
  * the obviously unrelated tail, while the LLM still decides relevance.
  */
-test("embeddings prefilter candidates before classification but never decide relevance", () => {
+test("global embeddings selection precedes reconciliation and never decides relevance", () => {
   const prefilter = position("prioritizeCandidates(");
-  const triage = position("aiProvider.triageConversations(");
-  assert.ok(prefilter < triage, "prefilter must run before LLM classification");
+  const reconciliation = position("discoveryTriage?.finish(prefilteredSurvivors)");
+  assert.ok(prefilter < reconciliation, "the final global pool remains authoritative");
 
   // The prefilter only narrows the pool; it must not set relevance or score.
   assert.equal(source.includes("relevant: similarity"), false);
@@ -119,7 +125,7 @@ test("embeddings prefilter candidates before classification but never decide rel
 });
 
 test("the classified pool is bounded so acquisition volume cannot blow up LLM cost", () => {
-  assert.match(source, /triageCandidateBudget\(\)/);
+  assert.match(source, /triageCandidateBudget\(env\)/);
   assert.match(source, /classifiedCandidates: prefilteredSurvivors\.length/);
 });
 
@@ -219,7 +225,7 @@ test("zero-result scans audit a bounded high-signal sample before accepting a tr
   const source = await readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8");
   assert.match(source, /const zeroResultAuditCandidates = worthEnriching\.length === 0/);
   assert.match(source, /selectZeroResultAuditCandidates/);
-  assert.match(source, /budget: Math\.min\(previousResult \? 2 : 3, enrichmentBudget\(\)\)/);
+  assert.match(source, /budget: Math\.min\(previousResult \? 2 : 3, enrichmentBudget\(env\)\)/);
 });
 
 test("thread context verifier is initialized before enrichment recovery uses it", () => {
@@ -251,7 +257,9 @@ test("public surfacing gates relax the verification bar when enrichment is delib
   // diagnostics, which must keep reporting real verification honestly), and
   // that the raw hasVerifiedThreadContext check -- used for the scan trace's
   // per-candidate "full thread context" field -- is unchanged by it.
-  assert.match(source, /const enrichmentDisabled = Number\(process\.env\.APIFY_REDDIT_ENRICHMENT_LIMIT \?\? 0\) === 0;/);
+  assert.match(source, /const enrichmentDisabled = redditSettings.enrichmentLimit === 0;/);
+  assert.equal(/const enrichmentDisabled = .*APIFY_REDDIT_ENRICHMENT_LIMIT/.test(source), false,
+    "an unrelated global variable must not relax another provider's context gate");
   assert.match(source, /const meetsPublishingContextBar = .*=>\s*\n\s*hasVerifiedThreadContext\(conversation\) \|\| enrichmentDisabled;/);
   assert.match(source, /threadContextVerified: deep \? hasVerifiedThreadContext\(deep\.conversation\) : false,/);
 });

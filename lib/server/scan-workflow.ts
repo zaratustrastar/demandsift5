@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   BusinessUnderstanding,
   ConversationTriage,
@@ -35,7 +36,8 @@ import {
 } from "@/lib/intelligence/embedding-prefilter";
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
 import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
-import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
+import { createOpenAiProviderFromEnv, openAiModelsFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
+import type { TriageProcessingOutcome } from "@/lib/providers/contracts";
 import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
 import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
 import type { WebsiteCrawlResult } from "@/lib/security/website-crawler";
@@ -61,6 +63,103 @@ import { ApiError } from "./http";
 import { createId } from "./ids";
 import { jobWillRetryScanFailure, scanPipelineErrorCode } from "./job-retry-classification";
 import { getStateRepository } from "./repository";
+import { environmentForScan, resolveScanConfiguration, upgradeScanDepthConfiguration } from "./scan-configuration";
+import { deepQualificationBudget, discoveryOnlyReview } from "./scan-depth";
+import { createScanTrace, traceProvider, type ScanTrace } from "./scan-observability";
+import { createWebsiteSnapshot, reusableWebsiteSnapshot, legacyProfileMatchesSnapshot, websitePageSourceId, businessWebsiteSourceIds } from "./website-snapshot";
+import { maintainScanExecution, ScanOwnershipLostError, type ScanExecutionOwner } from "./scan-execution";
+import { assertReviewedVersion } from "./scan-lifecycle";
+import { runtimeProgress, refreshRuntimeProgress, recordScanWork } from "./scan-progress";
+import { createDiscoveryTriageCoordinator, newDiscoveryTriageCheckpoint } from "./discovery-triage-coordinator";
+import { aiCapacityFromEnv } from "../ai/capacity";
+import { triageInputVersion } from "../ai/triage-dispatcher";
+import { AiRecoveryBudget } from "../ai/recovery-budget";
+import { replyInputVersion } from "../ai/reply-checkpoint";
+import { ApifyRunRecovery } from "../providers/apify-run-recovery";
+import { publishPartialReply, removePartialRepliesExcept, replaceCandidatePreviews, replaceQualifiedPartialResults, stableScanOutputId } from "./partial-results";
+import { globallyBoundedAiRequestGate, sharedProviderCapacity } from "./provider-capacity";
+
+const scanTraces = new WeakMap<ScanRecord, { trace: ScanTrace; stages: Map<string, ReturnType<ScanTrace["start"]>> }>();
+const scanExecutions = new WeakMap<ScanRecord, { owner: ScanExecutionOwner; guard: ReturnType<typeof maintainScanExecution> }>();
+
+async function persistScan(scan: ScanRecord) {
+  refreshRuntimeProgress(scan);
+  const trace = scanTraces.get(scan)?.trace;
+  const execution = scanExecutions.get(scan);
+  execution?.guard.signal.throwIfAborted();
+  const write = async () => {
+    try { await getStateRepository().saveScan(scan, execution?.owner); }
+    catch (error) { if (error instanceof ScanOwnershipLostError) execution?.guard.lose(); throw error; }
+  };
+  return trace ? trace.measure("checkpoint.save", write) : write();
+}
+
+function scanAiProvider(scan: ScanRecord, env: NodeJS.ProcessEnv) {
+  if (!env.OPENAI_API_KEY?.trim()) return null;
+  const trace = scanTraces.get(scan)?.trace;
+  const fetchImpl = scanExecutions.get(scan)?.guard.wrapFetch();
+  const signal = scanExecutions.get(scan)?.guard.signal;
+  const aiCapacity = aiCapacityFromEnv(env);
+  const requestGate = globallyBoundedAiRequestGate({ environment: env, workspaceId: scan.workspaceId,
+    localLimit: aiCapacity.requestConcurrency, holderPrefix: `scan:${scan.id}` });
+  const recovery = env.SCAN_COORDINATED_RETRIES === "1" ? new AiRecoveryBudget({
+    ledger: scan.aiRecoveryLedger ??= {}, maxRequests: Number(env.AI_RECOVERY_MAX_REQUESTS ?? 20),
+    deadlineMs: Number(env.AI_RECOVERY_DEADLINE_MS ?? 900_000), onChange: () => persistScan(scan),
+  }) : undefined;
+  if (scan.runConfiguration?.effective?.ai) Object.assign(scan.runConfiguration.effective.ai, {
+    coordinatedRetries: Boolean(recovery), recoveryMaxRequests: recovery?.maxRequests, recoveryDeadlineMs: recovery?.deadlineMs,
+  });
+  if (!trace) return createOpenAiProviderFromEnv(env, { fetchImpl, signal, recovery, requestGate });
+  const requests = new Map<string, ReturnType<ScanTrace["start"]>>();
+  return traceProvider(createOpenAiProviderFromEnv(env, {
+    fetchImpl, signal, recovery, requestGate,
+    onRequest: event => {
+      const key = `${event.route}:${event.requestIndex}`;
+      const data = { provider: event.endpointKind, route: event.route, operation: event.operation, model: event.model,
+        attempt: event.attempt, category: event.category, statusCode: event.statusCode };
+      if (event.phase === "start") requests.set(key, trace.start("ai.request", data));
+      else { requests.get(key)?.(event.category === "http_success" ? "succeeded" : "failed", data); requests.delete(key); }
+    },
+    onUsage: event => trace.milestone("ai.usage", { provider: event.provider, model: event.model,
+      operation: event.operation, inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens,
+      cachedInputTokens: event.usage.cachedInputTokens }),
+    onDiagnostic: event => trace.milestone("ai.diagnostic", { category: event.kind, operation: event.operation, model: event.model,
+      unresolved: "unresolved" in event ? event.unresolved : undefined }),
+  }), trace, ["analyzeBusiness", "analyzeBusinessFromContext", "embed", "triageConversations", "qualifyConversations", "generateInsights", "generateReply"]);
+}
+
+async function observedCrawl(scan: ScanRecord): Promise<WebsiteCrawlResult> {
+  const boundSnapshotId = scan.discoveryProfile?.websiteSnapshotId;
+  const snapshot = scan.websiteSnapshot;
+  if (snapshot && reusableWebsiteSnapshot(snapshot, scan.id, scan.websiteUrl)) {
+    if (boundSnapshotId && boundSnapshotId !== snapshot.id) {
+      throw new ApiError("The approved profile does not match its saved website evidence. Start a new scan and review its website analysis.", 409, "website_snapshot_mismatch");
+    }
+    scanTraces.get(scan)?.trace.milestone("website.snapshot_reused", { pages: snapshot.crawl.pages.length });
+    // Also retries a previous ambiguous/failed snapshot save before paid AI.
+    await persistScan(scan);
+    return structuredClone(snapshot.crawl);
+  }
+  if (boundSnapshotId) {
+    throw new ApiError("The approved website evidence is missing or changed. Start a new scan and review its website analysis.", 409, "website_snapshot_mismatch");
+  }
+  const work = async () => {
+    const execution = scanExecutions.get(scan);
+    await execution?.guard.check();
+    return crawlWebsite(scan.websiteUrl, { maxPages: 4, signal: execution?.guard.signal });
+  };
+  const crawl = await (scanTraces.get(scan)?.trace.measure("website.crawl", work) ?? work());
+  scan.websiteSnapshot = createWebsiteSnapshot(scan.id, scan.websiteUrl, crawl);
+  // Persist successful crawling before AI analysis: a model retry reuses it.
+  await persistScan(scan);
+  return structuredClone(scan.websiteSnapshot.crawl);
+}
+
+function assertWebsiteProfileEvidence(scan: ScanRecord, business: BusinessUnderstanding) {
+  if (!scan.websiteSnapshot || !legacyProfileMatchesSnapshot(businessWebsiteSourceIds(business), scan.websiteSnapshot)) {
+    throw new ApiError("The business profile references unavailable website evidence. Retry the website analysis.", 502, "website_snapshot_mismatch");
+  }
+}
 
 const STAGES: ScanStage[] = [
   {
@@ -135,6 +234,13 @@ function countCandidatesByQuery(
   return counts;
 }
 
+function redditProvenance(conversation: EnrichedRedditConversation): Provenance {
+  return { id: conversation.provenance.id, kind: "reddit", url: conversation.permalink ?? "",
+    title: conversation.title ?? "Reddit conversation", excerpt: conversation.body.slice(0, 280),
+    capturedAt: conversation.provenance.observedAt, synthetic: conversation.sourceMode === "mock",
+    provider: conversation.provider, sourceMode: conversation.sourceMode };
+}
+
 function cloneStages(): ScanStage[] {
   return STAGES.map((stage) => ({ ...stage }));
 }
@@ -145,11 +251,20 @@ async function setStage(
   status: ScanStage["status"],
   detail?: string,
 ) {
+  if (scan.progress.find(stage => stage.id === stageId)?.status !== status) recordScanWork(scan);
   scan.progress = scan.progress.map((stage) =>
     stage.id === stageId ? { ...stage, status, detail: detail ?? stage.detail } : stage,
   );
   scan.updatedAt = new Date().toISOString();
-  await getStateRepository().saveScan(scan);
+  const observation = scanTraces.get(scan);
+  if (status === "active" && !observation?.stages.has(stageId)) {
+    const end = observation?.trace.start("scan.stage", { stage: stageId });
+    if (end) observation?.stages.set(stageId, end);
+  } else if (status === "complete" || status === "failed") {
+    observation?.stages.get(stageId)?.(status === "complete" ? "succeeded" : "failed");
+    observation?.stages.delete(stageId);
+  }
+  await persistScan(scan);
 }
 
 function firstUsefulSentence(text: string): string | null {
@@ -382,7 +497,7 @@ function pagesFromCrawl(crawl: WebsiteCrawlResult): {
   pages: Array<WebsiteCrawlResult["pages"][number] & { sourceId: string }>;
 } {
   const websiteSources: Provenance[] = crawl.pages.map((page) => ({
-    id: `web_${page.contentHash.slice(0, 20)}`,
+    id: page.sourceId ?? websitePageSourceId(page.contentHash),
     kind: "website",
     url: page.url,
     title: page.title,
@@ -449,16 +564,17 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   analysisMode: ScanResult["analysisMode"];
 }> {
   const businessId = createId("biz");
-  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+  const env = scan.runConfiguration ? environmentForScan(scan.runConfiguration) : process.env;
+  const aiProvider = scanAiProvider(scan, env);
 
   if (aiProvider) {
-    const models = openAiModelsFromEnv();
+    const models = openAiModelsFromEnv(env);
     const UNDERSTANDING_ATTEMPTS = 2;
     let business: BusinessUnderstanding | undefined;
     let lastError: unknown;
     for (let attempt = 0; attempt < UNDERSTANDING_ATTEMPTS; attempt += 1) {
       try {
-        const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
+        const crawl = await observedCrawl(scan);
         const { pages } = pagesFromCrawl(crawl);
         const analyzed = await aiProvider.analyzeBusiness({
           workspaceId: scan.workspaceId,
@@ -468,6 +584,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
           pages,
           models,
         });
+        assertWebsiteProfileEvidence(scan, analyzed.value);
         business = analyzed.value;
         break;
       } catch (error) {
@@ -482,7 +599,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     return { business, profile, analysisMode: "openai" };
   }
 
-  const crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
+  const crawl = await observedCrawl(scan);
   const { pages } = pagesFromCrawl(crawl);
   const profile = conservativeProfile(crawl.canonicalUrl, pages);
   const business = toBusinessUnderstanding({
@@ -509,10 +626,11 @@ async function runContextUnderstanding(scan: ScanRecord): Promise<{
   const text = (scan.contextText ?? "").trim();
   const { source, sourceId } = contextSource(scan.id, text);
   const businessId = createId("biz");
-  const aiProvider = process.env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv() : null;
+  const env = scan.runConfiguration ? environmentForScan(scan.runConfiguration) : process.env;
+  const aiProvider = scanAiProvider(scan, env);
 
   if (aiProvider) {
-    const models = openAiModelsFromEnv();
+    const models = openAiModelsFromEnv(env);
     const analyzed = await aiProvider.analyzeBusinessFromContext({
       workspaceId: scan.workspaceId,
       businessId,
@@ -633,14 +751,11 @@ const REPLY_GENERATION_CONCURRENCY = 4;
 
 /**
  * Runs `fn` over every item in `items`, at most `concurrency` at a time,
- * preserving each result at its original index. If `fn` throws for any
- * item, the whole call rejects with that error (same fail-fast semantics
- * as a plain `for` loop that doesn't catch), which is what the
- * reply-eligible-opportunities loop below relies on for its "every
- * opportunity must produce a grounded reply" invariant; callers that want
- * per-item failure isolation instead (see the relevant-conversations loop
- * below) must catch inside `fn` itself, exactly as they would inside a
- * `for` loop's own try/catch.
+ * preserving each result at its original index. Workers are allowed to
+ * drain independent work before the first error is rethrown, so successful
+ * sibling items can be checkpointed for a retry. Callers that want per-item
+ * failure isolation must catch inside `fn`; required items may rethrow after
+ * persisting their explicit failed state.
  */
 async function mapConcurrently<T, R>(
   items: readonly T[],
@@ -657,9 +772,11 @@ async function mapConcurrently<T, R>(
       results[index] = await fn(items[index]);
     }
   };
-  await Promise.all(
+  const workers = await Promise.allSettled(
     Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker()),
   );
+  const failure = workers.find(result => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
   return results;
 }
 
@@ -874,13 +991,13 @@ function buildFallbackInsights(
  * REDDIT_TRIAGE_BUDGET can still be set lower via env if cost/latency ever
  * needs to be traded back against coverage.
  */
-function triageCandidateBudget(): number {
-  const value = Number(process.env.REDDIT_TRIAGE_BUDGET ?? 400);
+function triageCandidateBudget(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.REDDIT_TRIAGE_BUDGET ?? 400);
   return Number.isFinite(value) ? Math.max(20, Math.min(Math.trunc(value), 400)) : 400;
 }
 
-function embeddingPrefilterFloor(): number {
-  const value = Number(process.env.REDDIT_EMBEDDING_PREFILTER_FLOOR);
+function embeddingPrefilterFloor(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.REDDIT_EMBEDDING_PREFILTER_FLOOR);
   return Number.isFinite(value) ? Math.max(0, Math.min(value, 0.5)) : DEFAULT_PREFILTER_FLOOR;
 }
 
@@ -900,14 +1017,13 @@ function candidateEmbeddingText(candidate: RedditDiscoveryCandidate): string {
   return `${candidate.title ?? ""}\n${candidate.body ?? ""}`.trim().slice(0, 4_000);
 }
 
-function acquisitionCandidateTarget(): number {
-  const value = Number(process.env.REDDIT_ACQUISITION_CANDIDATES ?? 250);
+function acquisitionCandidateTarget(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.REDDIT_ACQUISITION_CANDIDATES ?? 250);
   return Number.isFinite(value) ? Math.max(25, Math.min(Math.trunc(value), 400)) : 250;
 }
 
-function enrichmentBudget(): number {
-  const value = Number(process.env.REDDIT_ENRICHMENT_BUDGET ?? process.env.APIFY_REDDIT_ENRICHMENT_LIMIT ?? 8);
-  return Number.isFinite(value) ? Math.max(1, Math.min(Math.trunc(value), 20)) : 8;
+function enrichmentBudget(env: NodeJS.ProcessEnv = process.env): number {
+  return deepQualificationBudget(env);
 }
 
 /**
@@ -916,9 +1032,9 @@ function enrichmentBudget(): number {
  * zero. Deliberately independent of the lookback window: shortening the window
  * to 7 days must not silently halve verification quality.
  */
-function minimumFullContextReviews(): number {
-  const configured = Number(process.env.REDDIT_MINIMUM_FULL_CONTEXT_REVIEWS);
-  if (Number.isFinite(configured)) return Math.max(0, Math.min(Math.trunc(configured), enrichmentBudget()));
+function minimumFullContextReviews(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.REDDIT_MINIMUM_FULL_CONTEXT_REVIEWS);
+  if (Number.isFinite(configured)) return Math.max(0, Math.min(Math.trunc(configured), enrichmentBudget(env)));
   return 4;
 }
 
@@ -928,9 +1044,9 @@ function minimumFullContextReviews(): number {
  * `required === selected`, so a single miss failed the entire scan after all
  * upstream work had already been paid for. Select with headroom instead.
  */
-function enrichmentSelectionTarget(required: number): number {
+function enrichmentSelectionTarget(required: number, env: NodeJS.ProcessEnv = process.env): number {
   const headroom = Math.max(2, Math.ceil(required * 0.5));
-  return Math.min(enrichmentBudget(), required + headroom);
+  return Math.min(enrichmentBudget(env), required + headroom);
 }
 
 const MAX_CONTEXT_TEXT_LENGTH = 4_000;
@@ -949,7 +1065,7 @@ export type CreateScanInput =
  * as "no identity" rather than throwing (normalizedBusinessHostname,
  * sameWebsite), so this needs no schema change.
  */
-export async function createScan(workspaceId: string, input: CreateScanInput): Promise<ScanRecord> {
+export async function createScan(workspaceId: string, input: CreateScanInput, options: { reviewRequired?: true } = {}): Promise<ScanRecord> {
   const now = new Date().toISOString();
   const isContext = "contextText" in input;
   const scan: ScanRecord = {
@@ -959,19 +1075,24 @@ export async function createScan(workspaceId: string, input: CreateScanInput): P
     inputMode: isContext ? "context" : "website",
     contextText: isContext ? input.contextText.slice(0, MAX_CONTEXT_TEXT_LENGTH) : null,
     status: "queued",
+    ...(options.reviewRequired ? { reviewRequired: true as const, phase: "created" as const } : {}),
     progress: cloneStages(),
     createdAt: now,
     updatedAt: now,
     error: null,
     result: null,
   };
-  await getStateRepository().saveScan(scan);
+  await persistScan(scan);
   await captureFunnelEvent(scan, "scan_started");
   return scan;
 }
 
-export async function enqueueScanRun(scan: ScanRecord) {
-  return getStateRepository().enqueueScan(scan.id, scan.workspaceId);
+export async function enqueueScanRun(scan: ScanRecord, reviewVersion?: string) {
+  return getStateRepository().acceptScanJob(scan.id, scan.workspaceId, "scan.run", reviewVersion);
+}
+
+export async function enqueueScanAnalysis(scan: ScanRecord) {
+  return getStateRepository().acceptScanJob(scan.id, scan.workspaceId, "scan.analyze");
 }
 
 export async function runScan(
@@ -989,21 +1110,67 @@ export async function runScan(
      */
     jobAttempts?: number;
     jobMaxAttempts?: number;
+    jobId?: string;
+    jobWorkerId?: string;
   } = {},
 ): Promise<ScanRecord> {
   const repository = getStateRepository();
-  const claim = await repository.beginScanRun(scanId);
+  if (options.jobId && (!options.jobWorkerId || !options.jobAttempts)) throw new ScanOwnershipLostError();
+  const owner: ScanExecutionOwner = { token: randomUUID(), ...(options.jobId
+    ? { jobId: options.jobId, workerId: options.jobWorkerId, attempt: options.jobAttempts } : {}) };
+  const claim = await repository.beginScanRun(scanId, owner);
   if (claim.state === "missing" || !claim.scan) {
     throw new ApiError("Scan was not found.", 404, "scan_not_found");
   }
   if (claim.state === "complete") return claim.scan;
-  if (claim.state === "running" && !options.resumeRunning) return claim.scan;
+  // The DB lease, not a local promise or a caller's resume flag, owns recovery.
+  if (claim.state === "running") return claim.scan;
   const scan = claim.scan;
+  const guard = maintainScanExecution(() => repository.refreshScanExecution(scanId, owner));
+  scanExecutions.set(scan, { owner, guard });
+  const trace = createScanTrace({ scanId, jobId: options.jobId, jobAttempt: options.jobAttempts });
+  const finishExecution = trace.start(options.stopAfterUnderstanding ? "scan.analysis" : "scan.run");
+  scanTraces.set(scan, { trace, stages: new Map() });
+  let discoveryTriage: ReturnType<typeof createDiscoveryTriageCoordinator> | undefined;
 
   try {
+    if (scan.reviewRequired && !options.stopAfterUnderstanding) assertReviewedVersion(scan, scan.approval?.version);
+    scan.phase = options.stopAfterUnderstanding ? "analyzing" : "scanning";
+    scan.runConfiguration = upgradeScanDepthConfiguration(scan.runConfiguration ?? resolveScanConfiguration(process.env, { workspaceId: scan.workspaceId }));
+    const env = environmentForScan(scan.runConfiguration);
+    scan.runConfiguration.effective ??= {
+      workflow: { triageCandidateBudget: triageCandidateBudget(env), enrichmentBudget: enrichmentBudget(env),
+        acquisitionCandidateTarget: acquisitionCandidateTarget(env), embeddingPrefilterFloor: embeddingPrefilterFloor(env),
+        minimumFullContextReviews: minimumFullContextReviews(env), websiteMaxPages: 4, replyConcurrency: REPLY_GENERATION_CONCURRENCY },
+      models: openAiModelsFromEnv(env),
+      ai: env.OPENAI_API_KEY?.trim() ? createOpenAiProviderFromEnv(env).configurationForDiagnostics() : undefined,
+    };
+    const startedAt = new Date().toISOString();
+    const liveProgress = runtimeProgress(scan);
+    if (options.stopAfterUnderstanding) liveProgress.analysisStartedAt ??= startedAt;
+    else liveProgress.runStartedAt ??= startedAt;
+    recordScanWork(scan, startedAt);
+    scan.timing = { ...scan.timing, acceptedAt: scan.timing?.acceptedAt ?? scan.createdAt,
+      firstStartedAt: scan.timing?.firstStartedAt ?? startedAt, lastStartedAt: startedAt, executionId: trace.executionId };
+    trace.milestone("scan.config", { configId: scan.runConfiguration.id, revision: scan.runConfiguration.defaultsVersion });
+    const effective = scan.runConfiguration.effective;
+    trace.milestone("scan.budgets", { triageBudget: effective.workflow.triageCandidateBudget,
+      reviewBudget: effective.workflow.enrichmentBudget, acquisitionTarget: effective.workflow.acquisitionCandidateTarget,
+      embeddingFloor: effective.workflow.embeddingPrefilterFloor, requiredFullContext: effective.workflow.minimumFullContextReviews,
+      websitePageBudget: effective.workflow.websiteMaxPages, replyConcurrency: effective.workflow.replyConcurrency,
+      providerTimeoutMs: effective.ai?.timeoutMs, triageConcurrency: effective.ai?.triageConcurrency, triageBatchSize: effective.ai?.triageBatchSize });
+    for (const [operation, model] of Object.entries(effective.models)) trace.milestone("scan.model", { operation, model });
+    await persistScan(scan);
     await setStage(scan, "website", "active");
 
     if (options.stopAfterUnderstanding) {
+      if (scan.discoveryProfile && scan.discoveryProfile.profileStage !== "fast") {
+        scan.status = "queued";
+        scan.phase = "awaiting_review";
+        scan.analysisCompletedAt = new Date().toISOString();
+        await persistScan(scan);
+        return scan;
+      }
       // `/analyze` only ever calls runScan with stopAfterUnderstanding when
       // scan.discoveryProfile doesn't exist yet (it returns early itself
       // otherwise), so there is nothing here to reuse: this always runs the
@@ -1031,14 +1198,18 @@ export async function runScan(
           `Built a context pack for ${built.profile.name} from your description.`,
         );
         scan.status = "queued";
+        scan.phase = "awaiting_review";
+        scan.analysisCompletedAt = new Date().toISOString();
         scan.updatedAt = new Date().toISOString();
-        await getStateRepository().saveScan(scan);
+        await persistScan(scan);
         return scan;
       }
 
       const full = await runFullWebsiteUnderstanding(scan);
-      await setStage(scan, "website", "complete", "4 public pages read from the submitted domain.");
+      const pageCount = scan.websiteSnapshot?.crawl.pages.length ?? 0;
+      await setStage(scan, "website", "complete", `${pageCount} public page${pageCount === 1 ? "" : "s"} read from the submitted domain.`);
       scan.discoveryProfile = {
+        websiteSnapshotId: scan.websiteSnapshot?.id,
         profile: full.profile,
         business: full.business,
         analysisMode: full.analysisMode,
@@ -1052,8 +1223,10 @@ export async function runScan(
         `Built a source-backed context pack for ${full.profile.name}.`,
       );
       scan.status = "queued";
+      scan.phase = "awaiting_review";
+      scan.analysisCompletedAt = new Date().toISOString();
       scan.updatedAt = new Date().toISOString();
-      await getStateRepository().saveScan(scan);
+      await persistScan(scan);
 
       return scan;
     }
@@ -1069,7 +1242,7 @@ export async function runScan(
       websiteSources = [source];
       await setStage(scan, "website", "complete", "Business context saved from your description.");
     } else {
-      crawl = await crawlWebsite(scan.websiteUrl, { maxPages: 4 });
+      crawl = await observedCrawl(scan);
       ({ websiteSources, pages } = pagesFromCrawl(crawl));
       await setStage(
         scan,
@@ -1079,17 +1252,37 @@ export async function runScan(
       );
     }
 
-    const redditProvider = createRedditProviderFromEnv({
-      ...process.env,
-      REDDIT_PROVIDER: process.env.REDDIT_PROVIDER?.trim() || "mock",
-    });
+    const actorSpans = new Map<number, ReturnType<ScanTrace["start"]>>();
+    const providerCapacity = sharedProviderCapacity(env);
+    const redditProvider = traceProvider(createRedditProviderFromEnv(env, {}, {
+      fetchImpl: guard.wrapFetch(),
+      signal: guard.signal,
+      runRecovery: new ApifyRunRecovery({ ledger: scan.externalActorLedger ??= {},
+        previousRuns: Object.values(scan.externalActorRuns ?? {}), onChange: () => persistScan(scan),
+        actorCapacity: providerCapacity?.capacity,
+        actorCapacityLimit: providerCapacity?.configuration.apifyActorLimit,
+        workspaceId: scan.workspaceId,
+        holderPrefix: `scan:${scan.id}` }),
+      onActorStarted: async checkpoint => {
+        scan.externalActorRuns ??= {};
+        scan.externalActorRuns[checkpoint.actorRunId] = checkpoint;
+        await persistScan(scan);
+      },
+      onActorRun: event => {
+        if (event.phase === "start") actorSpans.set(event.requestIndex, trace.start("apify.actor", { queries: event.queries }));
+        else { actorSpans.get(event.requestIndex)?.(event.outcome ?? "failed", { actorRunId: event.actorRunId, candidates: event.candidates }); actorSpans.delete(event.requestIndex); }
+      },
+    }), trace, ["discover", "enrich"]);
+    scan.runConfiguration.effective.reddit ??= redditProvider.configurationForDiagnostics?.() ?? { provider: redditProvider.name };
+    const redditSettings = scan.runConfiguration.effective.reddit;
+    trace.milestone("scan.reddit_config", { provider: redditProvider.name,
+      actorConcurrency: Number(redditSettings.maxConcurrentDiscoveryRuns), postsPerQuery: Number(redditSettings.postsPerQuery),
+      providerTimeoutMs: Number(redditSettings.timeoutMs) });
     const requiresAi = redditProvider.sourceMode !== "mock";
     const usage: UsageRecord[] = [];
     const businessId = createId("biz");
-    const models = openAiModelsFromEnv();
-    const aiProvider = process.env.OPENAI_API_KEY?.trim()
-      ? createOpenAiProviderFromEnv()
-      : null;
+    const models = openAiModelsFromEnv(env);
+    const aiProvider = scanAiProvider(scan, env);
     if (requiresAi && !aiProvider) {
       throw new Error("AI is required to analyze and qualify real Reddit records.");
     }
@@ -1106,6 +1299,14 @@ export async function runScan(
     // runFullWebsiteUnderstanding's doc comment), so any persisted profile is
     // safe to reuse as-is.
     const persistedAnalysis = scan.discoveryProfile;
+    if (!isContextScan && persistedAnalysis && !persistedAnalysis.websiteSnapshotId && scan.websiteSnapshot) {
+      // Legacy records have no crawl snapshot. Recrawl through the protected
+      // path, but never silently bind old claims to changed page content.
+      if (!legacyProfileMatchesSnapshot([...(persistedAnalysis.profile.sourceIds ?? []), ...businessWebsiteSourceIds(persistedAnalysis.business)], scan.websiteSnapshot)) {
+        throw new ApiError("The website evidence no longer matches the approved profile. Start a new scan and review its terms before scanning.", 409, "website_snapshot_mismatch");
+      }
+      persistedAnalysis.websiteSnapshotId = scan.websiteSnapshot.id;
+    }
     const canReusePersistedAnalysis = Boolean(persistedAnalysis);
     if (canReusePersistedAnalysis && persistedAnalysis) {
       business = persistedAnalysis.business;
@@ -1136,6 +1337,7 @@ export async function runScan(
         pages,
         models,
       });
+      assertWebsiteProfileEvidence(scan, analyzed.value);
       business = analyzed.value;
       profile = profileFromBusiness(business);
       usage.push(usageRecord(analyzed, "website-analysis"));
@@ -1181,6 +1383,7 @@ export async function runScan(
       // Persisted before Reddit retrieval so the user can review and edit the
       // discovery terms while the scan waits.
       scan.discoveryProfile = {
+        ...(!isContextScan ? { websiteSnapshotId: scan.websiteSnapshot?.id } : {}),
         profile,
         business,
         analysisMode,
@@ -1188,7 +1391,7 @@ export async function runScan(
         profileStage: "full",
       };
       scan.updatedAt = new Date().toISOString();
-      await getStateRepository().saveScan(scan);
+      await persistScan(scan);
     }
 
     // Note: options.stopAfterUnderstanding is handled entirely by the
@@ -1247,6 +1450,27 @@ export async function runScan(
       REVIEW_TERM_CAP,
     );
     const reviewCompetitors = reviewCompetitorTerms(business, scan.competitorProfiles);
+    if (aiProvider && scan.runConfiguration.flags.overlapDiscoveryTriage) {
+      const aiCapacity = aiCapacityFromEnv(env);
+      scan.discoveryTriageCheckpoint ??= newDiscoveryTriageCheckpoint();
+      scan.triageCoverage = undefined;
+      discoveryTriage = createDiscoveryTriageCoordinator({
+        provider: aiProvider, request: { business, models, signal: guard.signal, compactOutput: scan.runConfiguration.flags.compactTriage,
+          coverageRetries: 3, tolerateUnrecoverableBatches: true },
+        since, checkpoint: scan.discoveryTriageCheckpoint,
+        maxCandidates: Number(env.SCAN_EARLY_TRIAGE_LIMIT ?? 100), flushDelayMs: Number(env.SCAN_EARLY_TRIAGE_FLUSH_MS ?? 1_000),
+        batchSize: aiCapacity.triageBatchSize, concurrency: aiCapacity.requestConcurrency,
+        onCheckpoint: async () => { recordScanWork(scan); await persistScan(scan); },
+        onProgress: progress => {
+          const live = runtimeProgress(scan);
+          live.canonicalEligible = progress.eligible;
+          live.triage = { expected: null, succeeded: progress.succeeded, promising: progress.promising, pending: null, unresolved: null };
+          live.triageComplete = false;
+        },
+      });
+      if (persistedDiscovery) discoveryTriage.offer(persistedDiscovery.candidates);
+      await setStage(scan, "triage", "active", "Relevance checks will run as search results arrive. Final coverage is checked after all searches finish.");
+    }
     const discovery = await redditProvider.discover(
       {
         queries: {
@@ -1262,13 +1486,21 @@ export async function runScan(
           excludedTerms: business.irrelevantTopics.value,
           ambiguityRisks: business.ambiguityRisks.value,
         },
-        limit: acquisitionCandidateTarget(),
+        limit: acquisitionCandidateTarget(env),
         since,
       },
       {
+        onProgress: async queries => {
+          const progress = runtimeProgress(scan);
+          if ((queries.succeeded ?? 0) > (progress.queries.succeeded ?? 0)) recordScanWork(scan);
+          progress.queries = queries;
+          progress.discoveryComplete = queries.succeeded === queries.planned;
+          await persistScan(scan);
+        },
         // Surfaced live so a slow/retrying search isn't silent: the frontend
         // already renders this stage's `detail` text on every poll tick.
         onRetry: async (notice) => {
+          trace.milestone("discovery.retry", { attempt: notice.attempt, retryDelayMs: notice.delayMs, category: "transient" });
           await setStage(
             scan,
             "discovery",
@@ -1283,10 +1515,14 @@ export async function runScan(
         // Best-effort: a save failing here must never fail discovery itself,
         // it only means a subsequent interruption would redo a bit more work.
         onChunkSucceeded: async (partial) => {
+          trace.milestone("discovery.checkpoint", { candidates: partial.candidates.length, queries: partial.searchPlan.length });
           scan.redditDiscovery = partial;
+          // Cumulative input; offer computes exact-version deltas. It never
+          // waits for AI, so Apify workers remain free to finish other queries.
+          discoveryTriage?.offer(partial.candidates);
           scan.updatedAt = new Date().toISOString();
           try {
-            await repository.saveScan(scan);
+            await persistScan(scan);
           } catch (error) {
             console.error("Failed to checkpoint partial Reddit discovery.", error);
           }
@@ -1297,7 +1533,7 @@ export async function runScan(
       throw new ApiError(
         `Reddit discovery failed: ${message}`,
         502,
-        "reddit_discovery_failed",
+        scanPipelineErrorCode(error) ?? "reddit_discovery_failed",
       );
     });
     if (discovery.candidates.length === 0 && discovery.diagnostics.degraded) {
@@ -1320,8 +1556,18 @@ export async function runScan(
     // fully-merged version with final diagnostics, and must be what a
     // later stage or a future resume actually sees.
     scan.redditDiscovery = discovery;
+    const discoveryProgress = runtimeProgress(scan);
+    // Other provider adapters need not emit live query events. Their completed
+    // response still provides a bounded fallback; failed coverage is not zero.
+    const queryCount = discoveryProgress.queries.planned ?? discovery.diagnostics.queryCount;
+    const failedQueries = discovery.diagnostics.queriesFailed ?? 0;
+    discoveryProgress.queries = { planned: queryCount,
+      succeeded: discovery.diagnostics.queriesSucceeded ?? Math.max(0, queryCount - failedQueries),
+      failed: failedQueries, active: 0, retrying: 0, pending: 0 };
+    discoveryProgress.discoveryComplete = discovery.diagnostics.degraded !== true && failedQueries === 0
+      && discoveryProgress.queries.succeeded === queryCount;
     scan.updatedAt = new Date().toISOString();
-    await repository.saveScan(scan);
+    await persistScan(scan);
     /**
      * `now` here is the sanity-check ceiling deterministicReason() uses to
      * reject impossible future-dated records (bad actor output, clock skew).
@@ -1344,6 +1590,7 @@ export async function runScan(
       since,
       now: new Date(),
     });
+    runtimeProgress(scan).canonicalEligible = new Set(cleaned.survivors.map(row => row.externalId)).size;
     await setStage(
       scan,
       "discovery",
@@ -1374,7 +1621,7 @@ export async function runScan(
     let prefilterDiagnostics: ReturnType<typeof prioritizeCandidates>["diagnostics"] | null = null;
     let prefilteredSurvivors = cleaned.survivors;
 
-    if (aiProvider && cleaned.survivors.length > triageCandidateBudget()) {
+    if (aiProvider && cleaned.survivors.length > triageCandidateBudget(env)) {
       try {
         const embedded = await aiProvider.embed({
           texts: [
@@ -1405,8 +1652,8 @@ export async function runScan(
             similarity: embeddingSimilarityById.get(candidate.externalId) ?? null,
           })),
           {
-            budget: triageCandidateBudget(),
-            floor: embeddingPrefilterFloor(),
+            budget: triageCandidateBudget(env),
+            floor: embeddingPrefilterFloor(env),
             minimumPool: Math.min(cleaned.survivors.length, 40),
           },
         );
@@ -1418,6 +1665,20 @@ export async function runScan(
       }
     }
 
+    const inputVersions = new Map(prefilteredSurvivors.map(candidate => [candidate.externalId, triageInputVersion({ business, models,
+      compactOutput: scan.runConfiguration?.flags.compactTriage === true }, candidate)]));
+    const overlap = await discoveryTriage?.finish(prefilteredSurvivors);
+    if (overlap) {
+      for (const result of overlap.results) usage.push(usageRecord(result, "triage"));
+      scan.triageCheckpoint ??= {};
+      scan.triageCheckpointVersions ??= {};
+      for (const [id, judgment] of overlap.retained) {
+        scan.triageCheckpoint[id] = judgment;
+        scan.triageCheckpointVersions[id] = inputVersions.get(id)!;
+      }
+      trace.milestone("triage.overlap_reconciled", { candidates: overlap.submitted, completed: overlap.reused,
+        unresolved: overlap.supersededOrExcluded, category: overlap.failed ? "early_failure_recovered_by_final_pass" : "reconciled" });
+    }
     const triageById = new Map<string, ConversationTriage>();
     let reusedUnchanged = 0;
     let reusedTriageOnly = 0;
@@ -1428,6 +1689,7 @@ export async function runScan(
       if (
         previous &&
         previous.contentHash === candidate.provenance.contentHash &&
+        isUsableTriageJudgment(previous.triage, candidate.externalId) &&
         previous.triage.worthEnriching === true
       ) {
         // Positive triage may be reused because it still flows into enrichment/deep
@@ -1440,6 +1702,45 @@ export async function runScan(
       needsTriage.push(candidate);
     }
 
+    // A legacy synthetic negative is not completed work. Validate checkpoint
+    // shape and IDs as well; ordinary valid negative judgments remain reusable.
+    const priorCheckpointCount = Object.keys(scan.triageCheckpoint ?? {}).length;
+    scan.triageCheckpoint = Object.fromEntries(Object.entries(scan.triageCheckpoint ?? {})
+      .filter(([id, value]) => isUsableTriageJudgment(value, id)
+        && (scan.triageCheckpointVersions?.[id]
+          ? scan.triageCheckpointVersions[id] === inputVersions.get(id)
+          : !scan.runConfiguration?.flags.overlapDiscoveryTriage)));
+    scan.triageCheckpointVersions = Object.fromEntries(Object.keys(scan.triageCheckpoint)
+      .filter(id => inputVersions.has(id)).map(id => [id, inputVersions.get(id)!]));
+    if (Object.keys(scan.triageCheckpoint).length < priorCheckpointCount) {
+      trace.milestone("triage.invalid_checkpoint", { unresolved: priorCheckpointCount - Object.keys(scan.triageCheckpoint).length });
+    }
+    const eligibleIds = new Set(prefilteredSurvivors.map(row => row.externalId));
+    const hasJudgment = (id: string) => triageById.has(id) || isUsableTriageJudgment(scan.triageCheckpoint?.[id], id);
+    const updateTriageCoverage = () => {
+      const ids = [...eligibleIds];
+      const succeeded = ids.filter(hasJudgment).length;
+      const unresolved = ids.filter(id => !hasJudgment(id) && scan.triageProcessing?.[id]?.status === "unresolved").length;
+      if (succeeded > (scan.triageCoverage?.succeeded ?? 0)) recordScanWork(scan);
+      scan.triageCoverage = { expected: ids.length, succeeded, unresolved, pending: ids.length - succeeded - unresolved, complete: succeeded === ids.length };
+      runtimeProgress(scan).triage.promising = ids.filter(id => (triageById.get(id) ?? scan.triageCheckpoint?.[id])?.worthEnriching === true).length;
+    };
+    scan.triageProcessing = Object.fromEntries([...eligibleIds].map(externalId => [externalId, {
+      externalId, status: hasJudgment(externalId) ? "succeeded" : "pending",
+      attempts: scan.triageProcessing?.[externalId]?.attempts ?? 0,
+    } satisfies TriageProcessingOutcome]));
+    updateTriageCoverage();
+    await persistScan(scan);
+    const recordProcessing = async (items: readonly TriageProcessingOutcome[]) => {
+      for (const item of items) {
+        if (!eligibleIds.has(item.externalId)) continue;
+        scan.triageProcessing![item.externalId] = hasJudgment(item.externalId)
+          ? { externalId: item.externalId, attempts: item.attempts, status: "succeeded" }
+          : item.status === "succeeded" ? { externalId: item.externalId, attempts: item.attempts, status: "pending" } : item;
+      }
+      updateTriageCoverage();
+      await persistScan(scan);
+    };
     let triageReturned = 0;
     if (needsTriage.length > 0) {
       if (aiProvider) {
@@ -1448,40 +1749,54 @@ export async function runScan(
         // successfully, and persists each newly-triaged batch as it
         // completes so a future interruption resumes from here too.
         const triaged = await aiProvider.triageConversations({
+          signal: guard.signal,
           business,
           candidates: needsTriage,
           models,
+          compactOutput: scan.runConfiguration.flags.compactTriage,
           // Raised to the max coverageRetries allows (see
           // isNetworkTransportError in openai.server.ts): this budget is
           // now also what absorbs a transient network stall inside triage's
           // batch workers, not just incomplete-coverage responses, and
           // extra attempts cost nothing unless something actually failed.
           coverageRetries: 3,
-          // See tolerateUnrecoverableBatches's doc comment on
-          // TriageConversationsRequest: raising triageCandidateBudget's
-          // default means a scan now fans out to ~2.5x more triage
-          // batches, so one batch that OpenAI can never usably answer
-          // (previously rare) must not fail the whole scan and discard
-          // every other, already-good batch's checkpointed work.
+          // Drain independent batches, then fail incomplete coverage below.
+          // Unresolved processing can never masquerade as negative relevance.
           tolerateUnrecoverableBatches: true,
           resumeFrom: scan.triageCheckpoint
             ? new Map(Object.entries(scan.triageCheckpoint))
             : undefined,
+          resumeProcessing: new Map(Object.entries(scan.triageProcessing)),
+          onProcessingUpdated: recordProcessing,
           onBatchSucceeded: async (items) => {
+            const judgments = items.filter(item => eligibleIds.has(item.externalId) && isUsableTriageJudgment(item.triage, item.externalId));
+            trace.milestone("triage.batch", { completed: judgments.length });
             const next = { ...(scan.triageCheckpoint ?? {}) };
-            for (const item of items) next[item.externalId] = item.triage;
+            for (const item of judgments) {
+              next[item.externalId] = item.triage;
+              scan.triageCheckpointVersions![item.externalId] = inputVersions.get(item.externalId)!;
+              scan.triageProcessing![item.externalId] = { externalId: item.externalId, status: "succeeded", attempts: scan.triageProcessing?.[item.externalId]?.attempts ?? 0 };
+            }
             scan.triageCheckpoint = next;
+            updateTriageCoverage();
             scan.updatedAt = new Date().toISOString();
             try {
-              await repository.saveScan(scan);
+              await persistScan(scan);
             } catch (error) {
               console.error("Failed to checkpoint a successfully triaged batch.", error);
             }
           },
         });
         usage.push(usageRecord(triaged, "triage"));
-        triageReturned = triaged.value.length;
-        for (const item of triaged.value) triageById.set(item.externalId, item.triage);
+        const judgments = triaged.value.filter(item => eligibleIds.has(item.externalId) && isUsableTriageJudgment(item.triage, item.externalId));
+        triageReturned = judgments.length;
+        for (const item of judgments) {
+          triageById.set(item.externalId, item.triage);
+          scan.triageCheckpoint[item.externalId] = item.triage;
+          scan.triageCheckpointVersions![item.externalId] = inputVersions.get(item.externalId)!;
+          scan.triageProcessing![item.externalId] = { externalId: item.externalId, status: "succeeded", attempts: scan.triageProcessing?.[item.externalId]?.attempts ?? 0 };
+        }
+        if (triaged.processing) await recordProcessing(triaged.processing);
       } else {
         const triaged = needsTriage.map((candidate) => localMockTriage(candidate));
         triageReturned = triaged.length;
@@ -1489,12 +1804,28 @@ export async function runScan(
       }
     }
 
-    if (prefilteredSurvivors.some((candidate) => !triageById.has(candidate.externalId))) {
-      throw new Error("Triage coverage is incomplete. The scan will not report a valid zero-result outcome.");
+    for (const id of eligibleIds) {
+      if (!triageById.has(id) && isUsableTriageJudgment(scan.triageCheckpoint?.[id], id)) triageById.set(id, scan.triageCheckpoint![id]);
+    }
+    const missingTriage = prefilteredSurvivors.filter(candidate => !triageById.has(candidate.externalId));
+    for (const candidate of missingTriage) {
+      const prior = scan.triageProcessing![candidate.externalId];
+      if (prior?.status !== "unresolved") scan.triageProcessing![candidate.externalId] = {
+        externalId: candidate.externalId, status: "unresolved", attempts: prior?.attempts ?? 0,
+        code: "ai_coverage_incomplete", recoverable: false,
+      };
+    }
+    updateTriageCoverage();
+    await persistScan(scan);
+    if (missingTriage.length > 0) {
+      throw new ApiError("Triage coverage is incomplete. Successful work was saved; the scan will not report a definitive zero.", 502, "triage_coverage_incomplete");
     }
     const worthEnriching = prefilteredSurvivors.filter(
       (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
     );
+    if (scan.runConfiguration.flags.partialResults) {
+      replaceCandidatePreviews(scan, prefilteredSurvivors, triageById);
+    }
     const zeroResultAuditCandidates = worthEnriching.length === 0
       ? selectZeroResultAuditCandidates({
           candidates: cleaned.survivors,
@@ -1502,7 +1833,7 @@ export async function runScan(
           // Acquisition gets a three-candidate audit. Incremental scans get one
           // independent deep check so a cached/cheap triage false-negative cannot
           // silently turn real demand into a valid-looking zero.
-          budget: Math.min(previousResult ? 2 : 3, enrichmentBudget()),
+          budget: Math.min(previousResult ? 2 : 3, enrichmentBudget(env)),
         })
       : [];
     const triageDetail = zeroResultAuditCandidates.length > 0
@@ -1516,15 +1847,15 @@ export async function runScan(
       : selectCandidatesForEnrichment({
           candidates: worthEnriching,
           triageById,
-          budget: enrichmentBudget(),
+          budget: enrichmentBudget(env),
         });
     const primaryIds = new Set(primaryEnrichmentCandidates.map((candidate) => candidate.externalId));
-    const requiredReviews = minimumFullContextReviews();
+    const requiredReviews = minimumFullContextReviews(env);
     const intelligenceReviewBudget = Math.max(
       0,
       Math.min(
-        enrichmentSelectionTarget(requiredReviews) - primaryEnrichmentCandidates.length,
-        enrichmentBudget() - primaryEnrichmentCandidates.length,
+        enrichmentSelectionTarget(requiredReviews, env) - primaryEnrichmentCandidates.length,
+        enrichmentBudget(env) - primaryEnrichmentCandidates.length,
       ),
     );
     const intelligenceReviewCandidates = selectCandidatesForIntelligenceReview({
@@ -1536,13 +1867,15 @@ export async function runScan(
       ...primaryEnrichmentCandidates,
       ...intelligenceReviewCandidates,
     ];
+    runtimeProgress(scan).deepReview = { target: new Set(selectedForEnrichment.map(row => row.externalId)).size, completed: 0, threadsVerified: 0 };
+    await persistScan(scan);
     let intelligenceCoverageReviews = intelligenceReviewCandidates.length;
     // Review depth is chosen independently of the lookback window, so
     // narrowing the scan to 7 days cannot quietly halve verification quality.
     const requiredFullContextReviews = Math.min(
       requiredReviews,
       cleaned.survivors.length,
-      enrichmentBudget(),
+      enrichmentBudget(env),
     );
     // Verified thread context means the PROVIDER actually fetched full thread
     // context for this specific conversation (provenance.metadata.enriched),
@@ -1567,7 +1900,9 @@ export async function runScan(
     // every conversation is discovery-only by construction, so gating public
     // leads/signals on real verification would zero out every scan's
     // results rather than just being honest about reduced confidence.
-    const enrichmentDisabled = Number(process.env.APIFY_REDDIT_ENRICHMENT_LIMIT ?? 0) === 0;
+    // Only a provider that explicitly reports fetching off relaxes the bar.
+    // An unrelated/absent Apify variable must not relax another provider.
+    const enrichmentDisabled = redditSettings.enrichmentLimit === 0;
     const meetsPublishingContextBar = (conversation: EnrichedRedditConversation): boolean =>
       hasVerifiedThreadContext(conversation) || enrichmentDisabled;
 
@@ -1577,7 +1912,7 @@ export async function runScan(
     // without throwing away the website profile, discovery, and triage already done.
     const initialEnrichment = await redditProvider.enrich({
       candidates: selectedForEnrichment,
-      maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
+      maxComments: Number(env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
     });
     const enrichmentById = new Map<string, EnrichedRedditConversation>();
     let enrichmentRequested = 0;
@@ -1602,7 +1937,7 @@ export async function runScan(
 
     while (
       verifiedContextCount() < requiredFullContextReviews &&
-      selectedForEnrichment.length < Math.min(enrichmentBudget(), cleaned.survivors.length)
+      selectedForEnrichment.length < Math.min(enrichmentBudget(env), cleaned.survivors.length)
     ) {
       const remaining = cleaned.survivors.filter((candidate) => !selectedIds.has(candidate.externalId));
       if (remaining.length === 0) break;
@@ -1633,18 +1968,18 @@ export async function runScan(
       const before = verifiedContextCount();
       const replacementEnrichment = await redditProvider.enrich({
         candidates: [replacementCandidate],
-        maxComments: Number(process.env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
+        maxComments: Number(env.APIFY_REDDIT_ENRICHMENT_COMMENTS ?? 6),
       });
       absorbEnrichment(replacementEnrichment);
       if (verifiedContextCount() > before) enrichmentReplacementSuccesses += 1;
     }
 
-    const enrichmentConversations = selectedForEnrichment.flatMap((candidate) => {
-      const conversation = enrichmentById.get(candidate.externalId);
-      return conversation ? [conversation] : [];
-    });
+    const enrichmentConversations = selectedForEnrichment.map((candidate) =>
+      enrichmentById.get(candidate.externalId) ?? discoveryOnlyReview(candidate),
+    );
     const enrichedSuccessfully = enrichmentConversations.filter(hasVerifiedThreadContext).length;
-    const enrichmentFailures = Math.max(0, selectedForEnrichment.length - enrichedSuccessfully);
+    const discoveryOnlyCount = Math.max(0, selectedForEnrichment.length - enrichedSuccessfully);
+    const enrichmentFailures = enrichmentDisabled ? 0 : discoveryOnlyCount;
     const coverageLimited = enrichedSuccessfully < requiredFullContextReviews;
     const enrichment = {
       conversations: enrichmentConversations,
@@ -1653,18 +1988,25 @@ export async function runScan(
         requested: enrichmentRequested,
         enriched: enrichedSuccessfully,
         failed: enrichmentFailures,
-        fallbackUsed: enrichmentFailures,
+        fallbackUsed: discoveryOnlyCount,
         ...(enrichmentFailureReasons.length > 0
           ? { failureReason: enrichmentFailureReasons.join(" | ").slice(0, 1_500) }
           : {}),
       },
     };
 
+    runtimeProgress(scan).deepReview.target = new Set(enrichmentConversations.map(row => row.externalId)).size;
+    // Synthetic fixture context is not an actually fetched public thread.
+    runtimeProgress(scan).deepReview.threadsVerified = new Set(enrichmentConversations
+      .filter(row => row.sourceMode !== "mock" && row.provenance.metadata?.enriched === true).map(row => row.externalId)).size;
+
     await setStage(
       scan,
       "enrichment",
       "complete",
-      coverageLimited
+      enrichmentDisabled
+        ? `${enrichmentConversations.length} conversations retained for deep AI review using discovery evidence. Thread fetching is disabled; 0 additional threads verified.`
+        : coverageLimited
         ? `${enrichedSuccessfully} conversation${enrichedSuccessfully === 1 ? "" : "s"} received verified thread context; the ${requiredFullContextReviews}-conversation confidence target was not fully reached after ${enrichmentReplacementAttempts} replacement attempt${enrichmentReplacementAttempts === 1 ? "" : "s"}. The scan will continue and will not present a definitive zero.`
         : `${enrichedSuccessfully} conversation${enrichedSuccessfully === 1 ? "" : "s"} received verified thread context; ${enrichmentFailures} selected conversation${enrichmentFailures === 1 ? "" : "s"} remained discovery-only after bounded recovery.`,
     );
@@ -1735,10 +2077,13 @@ export async function runScan(
     }
 
     if (enrichment.conversations.some((conversation) => !deepById.has(conversation.externalId))) {
+      runtimeProgress(scan).deepReview.completed = deepById.size;
+      await persistScan(scan);
       throw new Error("Deep qualification coverage is incomplete. The scan will not convert model failure into zero customers.");
     }
 
     const deepRows = [...deepById.values()];
+    runtimeProgress(scan).deepReview.completed = deepById.size;
     // A discovery-only fallback may still look promising to deep AI. Keep that
     // provisional judgment in the transparent scan trace, but never promote it
     // to a public lead or market-intelligence claim without meeting the
@@ -1775,7 +2120,7 @@ export async function runScan(
     const marketIntelligence: MarketIntelligenceRecord[] = dedupeMarketIntelligenceRecords(relevantDeepRows.map((row) => {
       const qualification = row.qualification;
       return {
-        id: createId("intel"),
+        id: stableScanOutputId("intel", scan.id, row.externalId),
         sourceId: row.conversation.provenance.id,
         externalId: row.externalId,
         title: row.conversation.title ?? "Reddit conversation signal",
@@ -1794,7 +2139,7 @@ export async function runScan(
         // is decided independently of leadStatus. Reserve a stable id now so a
         // reply drafted for it later can be linked without becoming an
         // opportunity/lead record.
-        replyId: qualification.shouldReply === true ? createId("reply") : undefined,
+        replyId: qualification.shouldReply === true ? stableScanOutputId("reply", scan.id, `intel:${row.externalId}`) : undefined,
       };
     }));
 
@@ -1856,11 +2201,11 @@ export async function runScan(
         classifiedComplaintScore: qualification.demandSignals.includes("switching") ? 1 : 0,
         classifiedCompetitor: qualification.competitorMentioned,
       });
-      const replyId = createId("reply");
+      const replyId = stableScanOutputId("reply", scan.id, `opportunity:${conversation.externalId}`);
       const priorState = previousStates.get(`${conversation.provider}:${conversation.externalId}`) ??
         previousStates.get(`${conversation.sourceMode === "apify-test" ? "apify-test" : conversation.provider}:${conversation.externalId}`);
       return [{
-        id: createId("opp"),
+        id: stableScanOutputId("opp", scan.id, conversation.externalId),
         sourceId: conversation.provenance.id,
         title: conversation.title ?? "Relevant Reddit conversation",
         excerpt: conversation.body,
@@ -1942,6 +2287,22 @@ export async function runScan(
       }];
     });
 
+    runtimeProgress(scan).results.qualifiedPeople = aggregated.summary.total;
+    runtimeProgress(scan).results.relevantConversations = new Set(marketIntelligence.map(row => row.externalId)).size;
+    if (scan.runConfiguration.flags.partialResults) {
+      const deepExternalBySource = new Map(deepRows.map(row => [row.conversation.provenance.id, row]));
+      const leadSourceIds = new Set(opportunities.map(row => row.sourceId));
+      replaceQualifiedPartialResults(scan, {
+        opportunities: opportunities.flatMap(record => {
+          const row = deepExternalBySource.get(record.sourceId);
+          return row ? [{ externalId: row.externalId, record, source: redditProvenance(row.conversation) }] : [];
+        }),
+        intelligence: marketIntelligence.filter(record => !leadSourceIds.has(record.sourceId)).flatMap(record => {
+          const row = deepExternalBySource.get(record.sourceId);
+          return row ? [{ externalId: row.externalId, record, source: redditProvenance(row.conversation) }] : [];
+        }),
+      });
+    }
     await setStage(
       scan,
       "qualification",
@@ -1952,21 +2313,27 @@ export async function runScan(
     );
 
     const fallbackInsightSet = buildFallbackInsights(opportunities);
-    let insightSet = fallbackInsightSet;
-    if (aiProvider && relevantDeepRows.length > 0) {
-      try {
-        const generated = await aiProvider.generateInsights({
-          business,
-          opportunities: qualifiedOpportunities,
-          evidenceConversations: relevantDeepRows,
-          models,
-        });
-        usage.push(usageRecord(generated, "insight-generation"));
-        const reviewedRedditSourceIds = new Set(
-          relevantDeepRows.map((row) => row.conversation.provenance.id),
-        );
-        const seenEvidenceSets = new Set<string>();
-        const generatedInsights: DemandInsightRecord[] = generated.value.demandInsights.flatMap((insight) => {
+    runtimeProgress(scan).insights = aiProvider && relevantDeepRows.length > 0 ? "active" : "complete";
+    await persistScan(scan);
+    // Insight decoration and reply drafting consume the same immutable,
+    // evidence-gated qualification set. Start insights now; the provider's
+    // shared request gate coordinates capacity with the reply queue below.
+    const insightPromise = (async () => {
+      let insightSet = fallbackInsightSet;
+      if (aiProvider && relevantDeepRows.length > 0) {
+        try {
+          const generated = await aiProvider.generateInsights({
+            business,
+            opportunities: qualifiedOpportunities,
+            evidenceConversations: relevantDeepRows,
+            models,
+          });
+          usage.push(usageRecord(generated, "insight-generation"));
+          const reviewedRedditSourceIds = new Set(
+            relevantDeepRows.map((row) => row.conversation.provenance.id),
+          );
+          const seenEvidenceSets = new Set<string>();
+          const generatedInsights: DemandInsightRecord[] = generated.value.demandInsights.flatMap((insight) => {
           const sourceIds = [...new Set(insight.provenanceIds)]
             .filter((sourceId) => reviewedRedditSourceIds.has(sourceId))
             .sort();
@@ -2029,77 +2396,25 @@ export async function runScan(
               ),
             }
           : fallbackInsightSet.weakness;
-        insightSet = { insights: combinedInsights, weakness };
-      } catch (error) {
-        console.error("OpenAI insight generation failed; using deterministic sourced insights", error);
+          insightSet = { insights: combinedInsights, weakness };
+          runtimeProgress(scan).insights = "complete";
+        } catch (error) {
+          runtimeProgress(scan).insights = "fallback";
+          console.error("OpenAI insight generation failed; using deterministic sourced insights", error);
+        }
       }
-    }
+      await persistScan(scan);
+      return insightSet;
+    })();
 
     await setStage(scan, "replies", "active");
     const now = new Date().toISOString();
-    const replies: ReplyRecord[] = [];
     // Reply generation is bounded, so ordering decides which conversations get
     // a drafted reply. That has to be reply value, not lead value: the best
     // thread to answer is often not the strongest buyer.
     const replyEligible = [...opportunities]
       .filter((opportunity) => opportunity.shouldReply === true)
       .sort((left, right) => right.replyScore - left.replyScore);
-    // Every opportunity's reply is fully independent of every other's --
-    // drafting them one at a time in a plain loop was pure wasted
-    // wall-clock time for scans with several reply-eligible opportunities.
-    // mapConcurrently preserves the exact same per-item logic (including
-    // the "must produce a grounded reply or the scan fails" invariant,
-    // since a throw inside it still rejects the whole call) while running
-    // up to REPLY_GENERATION_CONCURRENCY of them at once.
-    const replyDrafts = await mapConcurrently(replyEligible, REPLY_GENERATION_CONCURRENCY, async (opportunity) => {
-      const row = qualifiedOpportunities.find((qualified) => qualified.id === opportunity.id);
-      let content = "";
-      const previousOpportunity = previousBySource.get(opportunity.sourceId);
-      const previousReply = previousOpportunity ? previousReplies.get(previousOpportunity.id) : undefined;
-      const state = previousStates.get(`${row?.conversation.sourceMode === "apify-test" ? "apify-test" : row?.conversation.provider}:${row?.conversation.externalId}`);
-      const currentContextHash = row ? structuredContextHash(row.conversation) : null;
-      if (
-        previousReply?.content.trim() &&
-        state &&
-        row &&
-        state.contentHash === row.conversation.provenance.contentHash &&
-        state.contextHash !== null &&
-        state.contextHash === currentContextHash
-      ) {
-        content = previousReply.content;
-      } else if (row && aiProvider) {
-        const generated = await aiProvider.generateReply({
-          business,
-          opportunity: row,
-          models,
-          instructions: row.qualification.replyAngle,
-        });
-        usage.push(usageRecord(generated, "reply-generation"));
-        content = generated.value.body.trim();
-      } else if (row && discovery.sourceMode === "mock") {
-        content = fallbackReply(profile);
-      }
-      if (!content) {
-        throw new Error("A reply-eligible opportunity did not produce a grounded reply.");
-      }
-      const draft: ReplyRecord = {
-        id: opportunity.replyId,
-        opportunityId: opportunity.id,
-        workspaceId: scan.workspaceId,
-        scanId: scan.id,
-        content,
-        status: "draft",
-        generation: 1,
-        createdAt: now,
-        updatedAt: now,
-        publishedAt: null,
-        publishedUrl: null,
-        publishedVia: null,
-        redditCommentId: null,
-      };
-      return draft;
-    });
-    replies.push(...replyDrafts);
     // Relevant (non-lead) conversations classify shouldReply independently of
     // leadStatus: a conversation can be genuinely useful market signal -- and
     // deserve a helpful, disclosed reply -- without being a potential
@@ -2110,79 +2425,91 @@ export async function runScan(
     const relevantReplyEligible = marketIntelligence.filter(
       (intelligence) => intelligence.replyId && !leadSourceIds.has(intelligence.sourceId),
     );
-    // Same independence argument as replyEligible above -- these also run
-    // concurrently. Unlike that loop, a single conversation's generation
-    // failure must not fail the scan (see the comment inside), so each
-    // item's own try/catch returns null on failure instead of throwing;
-    // mapConcurrently preserves per-item results at their original index
-    // regardless of which ones resolve first.
-    const relevantReplyDrafts = await mapConcurrently(
-      relevantReplyEligible,
-      REPLY_GENERATION_CONCURRENCY,
-      async (intelligence): Promise<ReplyRecord | null> => {
-        const row = relevantDeepRows.find(
-          (candidate) => candidate.conversation.provenance.id === intelligence.sourceId,
-        );
-        if (!row) return null;
-        let content = "";
-        if (aiProvider) {
-          const qualifiedRow = {
-            id: intelligence.id,
-            workspaceId: scan.workspaceId,
-            businessId,
-            conversation: row.conversation,
-            qualification: row.qualification,
-            classification: legacyClassificationFromDeep(row.qualification),
-            rankScore: Math.max(0, Math.min(1, (intelligence.replyScore ?? 0) / 100)),
-            status: "new" as const,
-            provenanceIds: [intelligence.sourceId],
-            discoveredAt: row.conversation.createdAt,
-          };
-          try {
-            const generated = await aiProvider.generateReply({
-              business,
-              opportunity: qualifiedRow,
-              models,
-              instructions: row.qualification.replyAngle,
-            });
-            usage.push(usageRecord(generated, "reply-generation"));
-            content = generated.value.body.trim();
-          } catch (error) {
-            // A relevant conversation's reply is best-effort, not the strict
-            // per-lead invariant: it is still fully useful as research evidence
-            // without a drafted reply, so a generation failure here must not
-            // fail the scan.
-            console.error("Relevant-conversation reply generation failed", error);
-          }
-        } else if (discovery.sourceMode === "mock") {
-          content = fallbackReply(profile);
+    type ReplyTask = { strict: boolean; replyId: string; opportunityId: string;
+      row: QualifiedOpportunity & { conversation: EnrichedRedditConversation }; previousContent?: string };
+    const leadTasks: ReplyTask[] = replyEligible.flatMap(opportunity => {
+      const row = qualifiedOpportunities.find(qualified => qualified.id === opportunity.id);
+      if (!row) return [];
+      const previousOpportunity = previousBySource.get(opportunity.sourceId);
+      const previousReply = previousOpportunity ? previousReplies.get(previousOpportunity.id) : undefined;
+      const state = previousStates.get(`${row.conversation.sourceMode === "apify-test" ? "apify-test" : row.conversation.provider}:${row.conversation.externalId}`);
+      const currentContextHash = structuredContextHash(row.conversation);
+      const previousContent = previousReply?.content.trim() && state && state.contentHash === row.conversation.provenance.contentHash
+        && state.contextHash !== null && state.contextHash === currentContextHash ? previousReply.content : undefined;
+      return [{ strict: true, replyId: opportunity.replyId, opportunityId: opportunity.id, row, previousContent }];
+    });
+    const relevantTasks: ReplyTask[] = relevantReplyEligible.flatMap(intelligence => {
+      const source = relevantDeepRows.find(candidate => candidate.conversation.provenance.id === intelligence.sourceId);
+      if (!source) return [];
+      return [{ strict: false, replyId: intelligence.replyId!, opportunityId: intelligence.id,
+        row: { id: intelligence.id, workspaceId: scan.workspaceId, businessId, conversation: source.conversation,
+          qualification: source.qualification, classification: legacyClassificationFromDeep(source.qualification),
+          rankScore: Math.max(0, Math.min(1, (intelligence.replyScore ?? 0) / 100)), status: "new" as const,
+          provenanceIds: [intelligence.sourceId], discoveredAt: source.conversation.createdAt } }];
+    });
+    const replyTasks = [...leadTasks, ...relevantTasks];
+    const replyTaskIds = new Set(replyTasks.map(task => task.replyId));
+    scan.replyCheckpoint = Object.fromEntries(Object.entries(scan.replyCheckpoint ?? {}).filter(([id]) => replyTaskIds.has(id)));
+    const existingReplies = new Map((await repository.listRepliesForScan(scan.id)).map(reply => [reply.id, reply]));
+    const placeholder = (task: ReplyTask): ReplyRecord => ({ id: task.replyId, opportunityId: task.opportunityId,
+      workspaceId: scan.workspaceId, scanId: scan.id, content: "", status: "draft", generation: 1,
+      createdAt: scan.createdAt, updatedAt: scan.createdAt, publishedAt: null, publishedUrl: null,
+      publishedVia: null, redditCommentId: null });
+    if (scan.runConfiguration.flags.partialResults) {
+      let changed = removePartialRepliesExcept(scan, replyTaskIds);
+      for (const task of replyTasks) {
+        const version = replyInputVersion({ business, models, conversation: task.row.conversation,
+          qualification: task.row.qualification, instructions: task.row.qualification.replyAngle });
+        const checkpoint = scan.replyCheckpoint[task.replyId];
+        const saved = checkpoint?.inputVersion === version ? existingReplies.get(task.replyId) ?? checkpoint.reply : undefined;
+        changed = publishPartialReply(scan, saved ?? placeholder(task), saved ? "ready" : "pending") || changed;
+      }
+      if (changed) await persistScan(scan);
+    }
+    let replyFailure: unknown;
+    let replyDrafts: Array<ReplyRecord | null> = [];
+    try { replyDrafts = await mapConcurrently(replyTasks, REPLY_GENERATION_CONCURRENCY, async (task): Promise<ReplyRecord | null> => {
+      const inputVersion = replyInputVersion({ business, models, conversation: task.row.conversation,
+        qualification: task.row.qualification, instructions: task.row.qualification.replyAngle });
+      const checkpoint = scan.replyCheckpoint![task.replyId];
+      const sameScan = checkpoint?.inputVersion === inputVersion
+        ? existingReplies.get(task.replyId) ?? checkpoint.reply : undefined;
+      try {
+        let content = sameScan?.content.trim() ? sameScan.content : task.previousContent ?? "";
+        if (!content && aiProvider) {
+          const generated = await aiProvider.generateReply({ business, opportunity: task.row, models,
+            instructions: task.row.qualification.replyAngle });
+          usage.push(usageRecord(generated, "reply-generation"));
+          content = generated.value.body.trim();
+        } else if (!content && discovery.sourceMode === "mock") content = fallbackReply(profile);
+        if (!content) throw new Error("A reply-eligible conversation did not produce a grounded reply.");
+        const draft: ReplyRecord = sameScan?.content.trim() ? sameScan : { ...placeholder(task), content, createdAt: now, updatedAt: now };
+        await repository.saveReply(draft, owner);
+        scan.replyCheckpoint![task.replyId] = { inputVersion, reply: draft };
+        if (scan.runConfiguration!.flags.partialResults) publishPartialReply(scan, draft, "ready");
+        runtimeProgress(scan).results.repliesReady = new Set(Object.values(scan.replyCheckpoint!).map(value => value.reply.id)).size;
+        await persistScan(scan);
+        return draft;
+      } catch (error) {
+        if (scan.runConfiguration!.flags.partialResults) {
+          publishPartialReply(scan, placeholder(task), "failed");
+          await persistScan(scan);
         }
-        if (!content) return null;
-        return {
-          id: intelligence.replyId!,
-          opportunityId: intelligence.id,
-          workspaceId: scan.workspaceId,
-          scanId: scan.id,
-          content,
-          status: "draft",
-          generation: 1,
-          createdAt: now,
-          updatedAt: now,
-          publishedAt: null,
-          publishedUrl: null,
-          publishedVia: null,
-          redditCommentId: null,
-        };
-      },
-    );
-    replies.push(...relevantReplyDrafts.filter((reply): reply is ReplyRecord => reply !== null));
-    await Promise.all(replies.map((reply) => repository.saveReply(reply)));
+        if (task.strict) throw error;
+        console.error("Relevant-conversation reply generation failed", error);
+        return null;
+      }
+    }); } catch (error) { replyFailure = error; }
+    const insightSet = await insightPromise;
+    if (replyFailure) throw replyFailure;
+    const replies = replyDrafts.filter((reply): reply is ReplyRecord => reply !== null);
+    runtimeProgress(scan).results.repliesReady = new Set(replies.map(reply => reply.id)).size;
     await setStage(
       scan,
       "replies",
       "complete",
       replies.length > 0
-        ? `${replies.length} complete grounded repl${replies.length === 1 ? "y" : "ies"} prepared for ${replies.length === 1 ? "the qualified opportunity" : "all qualified opportunities"}.`
+        ? `${replies.length} complete grounded repl${replies.length === 1 ? "y" : "ies"} prepared for qualified conversations.`
         : "No conversation was appropriate for reply generation in this scan.",
     );
 
@@ -2229,17 +2556,7 @@ export async function runScan(
       };
     });
 
-    const redditSources: Provenance[] = deepRows.map(({ conversation }) => ({
-      id: conversation.provenance.id,
-      kind: "reddit",
-      url: conversation.permalink ?? "",
-      title: conversation.title ?? "Reddit conversation",
-      excerpt: conversation.body.slice(0, 280),
-      capturedAt: conversation.provenance.observedAt,
-      synthetic: conversation.sourceMode === "mock",
-      provider: conversation.provider,
-      sourceMode: conversation.sourceMode,
-    }));
+    const redditSources: Provenance[] = deepRows.map(({ conversation }) => redditProvenance(conversation));
 
     const providerRejectedCount = Object.values(discovery.diagnostics.rejectedByReason)
       .reduce((sum, count) => sum + count, 0);
@@ -2335,19 +2652,30 @@ export async function runScan(
       },
     };
     scan.status = "complete";
-    scan.updatedAt = new Date().toISOString();
-    await repository.saveScan(scan);
-    await captureFunnelEvent(scan, "scan_completed");
+    const completedAt = new Date().toISOString();
+    if (scan.timing) {
+      scan.timing.firstResultAt ??= completedAt;
+      if (opportunities.length > 0 || marketIntelligence.length > 0) scan.timing.firstQualifiedAt ??= completedAt;
+      scan.timing.finishedAt = completedAt;
+    }
+    trace.milestone("scan.results_ready", { firstResult: true, completed: opportunities.length });
+    scan.phase = "complete";
     if (scan.scanKind !== "monitoring") {
-      // AI Visibility Tracking is a sidecar (see ai-visibility-workflow.ts):
-      // best-effort only. Nothing about it may ever fail, delay, or retry
-      // the primary scan this business-setup completion belongs to.
+      scan.completionNotice ??= { version: "scan-complete-v1", createdAt: completedAt, readAt: null };
+    }
+    scan.updatedAt = completedAt;
+    await persistScan(scan);
+    if (scan.scanKind !== "monitoring") {
+      // Best-effort sidecar: never fail, delay, or retry the primary scan.
       void ensureAiVisibilityTrackingStarted(scan).catch((error) => {
         console.error("Could not start AI visibility tracking.", error);
       });
     }
+    await captureFunnelEvent(scan, "scan_completed");
     return scan;
   } catch (error) {
+    await discoveryTriage?.stop();
+    if (guard.signal.aborted || error instanceof ScanOwnershipLostError) throw new ScanOwnershipLostError();
     const message =
       error instanceof UnsafeWebsiteUrlError
         ? error.message
@@ -2364,6 +2692,9 @@ export async function runScan(
     // the error is one retrying cannot fix.
     const jobWillRetry = jobWillRetryScanFailure({ code, jobAttempts: options.jobAttempts, jobMaxAttempts: options.jobMaxAttempts });
     scan.status = jobWillRetry ? "retrying" : "failed";
+    if (!jobWillRetry) scan.phase = "failed";
+    if (!jobWillRetry && scan.timing) scan.timing.finishedAt = new Date().toISOString();
+    trace.milestone("scan.failure", { category: code ?? "scan_failed" });
     scan.error = message;
     scan.errorCode = code ?? null;
     scan.progress = scan.progress.map((stage) => {
@@ -2377,8 +2708,16 @@ export async function runScan(
       return { ...stage, status: "failed" as const, detail: message };
     });
     scan.updatedAt = new Date().toISOString();
-    await repository.saveScan(scan);
+    await persistScan(scan);
     throw error;
+  } finally {
+    await discoveryTriage?.stop();
+    await guard.stop();
+    scanExecutions.delete(scan);
+    const succeeded = scan.status === "complete" || (options.stopAfterUnderstanding && scan.status === "queued");
+    for (const finish of scanTraces.get(scan)?.stages.values() ?? []) finish(succeeded ? "succeeded" : "failed");
+    finishExecution(succeeded ? "succeeded" : "failed");
+    scanTraces.delete(scan);
   }
 }
 

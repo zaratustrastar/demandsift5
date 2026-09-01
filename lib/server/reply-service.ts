@@ -1,6 +1,8 @@
 import type { BusinessUnderstanding, DeepQualification, QualifiedOpportunity } from "@/lib/domain/types";
 import { contentFingerprint, isUsefulSearchPhrase } from "@/lib/intelligence/opportunity-ranking";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
+import { aiCapacityFromEnv } from "@/lib/ai/capacity";
+import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 import type { OpportunityRecord, ReplyRecord, ScanBusinessProfile, UsageRecord } from "./contracts";
 import { ApiError } from "./http";
 import { getStateRepository } from "./repository";
@@ -195,7 +197,11 @@ export async function regenerateReply(input: {
   if (process.env.OPENAI_API_KEY?.trim()) {
     try {
       const business = businessFromProfile(input.profile, input.reply.workspaceId);
-      const provider = createOpenAiProviderFromEnv();
+      const capacity = aiCapacityFromEnv();
+      const provider = createOpenAiProviderFromEnv(process.env, { requestGate: globallyBoundedAiRequestGate({
+        workspaceId: input.reply.workspaceId, localLimit: capacity.requestConcurrency,
+        holderPrefix: `reply:${input.reply.id}`,
+      }) });
       const generated = await provider.generateReply({
         business,
         opportunity: qualifiedOpportunity(input.opportunity, business),

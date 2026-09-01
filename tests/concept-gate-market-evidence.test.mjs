@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
 /**
  * Concept gating regression suite.
@@ -16,62 +15,7 @@ import ts from "typescript";
  * each satisfiable by synonyms, with buying intent as an optional booster.
  */
 
-const moduleUrl = (source) =>
-  `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-
-const compile = (source, fileName) =>
-  ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-    fileName,
-  }).outputText;
-
-async function loadRedditProvider() {
-  const typesStub = moduleUrl("export {};");
-  const rankingSource = await readFile(
-    new URL("../lib/intelligence/opportunity-ranking.ts", import.meta.url),
-    "utf8",
-  );
-  const ranking = moduleUrl(
-    compile(
-      rankingSource.replaceAll('"@/lib/domain/types"', JSON.stringify(typesStub)),
-      "opportunity-ranking.ts",
-    ),
-  );
-  let source = await readFile(
-    new URL("../lib/providers/reddit.server.ts", import.meta.url),
-    "utf8",
-  );
-  const apifyRetrySource = await readFile(
-    new URL("../lib/providers/apify-retry.ts", import.meta.url),
-    "utf8",
-  );
-  const apifyRetry = moduleUrl(compile(apifyRetrySource, "apify-retry.ts"));
-  const resilienceSource = await readFile(
-    new URL("../lib/server/resilience.ts", import.meta.url),
-    "utf8",
-  );
-  const resilience = moduleUrl(compile(resilienceSource, "resilience.ts"));
-  const replacements = {
-    "@/lib/providers/reddit-harshmaur.server": "data:text/javascript;base64,ZXhwb3J0IGNsYXNzIEhhcnNobWF1clJlZGRpdFByb3ZpZGVyIHt9",
-    "@/lib/providers/mock-reddit": moduleUrl(
-      "export class MockRedditProvider { name='mock-reddit'; sourceMode='mock'; async search(){return {conversations:[],sourceMode:'mock'};} }",
-    ),
-    "@/lib/intelligence/opportunity-ranking": ranking,
-    "@/lib/server/runtime-env": moduleUrl(
-      "export function isProductionRuntime(env=process.env){return (env.APP_RUNTIME_ENV||env.NODE_ENV)==='production';}",
-    ),
-    "@/lib/providers/contracts": typesStub,
-    "@/lib/domain/types": typesStub,
-    "@/lib/providers/apify-retry": apifyRetry,
-    "@/lib/server/resilience": resilience,
-  };
-  for (const [specifier, replacement] of Object.entries(replacements)) {
-    source = source.replaceAll(`"${specifier}"`, JSON.stringify(replacement));
-  }
-  return import(moduleUrl(compile(source, "reddit.server.ts")));
-}
-
-const reddit = await loadRedditProvider();
+const reddit = await loadTsModule("lib/providers/reddit.server.ts");
 
 const tvcp = {
   queries: {

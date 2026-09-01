@@ -6,21 +6,17 @@ import ts from "typescript";
 /**
  * Reply generation (the "replies" stage in scan-workflow.ts) used to draft
  * one reply at a time, in a plain `for` loop, across two separate passes
- * (reply-eligible opportunities, then relevant-but-non-lead conversations)
- * -- one aiProvider.generateReply() AI call per item, sequentially, even
- * though each reply is fully independent of every other. Both loops now
- * run through the shared mapConcurrently() helper (bounded by
- * REPLY_GENERATION_CONCURRENCY), the same worker-pool pattern already
- * proven for triage batches and website crawling.
+ * (reply-eligible opportunities, then relevant-but-non-lead conversations).
+ * Both classes now share one priority-ordered queue through the bounded
+ * mapConcurrently() helper. Independent workers drain before a required
+ * failure is rethrown, allowing completed drafts to survive and be reused.
  *
  * mapConcurrently itself is dependency-free (pure Promise/Array logic), so
  * these tests extract and compile just that function from the real source
  * -- not a reimplementation -- and exercise it directly, the same way
  * ai-visibility-tracking.test.mjs isolates ai-visibility-analysis.ts.
- * Source-level checks separately confirm both call sites in
- * scan-workflow.ts actually use it, and preserve the strict
- * (throw-on-missing-content) vs. best-effort (catch-and-skip) semantics
- * each loop relied on before this change.
+ * Source-level checks separately confirm the workflow uses the unified
+ * queue and preserves strict required versus best-effort failure semantics.
  */
 
 const scanWorkflowSource = await readFile(
@@ -111,7 +107,7 @@ test("concurrency is bounded, not unlimited", async () => {
   assert.ok(peak <= 3, `expected at most 3 concurrent, saw ${peak}`);
 });
 
-test("a thrown error from any item rejects the whole call -- the strict, fail-fast contract the reply-eligible-opportunities loop relies on", async () => {
+test("a thrown error rejects after independent sibling workers have drained", async () => {
   const attempted = [];
   await assert.rejects(
     mapConcurrently([1, 2, 3], 3, async (item) => {
@@ -138,32 +134,32 @@ test("empty input returns an empty array without spawning any workers", async ()
   assert.equal(calls, 0);
 });
 
-test("both reply-generation loops in scan-workflow.ts use mapConcurrently, not a plain sequential for loop", () => {
+test("lead and relevant-conversation replies share one bounded queue", () => {
   assert.match(
     scanWorkflowSource,
-    /const replyDrafts = await mapConcurrently\(replyEligible, REPLY_GENERATION_CONCURRENCY, async \(opportunity\) => \{/,
+    /const replyTasks = \[\.\.\.leadTasks, \.\.\.relevantTasks\];/,
   );
   assert.match(
     scanWorkflowSource,
-    /const relevantReplyDrafts = await mapConcurrently\(\s*relevantReplyEligible,\s*REPLY_GENERATION_CONCURRENCY,/,
+    /mapConcurrently\(replyTasks, REPLY_GENERATION_CONCURRENCY,/,
   );
   assert.equal(scanWorkflowSource.includes("for (const opportunity of replyEligible)"), false);
-  assert.equal(scanWorkflowSource.includes("for (const intelligence of relevantReplyEligible)"), false);
+  assert.equal(scanWorkflowSource.includes("mapConcurrently(relevantReplyEligible"), false);
 });
 
-test("the strict loop still throws (not catches) on a missing grounded reply -- fails the whole scan, same as before", () => {
-  const start = scanWorkflowSource.indexOf("const replyDrafts = await mapConcurrently(replyEligible");
-  const end = scanWorkflowSource.indexOf("replies.push(...replyDrafts);", start);
+test("required lead reply failure still fails the scan", () => {
+  const start = scanWorkflowSource.indexOf("try { replyDrafts = await mapConcurrently(replyTasks");
+  const end = scanWorkflowSource.indexOf("const insightSet = await insightPromise", start);
   const block = scanWorkflowSource.slice(start, end);
-  assert.match(block, /throw new Error\("A reply-eligible opportunity did not produce a grounded reply\."\);/);
-  assert.equal(block.includes("catch"), false, "the strict loop must not swallow its own failure");
+  assert.match(block, /throw new Error\("A reply-eligible conversation did not produce a grounded reply\."\);/);
+  assert.match(block, /if \(task\.strict\) throw error;/);
 });
 
-test("the best-effort loop still catches its own generation failure and returns null instead of throwing", () => {
-  const start = scanWorkflowSource.indexOf("const relevantReplyDrafts = await mapConcurrently(");
-  const end = scanWorkflowSource.indexOf("replies.push(...relevantReplyDrafts", start);
+test("best-effort relevant reply failure remains isolated", () => {
+  const start = scanWorkflowSource.indexOf("try { replyDrafts = await mapConcurrently(replyTasks");
+  const end = scanWorkflowSource.indexOf("const insightSet = await insightPromise", start);
   const block = scanWorkflowSource.slice(start, end);
   assert.match(block, /catch \(error\) \{/);
   assert.match(block, /console\.error\("Relevant-conversation reply generation failed", error\);/);
-  assert.match(block, /if \(!content\) return null;/);
+  assert.match(block, /return null;/);
 });

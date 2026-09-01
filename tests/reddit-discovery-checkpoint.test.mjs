@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { loadTsModule } from "./helpers/load-ts-module.mjs";
 
 /**
  * Regression coverage for a real production incident: a scan interrupted
@@ -23,46 +22,7 @@ import ts from "typescript";
  * tests/reddit-provider-selection.test.mjs.
  */
 
-const u = (c) => `data:text/javascript;base64,${Buffer.from(c).toString("base64")}`;
-const cc = (s, f) => ts.transpileModule(s, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  fileName: f,
-}).outputText;
-
-const here = (p) => new URL(p, import.meta.url);
-const stub = u("export {};");
-
-const ranking = u(cc(
-  (await readFile(here("../lib/intelligence/opportunity-ranking.ts"), "utf8"))
-    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub)), "r.ts"));
-const natural = u(cc(
-  (await readFile(here("../lib/providers/reddit-natural-queries.ts"), "utf8"))
-    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking)), "n.ts"));
-const queryFamilies = u(cc(
-  (await readFile(here("../lib/providers/reddit-query-families.ts"), "utf8"))
-    .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-    .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-    .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-    .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural)), "qf.ts"));
-const searchUrl = u(cc(
-  await readFile(here("../lib/providers/reddit-search-url.ts"), "utf8"), "su.ts"));
-const apifyRetry = u(cc(
-  await readFile(here("../lib/providers/apify-retry.ts"), "utf8"), "ar.ts"));
-const resilience = u(cc(
-  await readFile(here("../lib/server/resilience.ts"), "utf8"), "res.ts"));
-
-let harshSrc = await readFile(here("../lib/providers/reddit-harshmaur.server.ts"), "utf8");
-harshSrc = harshSrc
-  .replaceAll('"@/lib/domain/types"', JSON.stringify(stub))
-  .replaceAll('"@/lib/providers/contracts"', JSON.stringify(stub))
-  .replaceAll('"@/lib/intelligence/opportunity-ranking"', JSON.stringify(ranking))
-  .replaceAll('"@/lib/providers/reddit-natural-queries"', JSON.stringify(natural))
-  .replaceAll('"@/lib/providers/reddit-query-families"', JSON.stringify(queryFamilies))
-  .replaceAll('"@/lib/providers/reddit-search-url"', JSON.stringify(searchUrl))
-  .replaceAll('"@/lib/providers/apify-retry"', JSON.stringify(apifyRetry))
-  .replaceAll('"@/lib/server/resilience"', JSON.stringify(resilience));
-const { HarshmaurRedditProvider } = await import(u(cc(harshSrc, "h.ts")));
+const { HarshmaurRedditProvider } = await loadTsModule("lib/providers/reddit-harshmaur.server.ts");
 
 // Exactly one source per lane -> exactly 3 query families, one per lane.
 const business = {
@@ -183,7 +143,10 @@ test("resumeFrom covering every query skips discovery entirely -- zero new actor
   const result = await resumedProvider.discover(business, { resumeFrom: full });
 
   assert.equal(secondStub.starts.length, 0, "every query was already covered by the checkpoint");
-  assert.equal(result, full, "the checkpoint is returned directly, not recomputed");
+  assert.equal(result.candidates, full.candidates, "candidate evidence is reused, not recomputed");
+  assert.equal(result.searchPlan, full.searchPlan);
+  assert.equal(result.diagnostics.queriesSucceeded, 3);
+  assert.equal(result.diagnostics.queriesFailed, 0);
 });
 
 test("resumeFrom covering 2 of 3 queries only fetches the missing one, and merges it into the checkpoint", async () => {
@@ -263,7 +226,23 @@ test("if every remaining query fails, resumeFrom's own results are returned rath
   };
   const result = await provider.discover(business, { resumeFrom: partial, onChunkSucceeded });
 
-  assert.equal(result, partial);
+  assert.equal(result.candidates, partial.candidates);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.queriesSucceeded, 1);
+  assert.equal(result.diagnostics.queriesFailed, 2);
+});
+
+test("a single remaining failed query still propagates failure for the existing job retry path", async () => {
+  const seedProvider = new HarshmaurRedditProvider({ token: "test-token", queriesPerRun: 1, fetchImpl: makeStub() });
+  const full = await seedProvider.discover(business);
+  const partial = { ...full, searchPlan: full.searchPlan.slice(0, 2) };
+  const missing = full.searchPlan[2].query;
+  const stub = makeStub({ failQueries: new Set([missing]) });
+  const provider = new HarshmaurRedditProvider({ token: "test-token", queriesPerRun: 1, discoveryRetryAttempts: 1, fetchImpl: stub });
+  const events = [];
+  await assert.rejects(provider.discover(business, { resumeFrom: partial, onProgress: value => events.push(value) }));
+  assert.equal(stub.starts.length, 1);
+  assert.equal(events.at(-1).succeeded, 2); assert.equal(events.at(-1).failed, 1);
 });
 
 /** Minimal valid RedditDiscoveryCandidate shape for a hand-built checkpoint fixture. */

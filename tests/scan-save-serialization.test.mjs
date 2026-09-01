@@ -34,7 +34,7 @@ function extractSaveScan() {
   const anchor = "// See scanSaveQueues's doc comment:";
   const start = source.indexOf(anchor);
   assert.notEqual(start, -1, "saveScan's queuing implementation was not found");
-  const methodStart = source.lastIndexOf("async saveScan(record: ScanRecord) {", start);
+  const methodStart = source.lastIndexOf("async saveScan(record: ScanRecord, owner?: ScanExecutionOwner) {", start);
   assert.notEqual(methodStart, -1, "saveScan's signature was not found");
   // The method's closing brace is the first "\n  }\n" after the anchor --
   // matches the established one-line-of-context extraction style used
@@ -125,4 +125,17 @@ test("a failed write does not jam the queue -- a later write for the same scan i
   await assert.rejects(harness.saveScan({ id: "scan_1" }));
   await harness.saveScan({ id: "scan_1" });
   assert.equal(callCount, 2);
+});
+
+test("each enqueued snapshot is immutable even while the shared reducer accumulates results", async () => {
+  const { Harness } = await compileHarness();
+  const snapshots = [];
+  const harness = new Harness(async record => { snapshots.push(record.items.slice()); });
+  const record = { id: "scan_immutable", items: ["a"] };
+  const first = harness.saveScan(record);
+  record.items.push("b");
+  const second = harness.saveScan(record);
+  record.items.push("not-checkpointed");
+  await Promise.all([first, second]);
+  assert.deepEqual(snapshots, [["a"], ["a", "b"]]);
 });

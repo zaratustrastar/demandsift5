@@ -19,9 +19,21 @@
  * codes are genuinely terminal (retrying would fail identically).
  */
 export const JOB_LEVEL_TERMINAL_ERROR_CODES = new Set([
+  "scan_review_required",
+  "scan_review_changed",
+  "scan_configuration_invalid",
+  "triage_coverage_incomplete",
+  "website_snapshot_mismatch",
   "reddit_enrichment_failed",
   "openai_structured_output_failed",
   "scan_execution_timeout",
+  "ai_recovery_exhausted",
+  "provider_auth_failed",
+  "provider_invalid_request",
+  "provider_quota_exhausted",
+  "apify_start_ambiguous",
+  "apify_recovery_exhausted",
+  "apify_reconciliation_required",
 ]);
 
 export function jobWillRetryScanFailure(input: {

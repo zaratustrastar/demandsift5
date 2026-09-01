@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     if (!scanId) throw new ApiError("scanId is required.", 400, "scan_id_required");
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
 
-    if (scan.status === "running" || scan.status === "retrying" || scan.status === "complete") {
+    if (scan.approval || scan.status === "running" || scan.status === "retrying" || scan.status === "complete") {
       throw new ApiError(
         "Competitors can only be analyzed before the Reddit scan starts.",
         409,

@@ -25,6 +25,12 @@ export interface WebsiteEvidencePage {
   retrievedAt: string;
 }
 
+export type RedditActorEvent = {
+  phase: "start" | "end"; requestIndex: number; actorRunId?: string;
+  outcome?: "succeeded" | "failed"; candidates?: number; queries: number;
+};
+export type RedditActorCheckpoint = { actorId: string; actorRunId: string; inputHash: string; datasetId: string; startedAt: string };
+
 export interface AiProviderResult<T> {
   value: T;
   model: string;
@@ -60,46 +66,46 @@ export interface AnalyzeBusinessFromContextRequest {
 }
 
 export interface TriageConversationsRequest {
+  /** Stops queued requests, active transport, and retry backoff on lost ownership. */
+  signal?: AbortSignal;
   business: BusinessUnderstanding;
   candidates: RedditDiscoveryCandidate[];
   models: ModelConfiguration;
+  /**
+   * Keeps every decision/evidence field but asks the model to make the two
+   * explanatory strings concise. Omitted/false preserves the legacy prompt.
+   */
+  compactOutput?: boolean;
   coverageRetries?: number;
-  /**
-   * Triage results already obtained for a subset of `candidates` during an
-   * earlier, interrupted attempt of this same scan (see the doc comment on
-   * ScanRecord.triageCheckpoint). Any candidate present here is returned
-   * directly and never resubmitted to OpenAI.
-   */
+  /** Only validated judgments are reusable; legacy synthetic failures are invalidated. */
   resumeFrom?: ReadonlyMap<string, ConversationTriage>;
-  /**
-   * Fired once a batch (or bisected sub-batch, see processBatch) reaches a
-   * final verdict for every one of its own candidates -- either a real
-   * OpenAI judgment, or (only when tolerateUnrecoverableBatches is set) a
-   * synthetic worthEnriching=false verdict for a batch OpenAI could never
-   * usably respond to. Never fired for a batch that is still going to be
-   * retried. A caller can persist these as they arrive so a scan
-   * interrupted mid-triage (e.g. one concurrent batch's OpenAI request
-   * timing out after exhausting its own retries) resumes from here instead
-   * of resubmitting every candidate again.
-   */
+  resumeProcessing?: ReadonlyMap<string, TriageProcessingOutcome>;
+  onProcessingUpdated?: (items: readonly TriageProcessingOutcome[]) => void | Promise<void>;
+  /** Called only with validated judgments, never unresolved work. */
   onBatchSucceeded?: (items: readonly TriagedConversation[]) => void | Promise<void>;
   /**
-   * Real production finding: raising triageCandidateBudget's default
-   * (120 -> 300, see scan-workflow.ts) means a single scan now fans out to
-   * roughly 2.5x more batches, so a batch whose OpenAI response is not
-   * usable JSON even after every retry and model fallback this provider
-   * offers (previously a rare event) became common enough to fail whole
-   * scans outright -- one real scan lost 150 already-checkpointed, good
-   * triage judgments this way. These errors are content-specific to one
-   * batch, not systemic (OpenAI's own status is always absent from them,
-   * unlike a real network/auth/rate-limit failure), so when this is set,
-   * such a batch's candidates are marked worthEnriching=false and skipped
-   * instead of failing the whole call -- they are simply never shown,
-   * enriched, or promoted as leads, exactly like any other negative
-   * verdict. Off by default so every other caller (and existing tests)
-   * keeps the original all-or-throw coverage guarantee.
+   * Finish independent batches after exhausted structured-output failures.
+   * Returns only real judgments, with incomplete coverage and separate
+   * unresolved outcomes. The caller MUST NOT call that an exhaustive scan.
+   * Off by default: strict callers still receive an error.
    */
   tolerateUnrecoverableBatches?: boolean;
+}
+
+export type TriageProcessingOutcome = {
+  externalId: string;
+  /** Logical submissions, including fallback/bisection, not HTTP attempts. */
+  attempts: number;
+} & (
+  | { status: "succeeded" | "pending" }
+  | { status: "unresolved"; code: "ai_structured_output" | "ai_refused" | "ai_transport" | "ai_provider_failure" | "ai_coverage_incomplete";
+      recoverable: boolean }
+);
+
+export type TriageCoverage = { expected: number; succeeded: number; unresolved: number; pending: number; complete: boolean };
+export interface TriageConversationsResult extends AiProviderResult<TriagedConversation[]> {
+  processing?: TriageProcessingOutcome[];
+  coverage?: TriageCoverage;
 }
 
 export interface TriagedConversation {
@@ -234,7 +240,7 @@ export interface AiProvider {
   ): Promise<AiProviderResult<BusinessUnderstanding>>;
   triageConversations(
     request: TriageConversationsRequest,
-  ): Promise<AiProviderResult<TriagedConversation[]>>;
+  ): Promise<TriageConversationsResult>;
   qualifyConversations(
     request: QualifyConversationsRequest,
   ): Promise<AiProviderResult<DeepQualifiedConversation[]>>;
@@ -404,6 +410,8 @@ export interface RedditDiscoveryRetryNotice {
 }
 
 export interface RedditDiscoverOptions {
+  /** Unique-query states, not request/attempt counts. Contains no query text. */
+  onProgress?: (progress: { planned: number; succeeded: number; active: number; retrying: number; failed: number; pending: number }) => void | Promise<void>;
   onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>;
   /**
    * A prior, possibly-incomplete discovery attempt for this same scan (see
@@ -427,6 +435,7 @@ export interface RedditDiscoverOptions {
 }
 
 export interface RedditProvider {
+  configurationForDiagnostics?(): Record<string, string | number | boolean>;
   readonly name: string;
   readonly sourceMode: RedditConversation["sourceMode"];
   discover(request: RedditSearchRequest, options?: RedditDiscoverOptions): Promise<RedditDiscoveryResponse>;

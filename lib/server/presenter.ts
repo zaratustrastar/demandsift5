@@ -4,6 +4,22 @@ import { entitlementCoversWebsite, normalizedBusinessHostname } from "./business
 import { ApiError } from "./http";
 import { getEffectiveEntitlement, getStateRepository } from "./repository";
 import { summarizeTrackedResults } from "./result-totals";
+import { scanPhase } from "./scan-lifecycle";
+import { refreshRuntimeProgress } from "./scan-progress";
+import type { ScanPartialResults } from "./partial-results";
+
+export function presentScanLifecycle(scan: ScanRecord) {
+  return { phase: scanPhase(scan), analysisReady: !!scan.discoveryProfile && scan.discoveryProfile.profileStage !== "fast",
+    runtimeProgress: refreshRuntimeProgress(scan),
+    durable: !!scan.durableJob && getStateRepository().kind === "postgres",
+    completionNotice: scan.completionNotice ?? null,
+    approvedProfile: scan.discoveryProfile ? {
+      name: scan.discoveryProfile.profile.name,
+      summary: scan.discoveryProfile.profile.summary,
+      targetAudience: scan.discoveryProfile.profile.targetAudience,
+      problemsSolved: scan.discoveryProfile.profile.problemsSolved,
+    } : null };
+}
 
 export { entitlementCoversWebsite, normalizedBusinessHostname } from "./business-access";
 
@@ -160,12 +176,64 @@ function freeVisibleOpportunities(
   ].slice(0, 3);
 }
 
+/** Applies the same opportunity/reply/relevant-conversation visibility rules
+ * as presentScan. Raw checkpoints and internal fingerprints never leave. */
+export function presentPartialResults(store: ScanPartialResults | null, access: Awaited<ReturnType<typeof presentAccess>>, afterVersion = 0) {
+  if (!store) return { schemaVersion: 1 as const, version: 0, updatedAt: null, snapshot: true as const,
+    complete: false as const, previews: [], opportunities: [], relevantConversations: [], replies: [], replyStates: [], sources: [], tombstones: [],
+    foundSoFar: { reviewedCandidates: 0, qualifiedPeople: 0, relevantConversations: 0, repliesReady: 0 } };
+  const qualified = Object.values(store.qualified);
+  const previews = Object.values(store.previews);
+  const opportunities = qualified.flatMap(row => row.kind === "potential_customer" && row.opportunity ? [row.opportunity] : []);
+  const relevant = qualified.flatMap(row => row.kind === "relevant_conversation" && row.intelligence ? [row] : []);
+  const replies = Object.values(store.replies).filter(row => row.state === "ready" && row.reply.content.trim()).map(row => row.reply);
+  const visibleOpportunities = access.unlocked ? opportunities : freeVisibleOpportunities(opportunities, replies);
+  const visibleOpportunityIds = new Set(visibleOpportunities.map(row => row.id));
+  const visibleRelevant = access.unlocked ? relevant : relevant.slice(0, 3);
+  const visibleTargetIds = new Set([...visibleOpportunityIds, ...visibleRelevant.map(row => row.intelligence!.id)]);
+  const visibleReplies = access.unlocked ? replies : replies.filter(row => visibleOpportunityIds.has(row.opportunityId)).slice(0, 1);
+  const visibleSourceIds = new Set([
+    ...visibleOpportunities.map(row => row.sourceId),
+    ...visibleRelevant.flatMap(row => row.intelligence!.sourceIds),
+  ]);
+  const sources = qualified.filter(row => visibleSourceIds.has(row.source.id))
+    .map(row => row.source).filter((row, index, rows) => rows.findIndex(value => value.id === row.id) === index);
+  return {
+    schemaVersion: store.schemaVersion,
+    version: store.version,
+    updatedAt: store.updatedAt,
+    snapshot: true as const,
+    complete: false as const,
+    previews: (access.unlocked ? previews : previews.slice(0, 3))
+      .map(row => Object.fromEntries(Object.entries(row).filter(([key]) => key !== "fingerprint"))),
+    opportunities: visibleOpportunities.map(opportunity => ({ ...publicOpportunity(opportunity),
+      outputVersion: store.qualified[opportunity.id]?.version ?? store.version })),
+    relevantConversations: visibleRelevant.map(row => ({ ...publicRelevantConversation(row.intelligence!, row.source),
+      outputVersion: row.version })),
+    replies: visibleReplies.map(reply => ({ ...publicReply(reply), outputVersion: store.replies[reply.id]?.version ?? store.version })),
+    replyStates: Object.values(store.replies).filter(row => visibleTargetIds.has(row.reply.opportunityId))
+      .map(row => ({ id: row.id, opportunityId: row.reply.opportunityId,
+      state: row.state, outputVersion: row.version, ...(row.safeErrorCode ? { safeErrorCode: row.safeErrorCode } : {}) })),
+    sources,
+    tombstones: store.tombstones.filter(row => row.version > afterVersion),
+    // These are observations, not final totals. Qualification/coverage may
+    // still replace or remove records before completion.
+    foundSoFar: {
+      reviewedCandidates: Object.keys(store.previews).length,
+      qualifiedPeople: new Set(opportunities.map(row => row.authorIdentifier).filter(Boolean)).size,
+      relevantConversations: relevant.length,
+      repliesReady: replies.length,
+    },
+  };
+}
+
 export async function presentScan(scan: ScanRecord) {
   const access = await presentAccess(scan.workspaceId, scan.websiteUrl);
   const result = scan.result;
   if (!result) {
     return {
       scan: {
+        ...presentScanLifecycle(scan),
         id: scan.id,
         status: scan.status,
         websiteUrl: scan.websiteUrl,
@@ -256,6 +324,7 @@ export async function presentScan(scan: ScanRecord) {
 
   return {
     scan: {
+      ...presentScanLifecycle(scan),
       id: scan.id,
       status: scan.status,
       websiteUrl: scan.websiteUrl,

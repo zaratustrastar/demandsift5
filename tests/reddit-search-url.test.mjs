@@ -18,7 +18,7 @@ test("produces exactly the tested-working URL shape, nothing else", () => {
   assert.equal(url.origin, "https://www.reddit.com");
   assert.equal(url.pathname, "/search/");
   assert.equal(url.searchParams.get("q"), "parental controls Android TV");
-  assert.equal(url.searchParams.get("t"), "week");
+  assert.equal(url.searchParams.get("t"), "year");
   // Only q and t -- a browser-copied URL's type/cId/acId/iId params are what
   // got a real query rejected outright by this actor build.
   assert.deepEqual([...url.searchParams.keys()].sort(), ["q", "t"]);
@@ -40,8 +40,8 @@ test("boolean/quoted queries round-trip through URL encoding intact", () => {
   assert.equal(url.searchParams.get("q"), query);
 });
 
-test("time window defaults to week and can be overridden", () => {
-  assert.equal(new URL(redditSearchUrl("tv")).searchParams.get("t"), "week");
+test("time window defaults to one year and can still be overridden explicitly", () => {
+  assert.equal(new URL(redditSearchUrl("tv")).searchParams.get("t"), "year");
   assert.equal(new URL(redditSearchUrl("tv", { time: "month" })).searchParams.get("t"), "month");
 });
 

@@ -25,6 +25,11 @@ export function redditSearchUrl(
   const url = new URL("https://www.reddit.com/search/");
   url.search = "";
   url.searchParams.set("q", trimmed);
-  url.searchParams.set("t", options.time ?? "week");
+  // A one-week default silently reintroduced shallow searches whenever a
+  // caller omitted the option, even though the production provider's main
+  // path explicitly requested a year. Make the safe, high-recall window the
+  // helper invariant so new call sites and recovery paths cannot regress to
+  // a thin weekly result pool.
+  url.searchParams.set("t", options.time ?? "year");
   return url.toString();
 }

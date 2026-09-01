@@ -1525,6 +1525,54 @@ function buildResultsItems(data: NonNullable<ReturnType<typeof scanResponseToDas
   return [...opportunityItems, ...conversationItems].sort((a, b) => b.reliability - a.reliability);
 }
 
+type ResultMarketingSummary = {
+  promisingConversations: number;
+  qualifiedOpportunities: number;
+  marketInsights: number;
+  competitorSignals: number;
+  readyReplies: number;
+};
+
+/**
+ * The report intentionally contains more useful market intelligence than the
+ * strict potential-customer table: relevant conversations and AI-shortlisted
+ * candidates remain valuable even when conservative lead qualification does
+ * not promote their authors. The conversion screens must describe that whole
+ * delivered result, not call a useful 18-card report "0 opportunities".
+ *
+ * This mirrors ProductDashboard's carousel de-duplication by public Reddit URL
+ * so the headline is both positive and auditable -- it never fabricates a
+ * marketing number or counts the same conversation in three result buckets.
+ */
+function resultMarketingSummary(
+  data: NonNullable<ReturnType<typeof scanResponseToDashboard>>,
+): ResultMarketingSummary {
+  const conversations = new Set<string>();
+  const add = (kind: string, id: string, permalink?: string | null) => {
+    conversations.add(permalink?.trim() || `${kind}:${id}`);
+  };
+
+  for (const opportunity of data.opportunities) {
+    add("opportunity", opportunity.id, opportunity.permalink);
+  }
+  for (const conversation of data.relevantConversations ?? []) {
+    add("conversation", conversation.id, conversation.permalink);
+  }
+  for (const candidate of data.scanEvidence?.candidates ?? []) {
+    if (candidate.triage.worthEnriching) {
+      add("candidate", candidate.externalId, candidate.permalink);
+    }
+  }
+
+  return {
+    promisingConversations: conversations.size,
+    qualifiedOpportunities: data.metrics.qualifiedOpportunities,
+    marketInsights: data.insights.length,
+    competitorSignals: data.metrics.competitorSignals,
+    readyReplies: data.metrics.readyReplies,
+  };
+}
+
 /**
  * Step 6 in the design handoff's onboarding sequence. Sits between a
  * completed scan and the account-creation step -- shows the real strongest
@@ -1545,9 +1593,10 @@ function ResultsPreview({
   onKeep: () => void;
 }) {
   const items = useMemo(() => buildResultsItems(data), [data]);
+  const summary = useMemo(() => resultMarketingSummary(data), [data]);
   const strongest = items[0];
   const rest = items.slice(1, 11);
-  const { qualifiedOpportunities, highIntentOpportunities } = data.metrics;
+  const { highIntentOpportunities } = data.metrics;
 
   return (
     <main className={styles.scanScreen}>
@@ -1558,11 +1607,13 @@ function ResultsPreview({
         </div>
         <h1>Here&apos;s what we found</h1>
         <p className={styles.resultsSummary}>
-          {qualifiedOpportunities} opportunit{qualifiedOpportunities === 1 ? "y" : "ies"} worth replying to
-          {highIntentOpportunities > 0
-            ? `, ${highIntentOpportunities} of them high intent`
-            : ""}
-          .
+          {summary.promisingConversations > 0
+            ? `${summary.promisingConversations} promising Reddit conversation${summary.promisingConversations === 1 ? "" : "s"} surfaced and ranked by relevance`
+            : summary.marketInsights + summary.competitorSignals > 0
+              ? `${summary.marketInsights + summary.competitorSignals} useful market finding${summary.marketInsights + summary.competitorSignals === 1 ? "" : "s"} surfaced`
+              : "Your first market scan is ready for review"}
+          {highIntentOpportunities > 0 ? `, including ${highIntentOpportunities} high-intent lead${highIntentOpportunities === 1 ? "" : "s"}` : ""}
+          {summary.readyReplies > 0 ? `, with ${summary.readyReplies} repl${summary.readyReplies === 1 ? "y" : "ies"} ready to use` : ""}.
         </p>
 
         {strongest && (
@@ -1630,27 +1681,55 @@ function ResultsPreview({
  * upgrade to permanent storage, not a gate on seeing them.
  */
 function SignupGate({
-  qualifiedOpportunities,
+  data,
   onSkip,
 }: {
-  qualifiedOpportunities: number;
+  data: NonNullable<ReturnType<typeof scanResponseToDashboard>>;
   onSkip: () => void;
 }) {
+  const summary = useMemo(() => resultMarketingSummary(data), [data]);
+  const usefulFindings = summary.marketInsights + summary.competitorSignals;
+  const highlights = [
+    summary.promisingConversations > 0
+      ? `${summary.promisingConversations} promising conversation${summary.promisingConversations === 1 ? "" : "s"}`
+      : "",
+    summary.qualifiedOpportunities > 0
+      ? `${summary.qualifiedOpportunities} qualified lead${summary.qualifiedOpportunities === 1 ? "" : "s"}`
+      : "",
+    summary.marketInsights > 0
+      ? `${summary.marketInsights} market insight${summary.marketInsights === 1 ? "" : "s"}`
+      : "",
+    summary.competitorSignals > 0
+      ? `${summary.competitorSignals} competitor signal${summary.competitorSignals === 1 ? "" : "s"}`
+      : "",
+    summary.readyReplies > 0
+      ? `${summary.readyReplies} ready-to-use repl${summary.readyReplies === 1 ? "y" : "ies"}`
+      : "",
+  ].filter(Boolean);
+
   return (
     <main className={styles.scanScreen}>
       <OnboardingHeader activeIndex={4} statusLabel="Save your results" />
       <section className={`${styles.scanPanel} ${styles.signupPanel}`}>
-        <div className={styles.scanKicker}>Almost done</div>
+        <div className={styles.scanKicker}>Your market intelligence is ready</div>
         <h1>
-          Save your {qualifiedOpportunities} opportunit{qualifiedOpportunities === 1 ? "y" : "ies"}
+          {summary.promisingConversations > 0
+            ? `We found ${summary.promisingConversations} promising Reddit conversation${summary.promisingConversations === 1 ? "" : "s"}`
+            : usefulFindings > 0
+              ? `We uncovered ${usefulFindings} useful market finding${usefulFindings === 1 ? "" : "s"}`
+              : "Your first market scan is complete"}
         </h1>
+        {highlights.length > 0 && (
+          <ul className={styles.signupHighlights} aria-label="Scan result summary">
+            {highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}
+          </ul>
+        )}
         <p>
-          An account keeps these permanently instead of the 30-day anonymous window, and is where
-          monitoring and billing live if you decide to use them later. Free, and a separate decision
-          from anything paid.
+          Create your free workspace to keep the complete report permanently and have one place to
+          turn on ongoing demand monitoring when you are ready. Choosing a paid plan is a separate decision.
         </p>
         <a href="/api/auth/google/start" className={styles.signupGoogleButton}>
-          <span aria-hidden="true">G</span> Continue with Google
+          <span aria-hidden="true">G</span> Save results with Google
         </a>
         <button type="button" className={styles.signupSkipLink} onClick={onSkip}>
           Continue without an account
@@ -2733,7 +2812,7 @@ export function ThreadlineExperience() {
   if (view === "signup" && dashboardData) {
     return (
       <SignupGate
-        qualifiedOpportunities={dashboardData.metrics.qualifiedOpportunities}
+        data={dashboardData}
         onSkip={() => setView("done")}
       />
     );

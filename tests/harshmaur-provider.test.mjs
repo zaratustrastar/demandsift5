@@ -33,7 +33,7 @@ test("actor input matches the real Harshmaur schema", () => {
   // "relevance" re-ranks across all time and would smuggle in records from
   // outside the one-year window we asked for.
   assert.equal(input.searchSort, "new");
-  assert.equal(input.searchTime, "week");
+  assert.equal(input.searchTime, "year");
   assert.equal(input.postedAfter, WINDOW.since);
   assert.equal(input.commentedAfter, WINDOW.since);
   assert.equal(input.crawlCommentsPerPost, false);
@@ -44,9 +44,10 @@ test("actor input matches the real Harshmaur schema", () => {
   // maxItems is a platform-level guard, never an actor input field.
   assert.equal("maxItems" in input, false);
   assert.equal("startUrls" in input, false);
-  for (const term of input.searchTerms) {
-    assert.ok(term.split(" ").length <= 4, `not a short phrase: "${term}"`);
-  }
+  assert.ok(input.searchTerms.includes("Android TV parental control app"));
+  assert.ok(input.searchTerms.includes("kids watching TV too long"));
+  assert.ok(input.searchTerms.includes("block youtube on the tv"));
+  assert.ok(input.searchTerms.includes("Google Family Link"));
 });
 
 test("acquisition caps are global totals, not per-term quotas", () => {

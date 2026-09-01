@@ -43,16 +43,15 @@ const tvcp = {
 const containsBooleanOrQuoting = (q) =>
   /["()]/.test(q) || /\b(AND|OR|NOT|and|or|not)\b/.test(q);
 
-test("generates plain, lowercase natural-language queries with no boolean operators or quoting", () => {
+test("generates plain reviewed phrases with no added boolean operators or quoting", () => {
   const families = redditQueryFamilies(tvcp);
   assert.ok(families.length > 0);
   for (const family of families) {
     assert.equal(containsBooleanOrQuoting(family.query), false, `unexpected structure in: ${family.query}`);
-    assert.equal(family.query, family.query.toLowerCase(), `expected lowercase: ${family.query}`);
   }
 });
 
-test("matches the exact example from the spec: profile phrase to plain query", () => {
+test("preserves the exact reviewed phrase, including capitalization", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: [],
@@ -66,13 +65,10 @@ test("matches the exact example from the spec: profile phrase to plain query", (
   });
   const category = families.find((f) => f.lane === "category_recommendation");
   assert.ok(category, `expected a category_recommendation query, got: ${JSON.stringify(families)}`);
-  assert.equal(category.query, "android tv parental control");
+  assert.equal(category.query, "Android TV parental control");
 });
 
-test("uses the profile phrase close to verbatim rather than mechanically shortening it", () => {
-  // normalizeSearchText only lowercases and strips punctuation/diacritics --
-  // no word-count truncation, no filler-word removal, no reordering. A long
-  // source phrase should survive with every word intact.
+test("uses the profile phrase verbatim rather than mechanically rewriting it", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: [],
@@ -86,7 +82,7 @@ test("uses the profile phrase close to verbatim rather than mechanically shorten
   });
   const pain = families.find((f) => f.lane === "pain");
   assert.ok(pain);
-  assert.equal(pain.query, "i cant figure out how to limit how long my kid watches tv every single day");
+  assert.equal(pain.query, "I can't figure out how to limit how long my kid watches TV every single day");
 });
 
 test("enforces per-bucket caps: max 3 product/category, max 3 pain, max 3 competitor", () => {
@@ -138,10 +134,10 @@ test("a lone brand name is a valid competitor query even though it is a single w
   });
   const competitor = families.find((f) => f.lane === "brand_competitor_mentions");
   assert.ok(competitor);
-  assert.equal(competitor.query, "bark");
+  assert.equal(competitor.query, "Bark");
 });
 
-test("a single-word product or pain phrase is dropped rather than emitted as a bare word", () => {
+test("single-word product and pain phrases are searched when the user approved them", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: ["tvcp"],
@@ -153,10 +149,10 @@ test("a single-word product or pain phrase is dropped rather than emitted as a b
     },
     limit: 100,
   });
-  assert.equal(families.length, 0);
+  assert.deepEqual(families.map((family) => family.query), ["tvcp", "frustrated"]);
 });
 
-test("known-ambiguous youtube+tv pairing is dropped, never negated with NOT", () => {
+test("an approved ambiguous phrase is preserved and left to downstream relevance filtering", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: [],
@@ -169,15 +165,15 @@ test("known-ambiguous youtube+tv pairing is dropped, never negated with NOT", ()
     limit: 100,
   });
   const collision = families.find((f) => /\byoutube\b/.test(f.query) && /\btv\b/.test(f.query));
-  assert.equal(collision, undefined, `expected the youtube+tv collision to be dropped, got: ${JSON.stringify(families)}`);
+  assert.equal(collision?.query, "youtube on the tv never stops autoplaying");
   assert.equal(families.some((f) => /\bnot\b/.test(f.query)), false, "no query should ever contain a not clause");
 });
 
-test("deduplicates identical normalized queries across sources", () => {
+test("deduplicates case-insensitively without rewriting the first approved phrase", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: [],
-      productCategories: ["Android TV Parental Control", "android tv parental control!"],
+      productCategories: ["Android TV Parental Control", "android tv parental control"],
       customerProblems: [],
       buyerIntent: [],
       competitors: [],
@@ -186,9 +182,10 @@ test("deduplicates identical normalized queries across sources", () => {
     limit: 100,
   });
   assert.equal(families.length, 1);
+  assert.equal(families[0].query, "Android TV Parental Control");
 });
 
-test("contractions collapse into one word instead of leaving an orphan letter behind", () => {
+test("contractions and punctuation remain exactly as reviewed", () => {
   const families = redditQueryFamilies({
     queries: {
       productTerms: [],
@@ -201,9 +198,7 @@ test("contractions collapse into one word instead of leaving an orphan letter be
     limit: 100,
   });
   assert.equal(families.length, 1);
-  const tokens = families[0].query.split(" ");
-  assert.equal(tokens.includes("t"), false);
-  assert.ok(tokens.includes("cant"));
+  assert.equal(families[0].query, "can't lock the TV remotely when guests are over");
 });
 
 test("maxQueries further bounds the natural per-bucket total", () => {

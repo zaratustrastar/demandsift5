@@ -692,6 +692,24 @@
   font-size: 13.5px;
   line-height: 1.55;
 }
+.signupHighlights {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 18px 0 20px;
+  padding: 0;
+  list-style: none;
+}
+.signupHighlights li {
+  padding: 7px 10px;
+  border: 1px solid #cfe8da;
+  border-radius: 999px;
+  background: var(--mint);
+  color: #166534;
+  font-size: 11.5px;
+  font-weight: 650;
+}
 .signupGoogleButton {
   display: flex;
   align-items: center;

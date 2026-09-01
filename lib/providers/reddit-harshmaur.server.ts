@@ -18,7 +18,6 @@ import type {
   RedditSearchRequest,
 } from "@/lib/providers/contracts";
 import { contentFingerprint } from "@/lib/intelligence/opportunity-ranking";
-import { naturalSearchTerms } from "@/lib/providers/reddit-natural-queries";
 import { redditQueryFamilies, type RedditQueryFamily } from "@/lib/providers/reddit-query-families";
 import { redditSearchUrl } from "@/lib/providers/reddit-search-url";
 import { ApifyTransientError } from "@/lib/providers/apify-retry";
@@ -58,7 +57,7 @@ export interface HarshmaurActorInput {
   searchComments: boolean;
   searchCommunities: boolean;
   searchSort: "new";
-  searchTime: "week";
+  searchTime: "year";
   /** Server-side cutoffs; our own timestamp check still runs afterwards. */
   postedAfter: string;
   commentedAfter: string;
@@ -207,7 +206,12 @@ export function buildHarshmaurInput(
     ? request.since
     : since;
 
-  const searchTerms = naturalSearchTerms(request, { maxTerms: options.maxTerms ?? 8 });
+  // The operational fallback must search the same approved phrases as the
+  // primary Direct-URL path. Rebuilding "natural" terms here used to change
+  // wording after approval and made fallback results impossible to reconcile
+  // with what the user saw on the review screen.
+  const searchTerms = redditQueryFamilies(request, { maxQueries: options.maxTerms ?? 9 })
+    .map((family) => family.query);
   const { maxPostsCount, maxCommentsCount } = harshmaurAcquisitionBudget(options.targetTotal);
 
   return {
@@ -216,10 +220,10 @@ export function buildHarshmaurInput(
     searchComments: true,
     // Community records are directory entries, not conversations.
     searchCommunities: false,
-    // "new" keeps the window honest; "relevance" re-ranks across all time and
-    // would return records from outside the seven days we asked for.
+    // "new" plus the explicit one-year server window keeps ordering and
+    // recency deterministic; every returned timestamp is checked again below.
     searchSort: "new",
-    searchTime: "week",
+    searchTime: "year",
     postedAfter: windowStart,
     commentedAfter: windowStart,
     crawlCommentsPerPost: false,
@@ -870,7 +874,10 @@ export class HarshmaurRedditProvider implements RedditProvider {
     this.actorId = harshmaurActorId(input.actorId?.trim() || "harshmaur~reddit-scraper");
     this.token = input.token;
     this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 40)));
-    this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 8)));
+    // The review UI exposes at most 3 product + 3 pain + 3 competitor phrases.
+    // Keep the legacy searchTerms escape hatch capable of searching all nine;
+    // an older default of eight silently omitted the last approved chip.
+    this.maxTerms = Math.max(1, Math.min(25, Math.trunc(input.maxTerms ?? 9)));
     this.maxQueries = Math.max(1, Math.min(20, Math.trunc(input.maxQueries ?? 12)));
     this.discoveryMode = input.discoveryMode ?? "direct-url";
     this.timeoutMs = Math.max(20_000, Math.min(900_000, Math.trunc(input.timeoutMs ?? 360_000)));

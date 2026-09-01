@@ -2067,10 +2067,10 @@ export function createRedditProviderFromEnv(
       // across all inputs" schema description implied -- 250 was
       // producing hundreds of noisy raw records per scan. 40 total
       // (20 posts / 20 comments via harshmaurAcquisitionBudget) with
-      // 8 natural search terms is deliberately conservative; raise
+      // Up to 9 reviewed search phrases is deliberately conservative; raise
       // once real yield-per-term data justifies it.
       maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 40, 1, 400),
-      maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 8, 1, 25),
+      maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 9, 1, 25),
       // Primary discovery path: Reddit search-page URLs via startUrls +
       // fastMode:false, found materially more relevant than plain
       // searchTerms in manual testing. maxTerms above still governs the

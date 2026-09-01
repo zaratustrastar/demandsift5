@@ -154,7 +154,7 @@ test("by default, each query runs as its own dedicated actor run with a per-quer
   // budget divided across query batches meant more (smaller, more precise)
   // queries produced a THINNER per-query budget, not a bigger one. Each
   // query should now get its own run and its own fixed postsPerQuery budget
-  // -- tvcp's 3 query families should produce 3 separate actor starts, each
+  // -- tvcp's 5 approved query families should produce 5 separate actor starts, each
   // with exactly one startUrls entry and maxPostsCount equal to the default
   // postsPerQuery (50), not a divided-down fraction of some larger total.
   const starts = [];
@@ -179,7 +179,7 @@ test("by default, each query runs as its own dedicated actor run with a per-quer
 
   await provider.discover(tvcp);
 
-  assert.equal(starts.length, 3, `expected one dedicated actor run per query family, got ${starts.length}`);
+  assert.equal(starts.length, 5, `expected one dedicated actor run per approved query, got ${starts.length}`);
   for (const input of starts) {
     assert.equal(input.startUrls.length, 1, "each default-mode run should carry exactly one query");
     assert.equal(input.maxPostsCount, 50, "expected the default postsPerQuery budget, not a divided-down total");
@@ -624,11 +624,9 @@ test("the legacy searchTerms path stays reachable as an explicit fallback mode",
   assert.ok(captured);
   assert.equal("startUrls" in captured, false);
   assert.equal(captured.searchSort, "new");
-  assert.equal(captured.searchTime, "week");
+  assert.equal(captured.searchTime, "year");
   assert.ok(captured.searchTerms.length > 0);
-  for (const term of captured.searchTerms) {
-    assert.ok(term.split(" ").length <= 4, `intent-shaped term: "${term}"`);
-  }
+  assert.ok(captured.searchTerms.includes("Android TV parental control app"));
 });
 
 test("Direct URL discovery falls back to the searchTerms builder when the profile yields no query families", async () => {

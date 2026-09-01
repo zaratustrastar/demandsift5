@@ -4,6 +4,16 @@ import { loadTsModule } from "./helpers/load-ts-module.mjs";
 import { scanWorkflowHarness, websiteEvidenceFixture } from "./helpers/scan-workflow-harness.mjs";
 const { createWebsiteSnapshot, reusableWebsiteSnapshot, legacyProfileMatchesSnapshot } = await loadTsModule("lib/server/website-snapshot.ts");
 
+function jsonbRoundTrip(value) {
+  const reorderKeys = item => {
+    if (Array.isArray(item)) return item.map(reorderKeys);
+    if (item && typeof item === "object") return Object.fromEntries(Object.keys(item).sort().reverse()
+      .map(key => [key, reorderKeys(item[key])]));
+    return item;
+  };
+  return JSON.parse(JSON.stringify(reorderKeys(value)));
+}
+
 test("snapshots retain all normalized pages and stable source IDs without sharing mutable references", () => {
   const crawl = websiteEvidenceFixture();
   const snapshot = createWebsiteSnapshot("scan_one", crawl.requestedUrl, crawl);
@@ -15,6 +25,15 @@ test("snapshots retain all normalized pages and stable source IDs without sharin
   assert.ok(reusableWebsiteSnapshot(snapshot, "scan_one", snapshot.inputUrl));
   snapshot.crawl.pages[0].text = "tampered snapshot";
   assert.equal(reusableWebsiteSnapshot(snapshot, "scan_one", snapshot.inputUrl), false);
+});
+test("approved snapshots remain valid after PostgreSQL JSONB reorders object keys", () => {
+  const crawl = websiteEvidenceFixture();
+  const snapshot = createWebsiteSnapshot("scan_jsonb", crawl.requestedUrl, crawl);
+  const reloaded = jsonbRoundTrip(snapshot);
+  assert.deepEqual(reloaded, snapshot, "the database round trip preserves the evidence values");
+  assert.ok(reusableWebsiteSnapshot(reloaded, "scan_jsonb", crawl.requestedUrl));
+  reloaded.crawl.pages[0].text = "tampered after reload";
+  assert.equal(reusableWebsiteSnapshot(reloaded, "scan_jsonb", crawl.requestedUrl), false);
 });
 test("empty or oversized results cannot become successful four-page snapshots", () => {
   assert.throws(() => createWebsiteSnapshot("scan", "https://fixture-business.com/", websiteEvidenceFixture(0)), /one to four/);

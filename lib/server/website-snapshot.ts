@@ -6,7 +6,14 @@ export type WebsiteSnapshot = {
   version: 1; id: string; scanId: string; inputUrl: string; capturedAt: string;
   crawlerVersion: "same-domain-cb24c44"; contentHash: string; crawl: WebsiteCrawlResult;
 };
-const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+// PostgreSQL JSONB does not retain object-key insertion order. Snapshot hashes
+// must therefore use canonical object keys so approved evidence remains valid
+// after the analysis worker saves it and the scan worker loads it again.
+const canonicalJson = (value: unknown) => JSON.stringify(value, (_key, item) =>
+  item && typeof item === "object" && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]]))
+    : item);
+const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 export const websitePageSourceId = (contentHash: string) => `web_${contentHash.slice(0, 20)}`;
 
 export function createWebsiteSnapshot(scanId: string, inputUrl: string, result: WebsiteCrawlResult): WebsiteSnapshot {

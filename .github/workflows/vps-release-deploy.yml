@@ -299,3 +299,4 @@ jobs:
 # trigger: value-proposition modal on Overview (2026-08-31T16:43:16Z)
 # trigger: dedicated Monitoring config screen (2026-08-31T16:46:04Z)
 # trigger: business summary correction + FAQ fix (2026-08-31T17:01:36Z)
+# trigger: deploy reconciled scan-speed rollout (2026-09-01)

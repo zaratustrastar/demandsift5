@@ -1,8 +1,10 @@
 {
-  "id": "verify-preview-streaming-fix-2026-09-02",
+  "id": "diagnose-live-326-candidate-triage-2026-09-02",
   "ops": [
+    "logs",
     "status",
-    "runtime"
+    "runtime",
+    "reddit-config"
   ],
   "inspectScans": [],
   "startScan": null

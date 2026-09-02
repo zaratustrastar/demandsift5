@@ -1,10 +1,9 @@
 {
-  "id": "diagnose-live-326-candidate-triage-2026-09-02",
+  "id": "watch-latest-live-scan-2026-09-02-0518",
   "ops": [
     "logs",
     "status",
-    "runtime",
-    "reddit-config"
+    "runtime"
   ],
   "inspectScans": [],
   "startScan": null

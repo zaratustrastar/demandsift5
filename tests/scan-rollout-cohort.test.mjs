@@ -73,6 +73,25 @@ test("each guarded behavior resolves independently from the same stable workspac
   assert.equal(config.flags.partialResults, false);
 });
 
+test("production enables quality-equivalent overlap and progressive results by default", () => {
+  const config = resolveScanConfiguration({ APP_RUNTIME_ENV: "production" }, {
+    workspaceId: "workspace-production-defaults",
+  });
+  assert.equal(config.flags.overlapDiscoveryTriage, true);
+  assert.equal(config.flags.partialResults, true);
+  assert.equal(config.flags.compactTriage, false);
+  assert.equal(config.environment.SCAN_OVERLAP_DISCOVERY_TRIAGE, "1");
+  assert.equal(config.environment.SCAN_PARTIAL_RESULTS, "1");
+
+  const killed = resolveScanConfiguration({
+    APP_RUNTIME_ENV: "production",
+    SCAN_OVERLAP_DISCOVERY_TRIAGE_ROLLOUT_PERCENT: "0",
+    SCAN_PARTIAL_RESULTS_ROLLOUT_PERCENT: "0",
+  }, { workspaceId: "workspace-production-defaults" });
+  assert.equal(killed.flags.overlapDiscoveryTriage, false);
+  assert.equal(killed.flags.partialResults, false);
+});
+
 test("invalid rollout percentages fail visibly", () => {
   for (const value of ["-1", "101", "5.5", "not-a-number"]) {
     assert.throws(() => cohort(value, "workspace-invalid"), error =>

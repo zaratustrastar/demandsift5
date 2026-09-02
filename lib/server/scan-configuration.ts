@@ -53,6 +53,10 @@ const ROLLOUTS = {
 } as const;
 type RolloutFlag = keyof typeof ROLLOUTS;
 type RolloutPercentages = Record<RolloutFlag, number>;
+const PRODUCTION_DEFAULT_FLAGS = new Set<RolloutFlag>([
+  "overlapDiscoveryTriage",
+  "partialResults",
+]);
 
 function rolloutPercent(value: string | undefined, name: string) {
   if (value === undefined || value.trim() === "") return 100;
@@ -71,8 +75,10 @@ function workspaceRollout(env: NodeJS.ProcessEnv, workspaceId?: string) {
     : null;
   const percentages = Object.fromEntries(Object.entries(ROLLOUTS).map(([name, [, percentKey]]) =>
     [name, rolloutPercent(env[percentKey], percentKey)])) as RolloutPercentages;
+  const productionRuntime = env.APP_RUNTIME_ENV?.trim().toLowerCase() === "production";
   const enabled = Object.fromEntries(Object.entries(ROLLOUTS).map(([name, [flagKey]]) => [name,
-    env[flagKey] === "1" && (internalWorkspace || (workspaceBucket !== null && workspaceBucket < percentages[name as RolloutFlag])
+    (env[flagKey] === "1" || (productionRuntime && PRODUCTION_DEFAULT_FLAGS.has(name as RolloutFlag)))
+      && (internalWorkspace || (workspaceBucket !== null && workspaceBucket < percentages[name as RolloutFlag])
       || (workspaceBucket === null && percentages[name as RolloutFlag] === 100)),
   ])) as Record<RolloutFlag, boolean>;
   return { workspaceBucket, internalWorkspace, percentages, enabled };

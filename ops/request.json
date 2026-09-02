@@ -1,11 +1,9 @@
 {
-  "id": "verify-vps-state-2026-09-02",
+  "id": "inspect-stuck-scan-d7987-2026-09-02",
   "ops": [
-    "set-reddit-config APIFY_REDDIT_TIME_RANGE year",
-    "reddit-config",
-    "runtime",
-    "status"
+    "status",
+    "runtime"
   ],
-  "inspectScans": [],
+  "inspectScans": ["scan_d798772b58914ca5888b3b48cc2fe182"],
   "startScan": null
 }

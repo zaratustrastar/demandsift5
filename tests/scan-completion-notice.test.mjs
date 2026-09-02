@@ -27,11 +27,13 @@ test("monitoring-sidecar scans do not create primary-scan completion alerts", as
   assert.equal(complete.completionNotice, undefined);
 });
 
-test("the private return URL stays canonical and notice dismissal is workspace scoped", () => {
+test("the private return URL stays canonical and the removed completion popup is not polled", () => {
   assert.match(experience, /function keepStableScanUrl\(scanId: string/u);
   assert.match(experience, /stable\.searchParams\.set\("scan_id", scanId\)/u);
   assert.match(experience, /keepStableScanUrl\(latest\.scan\.id\)/u);
-  assert.match(experience, /\/completion-notice/u);
+  assert.doesNotMatch(experience, /\/completion-notice/u);
+  // Keep the legacy acknowledgement route private while stored notices age
+  // out; removing the popup must not turn it into a public mutation.
   assert.match(noticeRoute, /requireWorkspace\(request\)/u);
   assert.match(noticeRoute, /acknowledgeScanCompletion\(scanId, actor\.workspaceId, body\.version\)/u);
   assert.match(noticeRoute, /private, no-store/u);

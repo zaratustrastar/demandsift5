@@ -21,19 +21,19 @@ async function render(path = "/") {
   );
 }
 
-test("server-renders the Threadline acquisition experience", async () => {
+test("server-renders the Scooptr acquisition experience", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /Threadline — Reddit demand intelligence/i);
-  assert.match(html, /Find the threads where your next customers are/);
+  assert.match(html, /Scooptr — find the Reddit threads where your next customers already are/i);
+  assert.match(html, /Find the Reddit conversations where people are[\s\S]{0,200}already looking[\s\S]{0,100}for what you sell/);
   assert.match(html, /Run free scan/);
-  assert.match(html, /Provider data clearly labeled/);
-  assert.match(html, /\$12/);
-  assert.match(html, /\$30\/mo/);
-  assert.doesNotMatch(html, /94% fit|3 related conversations|r\/smallbusiness/i);
+  assert.match(html, /Public same-domain pages only/);
+  assert.match(html, /\$0/);
+  assert.match(html, /\$30/);
+  assert.doesNotMatch(html, /94% fit|3 related conversations/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/);
 });
 

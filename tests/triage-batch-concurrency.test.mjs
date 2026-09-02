@@ -171,6 +171,32 @@ test("batch dispatch is bounded by TRIAGE_CONCURRENCY, not unlimited", async () 
   assert.ok(peakConcurrent <= 4, `expected at most 4 concurrent triage requests, saw ${peakConcurrent}`);
 });
 
+test("DeepSeek triage uses smaller independent batches without dropping candidates", async () => {
+  const windows = [];
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const user = JSON.parse(body.messages[1].content);
+      const ids = user.candidates.map((row) => row.externalId);
+      windows.push(ids);
+      return chatResponse({ triage: ids.map(triageItem) });
+    },
+  });
+  const candidates = Array.from({ length: 26 }, (_, index) => candidate(`deep${index + 1}`));
+  const result = await provider.triageConversations({
+    business,
+    candidates,
+    models: { ...openai.DEFAULT_OPENAI_MODELS, economyModel: "deepseek-v4-flash" },
+    coverageRetries: 0,
+  });
+
+  assert.equal(result.coverage.complete, true);
+  assert.equal(result.value.length, 26);
+  assert.deepEqual(windows.map((rows) => rows.length).sort((a, b) => b - a), [10, 10, 6]);
+});
+
 test("a batch that fails does not corrupt or block sibling batches running concurrently", async () => {
   const windows = [];
   const provider = new openai.OpenAiProvider({

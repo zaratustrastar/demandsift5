@@ -106,7 +106,7 @@ for (const [status, code, expected] of [[401, "invalid_api_key", "provider_auth_
   });
 }
 
-test("nonempty length-truncated JSON is split after bounded repair, not misclassified as a negative", async () => {
+test("nonempty length-truncated JSON is split immediately, not misclassified as a negative", async () => {
   const b = budget(); let calls = 0;
   const provider = new OpenAiProvider({ apiKey: "fixture", apiStyle: "chat", recovery: b.recovery,
     fetchImpl: async (_url, init) => {
@@ -115,8 +115,27 @@ test("nonempty length-truncated JSON is split after bounded repair, not misclass
       return chatResponse(rows.map(row => triage(row.externalId)));
     } });
   const result = await provider.triageConversations(request([candidate("a"), candidate("b")]));
-  assert.equal(result.coverage.complete, true); assert.equal(calls, 5);
-  assert.ok(Object.values(b.ledger).every(row => row.requests === 4));
+  assert.equal(result.coverage.complete, true); assert.equal(calls, 3);
+  assert.ok(Object.values(b.ledger).every(row => row.requests === 2));
+});
+
+test("an empty completion that consumes its full allowance splits immediately instead of repeating a huge request", async () => {
+  let calls = 0;
+  const provider = new OpenAiProvider({ apiKey: "fixture", apiStyle: "chat", maxRetries: 0,
+    fetchImpl: async (_url, init) => {
+      calls++; const rows = requestCandidates(init);
+      if (rows.length > 1) {
+        const body = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          choices: [{ finish_reason: "length", message: { content: null } }],
+          usage: { prompt_tokens: 100, completion_tokens: body.max_tokens },
+        }));
+      }
+      return chatResponse(rows.map(row => triage(row.externalId)));
+    } });
+  const result = await provider.triageConversations(request([candidate("a"), candidate("b")]));
+  assert.equal(result.coverage.complete, true);
+  assert.equal(calls, 3, "one exhausted batch plus its two single-candidate splits");
 });
 
 test("workflow persists exact-input counters and successful judgments across an interrupted attempt", async t => {

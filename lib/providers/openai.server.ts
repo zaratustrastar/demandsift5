@@ -76,7 +76,8 @@ export type OpenAiProviderDiagnosticEvent =
   | { kind: "structured_output_failed" | "triage_coverage_incomplete" | "qualification_coverage_incomplete";
       operation: AiOperation; model: string; unresolved?: number }
   | {
-      kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry" | "structured_chat_invalid_retry";
+      kind: "structured_chat_empty_retry" | "structured_chat_malformed_retry" | "structured_chat_invalid_retry"
+        | "structured_chat_length_split";
       operation: AiOperation;
       model: string;
       finishReason: StructuredFinishReason;
@@ -944,6 +945,19 @@ type ChatTextResult =
 
 const STRUCTURED_CHAT_MAX_OUTPUT_TOKENS = 16_000;
 const STRUCTURED_CHAT_MAX_ATTEMPTS = 3;
+// DeepSeek's reasoning-capable chat routes can spend the entire completion
+// allowance on hidden reasoning before emitting any JSON. Large 25-row
+// prompts amplify that failure mode: production observed 10k and 16k-token
+// empty completions taking 89s and 142s for the same batch. Smaller batches
+// preserve every candidate and every judgment while reducing both the prompt
+// complexity and the chance that reasoning consumes the whole allowance.
+const DEEPSEEK_TRIAGE_BATCH_SIZE = 10;
+
+function triageBatchSizeForModel(configured: number, model: string): number {
+  return /(?:^|[\/:_-])deepseek(?:$|[\/:_-])/i.test(model)
+    ? Math.min(configured, DEEPSEEK_TRIAGE_BATCH_SIZE)
+    : configured;
+}
 // A full scan can have 100-300+ credible candidates awaiting triage, split
 // into batches this size and fanned out across TRIAGE_CONCURRENCY workers
 // (see triageConversations() below) -- so this size sets how many batches
@@ -1486,6 +1500,8 @@ export class OpenAiProvider implements AiProvider {
     user: string;
     maxOutputTokens: number;
     reasoningEffort: "low" | "medium";
+    /** The caller can recursively split this exact request without losing an item. */
+    splitOnLengthExhaustion?: boolean;
     context: { workspaceId?: EntityId; businessId?: EntityId };
     parse: (value: unknown) => T;
   }): Promise<AiProviderResult<T>> {
@@ -1553,8 +1569,25 @@ export class OpenAiProvider implements AiProvider {
               };
             } catch (error) {
               if (!isRetryableStructuredOutputError(error)) throw error;
-              lastStructuredError = normalizedFinishReason(payload.choices?.[0]?.finish_reason) === "length"
+              const finishReason = normalizedFinishReason(payload.choices?.[0]?.finish_reason);
+              lastStructuredError = finishReason === "length"
                 ? new OpenAiProviderError("OpenAI structured output exhausted its allowance (finish_reason=length).") : error;
+              // A length-truncated JSON object cannot be repaired by asking
+              // the same model for the same oversized batch again. Exit this
+              // model immediately so a configured fallback can answer it, or
+              // triageConversations() can recursively split the batch.
+              if (finishReason === "length" && options.splitOnLengthExhaustion) {
+                this.diagnostic({
+                  kind: "structured_chat_length_split",
+                  operation: options.operation,
+                  model: activeModel,
+                  finishReason,
+                  outputTokens: usage.outputTokens,
+                  requestedMaxTokens: maxTokens,
+                  retryMaxTokens: maxTokens,
+                });
+                break;
+              }
               if (attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) break;
               this.diagnostic({
                 kind: isMalformedStructuredJson(error)
@@ -1577,6 +1610,31 @@ export class OpenAiProvider implements AiProvider {
             result.requestId,
           );
           if (!chatResult.retryable) throw lastStructuredError;
+          // Some compatible gateways report a missing/other finish reason
+          // even though completion_tokens reached the exact requested cap.
+          // Treat both shapes as length exhaustion. Retrying the same prompt
+          // with a larger cap caused multi-minute empty responses in
+          // production; falling through to a model fallback or recursive
+          // batch split keeps full coverage without repeating that work.
+          const allowanceExhausted = chatResult.finishReason === "length"
+            || chatResult.outputTokens >= Math.max(1, Math.floor(maxTokens * 0.95));
+          if (allowanceExhausted && options.splitOnLengthExhaustion) {
+            lastStructuredError = new OpenAiProviderError(
+              `OpenAI returned no structured chat response text (finish_reason=length, content_type=${chatResult.contentType}, output_tokens=${chatResult.outputTokens}).`,
+              undefined,
+              result.requestId,
+            );
+            this.diagnostic({
+              kind: "structured_chat_length_split",
+              operation: options.operation,
+              model: activeModel,
+              finishReason: "length",
+              outputTokens: usage.outputTokens,
+              requestedMaxTokens: maxTokens,
+              retryMaxTokens: maxTokens,
+            });
+            break;
+          }
           if (attempt === STRUCTURED_CHAT_MAX_ATTEMPTS - 1) break;
           const retryMaxTokens = chatResult.finishReason === "length"
             ? Math.min(STRUCTURED_CHAT_MAX_OUTPUT_TOKENS, Math.max(maxTokens + 1_000, maxTokens * 2))
@@ -1774,6 +1832,7 @@ export class OpenAiProvider implements AiProvider {
       schema: TRIAGE_SCHEMA,
       maxOutputTokens: Math.max(4_000, Math.min(12_000, candidates.length * 400)),
       reasoningEffort: "low",
+      splitOnLengthExhaustion: candidates.length > 1,
       context: { workspaceId: request.business.workspaceId, businessId: request.business.businessId },
       system:
         "High-recall triage for Reddit demand intelligence. Return exactly one item for every supplied externalId and no other IDs. Decide whether each lightweight candidate is promising enough to justify fetching full thread context. Interpret meaning, not just keywords: indirect descriptions of a verified customer problem can be highly relevant even when the brand/product category is absent. Conversely, semantic/topical similarity alone is not commercial intent: research, academic comparison, news, promotion, or generic discussion should be informational/promotional/irrelevant. demandSignal describes evidence in the author's own text. productFit asks whether the verified business could plausibly address that problem. " +
@@ -1911,7 +1970,8 @@ export class OpenAiProvider implements AiProvider {
 
     const idsNeedingTriage = expectedIds.filter(id => !collected.has(id));
     const dispatcher = new BoundedBatchDispatcher<string, void>({
-      batchSize: this.triageBatchSize, concurrency: this.requestConcurrency, signal: request.signal,
+      batchSize: triageBatchSizeForModel(this.triageBatchSize, request.models.economyModel),
+      concurrency: this.requestConcurrency, signal: request.signal,
       process: items => processBatch(items.map(item => item.value)),
     });
     try {

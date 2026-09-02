@@ -164,7 +164,7 @@ test("triage splits a persistently length-limited batch instead of failing the s
     coverageRetries: 0,
   });
 
-  assert.deepEqual(calls.map((ids) => ids.length), [4, 4, 4, 2, 2]);
+  assert.deepEqual(calls.map((ids) => ids.length), [4, 2, 2]);
   assert.deepEqual(result.value.map((row) => row.externalId), ["a", "b", "c", "d"]);
 });
 

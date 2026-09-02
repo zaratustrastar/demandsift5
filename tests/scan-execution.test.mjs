@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTsModule } from "./helpers/load-ts-module.mjs";
-const { maintainScanExecution, sameExecution, liveExecution } = await loadTsModule("lib/server/scan-execution.ts");
+const { maintainScanExecution, sameExecution, liveExecution, ScanExecutionTimeoutError } = await loadTsModule("lib/server/scan-execution.ts");
 
 test("execution identity includes token, worker, job and claimed attempt", () => {
   const lease = { token: "a", jobId: "job", workerId: "worker", attempt: 2, active: true, heartbeatAt: new Date().toISOString() };
@@ -49,6 +49,22 @@ test("heartbeat ownership loss stops an idle executor too", async () => {
   const guard = maintainScanExecution(async () => { throw new Error("reclaimed"); }, 5);
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(guard.signal.aborted, true); await guard.stop();
+});
+
+test("an absolute duration ceiling aborts an execution even while ownership stays healthy", async () => {
+  const guard = maintainScanExecution(async () => {}, 5, 15);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(guard.signal.aborted, true);
+  assert.ok(guard.signal.reason instanceof ScanExecutionTimeoutError);
+  assert.equal(guard.signal.reason.code, "scan_execution_timeout");
+  await guard.stop();
+});
+
+test("omitting the duration ceiling never aborts on its own", async () => {
+  const guard = maintainScanExecution(async () => {}, 5);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(guard.signal.aborted, false);
+  await guard.stop();
 });
 
 test("known Apify run identity checkpoints before polling, without storing query text", async () => {

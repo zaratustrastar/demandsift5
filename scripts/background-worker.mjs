@@ -926,11 +926,21 @@ async function runAiVisibilityScheduler(sql, signal) {
 }
 
 export function jobExecutionConfiguration(environment = process.env) {
+  // Ceiling raised from 1_800s (30min) to 5_400s (90min) to match
+  // lib/server/scan-execution.ts's ScanExecutionTimeoutError ceiling
+  // (scanExecutionMaxDurationMs in lib/server/scan-workflow.ts, also
+  // 90min by default). Default value unchanged -- this only takes effect
+  // if BACKGROUND_JOB_TIMEOUT_SECONDS is explicitly configured above the
+  // old 1_800s cap. Before this pair of fixes, a legitimately slow scan
+  // (see docs/scan-speed/baseline.md) could exceed the worker's fixed
+  // 30-minute wait, get marked terminal (scan_execution_timeout is
+  // non-retryable), and keep running orphaned server-side with nothing
+  // ever able to reclaim or observe it again.
   const timeoutSeconds = boundedNumber(
     environment.BACKGROUND_JOB_TIMEOUT_SECONDS,
     1_200,
     1_200,
-    1_800,
+    5_400,
   );
   const heartbeatSeconds = boundedNumber(
     environment.BACKGROUND_JOB_HEARTBEAT_SECONDS,

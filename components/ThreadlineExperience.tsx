@@ -181,12 +181,22 @@ function StageProgress({ rows, scan, connected }: { rows: StageRow[]; scan?: Api
   const age = (time: string | null | undefined) => time && Number.isFinite(Date.parse(time)) ? durationLabel(now - Date.parse(time)) : null;
   const heartbeat = age(progress?.heartbeatAt), lastWork = age(progress?.lastWorkAt);
   const heartbeatDelayed = !!progress?.heartbeatAt && now - Date.parse(progress.heartbeatAt) > 90_000;
+  // A stopped scan (scan.status === "failed") almost always also has a
+  // stale heartbeat -- nothing is refreshing it anymore -- so this check
+  // must come before heartbeatDelayed below, or a scan that has already
+  // reached its terminal state keeps showing "checking for recovery"
+  // forever even though nothing will ever recover it. See
+  // lib/server/scan-execution.ts's ScanExecutionTimeoutError and
+  // scripts/background-worker.mjs's TERMINAL_SCAN_ERROR_CODES: once a scan
+  // lands on "failed" it is done, not paused.
+  const stoppedForGood = scan?.status === "failed";
   const [copied, setCopied] = useState(false);
   const message = !connected ? "Connection interrupted. Showing the last saved status; reconnecting automatically."
     : queued ? "Accepted and waiting for an available worker."
     : retrying ? "A retry is scheduled. Completed work is saved."
     : !scan?.durable && (!scan || scan.phase === "created") ? "Confirming that background work has been accepted…"
-    : heartbeatDelayed ? "The worker heartbeat is delayed. Checking for recovery; saved progress is still available."
+    : stoppedForGood ? "This scan stopped and won't retry automatically. Saved progress below is still available."
+    : heartbeatDelayed ? "No update in a while. Still working; saved progress is still available."
     : "Updates appear as each check finishes.";
 
   return (

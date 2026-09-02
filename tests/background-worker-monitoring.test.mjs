@@ -338,6 +338,13 @@ test("long scan timeout is independent from the heartbeat lease", () => {
     heartbeatSeconds: 20,
     staleSeconds: 120,
   });
+  // Ceiling raised from 1_800s to 5_400s alongside
+  // lib/server/scan-execution.ts's ScanExecutionTimeoutError so an operator
+  // can let the worker wait as long as a detached execution is allowed to
+  // run before it self-aborts, instead of the worker giving up first and
+  // orphaning still-progressing work.
+  assert.equal(jobExecutionConfiguration({ BACKGROUND_JOB_TIMEOUT_SECONDS: "5400" }).timeoutSeconds, 5_400);
+  assert.equal(jobExecutionConfiguration({ BACKGROUND_JOB_TIMEOUT_SECONDS: "999999" }).timeoutSeconds, 5_400);
 });
 
 test("job lease heartbeat only refreshes a still-owned running job", async () => {

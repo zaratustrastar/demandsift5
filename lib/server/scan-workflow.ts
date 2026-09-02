@@ -67,7 +67,7 @@ import { environmentForScan, resolveScanConfiguration, upgradeScanDepthConfigura
 import { deepQualificationBudget, discoveryOnlyReview } from "./scan-depth";
 import { createScanTrace, traceProvider, type ScanTrace } from "./scan-observability";
 import { createWebsiteSnapshot, reusableWebsiteSnapshot, legacyProfileMatchesSnapshot, websitePageSourceId, businessWebsiteSourceIds } from "./website-snapshot";
-import { maintainScanExecution, ScanOwnershipLostError, type ScanExecutionOwner } from "./scan-execution";
+import { maintainScanExecution, ScanOwnershipLostError, ScanExecutionTimeoutError, type ScanExecutionOwner } from "./scan-execution";
 import { assertReviewedVersion } from "./scan-lifecycle";
 import { runtimeProgress, refreshRuntimeProgress, recordScanWork } from "./scan-progress";
 import { createDiscoveryTriageCoordinator, newDiscoveryTriageCheckpoint } from "./discovery-triage-coordinator";
@@ -1049,6 +1049,25 @@ function enrichmentSelectionTarget(required: number, env: NodeJS.ProcessEnv = pr
   return Math.min(enrichmentBudget(env), required + headroom);
 }
 
+/**
+ * Absolute wall-clock ceiling on one detached runScan() execution, entirely
+ * independent of the background worker's own poll timeout
+ * (BACKGROUND_JOB_TIMEOUT_SECONDS, scripts/background-worker.mjs). The
+ * worker giving up only stops the worker from waiting; it does not cancel
+ * the execution still running in this process (see the fire-and-forget
+ * comment on the /execute route). Without this, a run that hits an
+ * unbounded await never reaches its catch/finally block, so the scan
+ * record sits at "running" forever and the frontend polls indefinitely.
+ * Default is deliberately generous -- well above any observed real scan
+ * duration -- since this is a last-resort safety net, not a performance
+ * lever; tune it down only with real evidence a hang is being masked.
+ */
+function scanExecutionMaxDurationMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configuredMinutes = Number(env.SCAN_EXECUTION_MAX_DURATION_MINUTES);
+  const minutes = Number.isFinite(configuredMinutes) ? Math.max(20, Math.min(Math.trunc(configuredMinutes), 240)) : 90;
+  return minutes * 60_000;
+}
+
 const MAX_CONTEXT_TEXT_LENGTH = 4_000;
 
 export type CreateScanInput =
@@ -1126,7 +1145,7 @@ export async function runScan(
   // The DB lease, not a local promise or a caller's resume flag, owns recovery.
   if (claim.state === "running") return claim.scan;
   const scan = claim.scan;
-  const guard = maintainScanExecution(() => repository.refreshScanExecution(scanId, owner));
+  const guard = maintainScanExecution(() => repository.refreshScanExecution(scanId, owner), 15_000, scanExecutionMaxDurationMs(process.env));
   scanExecutions.set(scan, { owner, guard });
   const trace = createScanTrace({ scanId, jobId: options.jobId, jobAttempt: options.jobAttempts });
   const finishExecution = trace.start(options.stopAfterUnderstanding ? "scan.analysis" : "scan.run");
@@ -2691,7 +2710,17 @@ export async function runScan(
     return scan;
   } catch (error) {
     await discoveryTriage?.stop();
-    if (guard.signal.aborted || error instanceof ScanOwnershipLostError) throw new ScanOwnershipLostError();
+    if (guard.signal.aborted) {
+      // Two different reasons collapse onto the same AbortSignal: losing
+      // ownership (a fresh attempt reclaimed the scan) and this execution's
+      // own absolute-duration ceiling firing. Only the former is a race a
+      // retry resolves cleanly; the latter must stay a terminal
+      // scan_execution_timeout so the scan reaches "failed" instead of
+      // silently sitting at "running" forever or bouncing to "retrying".
+      if (guard.signal.reason instanceof ScanExecutionTimeoutError) throw guard.signal.reason;
+      throw new ScanOwnershipLostError();
+    }
+    if (error instanceof ScanOwnershipLostError) throw new ScanOwnershipLostError();
     const message =
       error instanceof UnsafeWebsiteUrlError
         ? error.message

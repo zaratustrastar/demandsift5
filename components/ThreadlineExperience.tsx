@@ -112,8 +112,8 @@ const STAGE_META: Record<string, { label: string; detail: string }> = {
     detail: "Working out what you sell and who it's for.",
   },
   discovery: {
-    label: "Searching recent Reddit conversations",
-    detail: "Searching explicit demand, pain, workaround, switching and timing signals.",
+    label: "Searching the last year of Reddit",
+    detail: "Searching your approved phrases for demand, pain, workarounds, switching and timing signals.",
   },
   triage: {
     label: "Reading every credible candidate",
@@ -2357,24 +2357,6 @@ export function ThreadlineExperience() {
     keepStableScanUrl(latest.scan.id);
   }
 
-  async function acknowledgeCompletionNotice() {
-    const scan = scanResponse?.scan;
-    const notice = scan?.completionNotice;
-    if (!scan || !notice || notice.readAt) return;
-    try {
-      const response = await fetch(`/api/scans/${encodeURIComponent(scan.id)}/completion-notice`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ version: notice.version }),
-      });
-      const payload = (await response.json()) as { notice?: typeof notice; error?: { message?: string } };
-      if (!response.ok || !payload.notice) throw new Error(payload.error?.message ?? "The completion notice could not be dismissed.");
-      setScanResponse(current => current ? { ...current, scan: { ...current.scan, completionNotice: payload.notice } } : current);
-    } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "The completion notice could not be dismissed.");
-    }
-  }
-
   function returnToSetup() {
     navigationVersionRef.current += 1;
     clearStableScanUrl();
@@ -2850,11 +2832,7 @@ export function ThreadlineExperience() {
   }
   return (
     <div className={styles.reportFrame}>
-      {scanResponse?.scan.completionNotice && !scanResponse.scan.completionNotice.readAt ? (
-        <button className={styles.statusToast} type="button" onClick={() => void acknowledgeCompletionNotice()}>
-          <span>✓</span> Your Market Scan is complete and saved. Return in this browser, or on another device with the same signed-in account. <b>Dismiss</b>
-        </button>
-      ) : statusMessage && (
+      {statusMessage && (
         <button className={styles.statusToast} type="button" onClick={() => setStatusMessage("")}>
           <span>✓</span> {statusMessage} <b>×</b>
         </button>

@@ -1,8 +1,12 @@
 {
-  "id": "verify-worker-transport-fix-deploy-2026-09-02",
+  "id": "enable-quality-safe-scan-overlap-2026-09-02",
   "ops": [
-    "status",
-    "runtime"
+    "set-reddit-config APIFY_REDDIT_TIME_RANGE year",
+    "set-reddit-config SCAN_OVERLAP_DISCOVERY_TRIAGE 1",
+    "set-reddit-config SCAN_PARTIAL_RESULTS 1",
+    "reddit-config",
+    "runtime",
+    "status"
   ],
   "inspectScans": [],
   "startScan": null

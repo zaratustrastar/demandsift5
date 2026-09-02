@@ -176,9 +176,9 @@ const STAGES: ScanStage[] = [
   },
   {
     id: "discovery",
-    label: "Searching recent Reddit conversations",
+    label: "Searching the last year of Reddit",
     status: "pending",
-    detail: "Searching explicit demand, pain, workaround, switching and timing signals.",
+    detail: "Searching the user's approved phrases for demand, pain, workarounds, switching and timing signals.",
   },
   {
     id: "triage",

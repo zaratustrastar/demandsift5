@@ -2028,11 +2028,6 @@ export function createRedditProviderFromEnv(
         "The Apify Reddit scraper is test-only. Set APIFY_REDDIT_TEST_MODE=true to opt in explicitly.",
       );
     }
-    const allowedTimeRanges = new Set(["day", "week", "month", "year", "all"] as const);
-    const configuredTimeRange = env.APIFY_REDDIT_TIME_RANGE?.trim().toLowerCase() || "month";
-    if (!allowedTimeRanges.has(configuredTimeRange as "day" | "week" | "month" | "year" | "all")) {
-      throw new Error("APIFY_REDDIT_TIME_RANGE must be day, week, month, year, or all.");
-    }
     return new ApifyRedditTestProvider({
       runRecovery: observation.runRecovery, signal: observation.signal, onActorStarted: observation.onActorStarted,
       fetchImpl: observation.fetchImpl,
@@ -2042,7 +2037,9 @@ export function createRedditProviderFromEnv(
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
       timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 900_000),
-      timeRange: configuredTimeRange as "day" | "week" | "month" | "year" | "all",
+      // Every full scan has one product promise: search the previous year.
+      // Do not let a stale VPS setting silently narrow it to a week/month.
+      timeRange: "year",
     });
   }
   // Harshmaur is selected explicitly, never by swapping APIFY_REDDIT_ACTOR_ID,

@@ -1845,7 +1845,7 @@ export function ProductDashboard({
   const navSections = data.navigation ?? [];
   const activeNavItem = navSections.find((item) => item.id === activeSection);
   const sectionSubtitles: Record<NavigationSectionId, string> = {
-    dashboard: "What changed since you were last here.",
+    dashboard: "The strongest market signals from this scan.",
     opportunities: "One at a time, strongest match first.",
     insights: "Patterns across everything we've read.",
     competitors: "Reddit mentions of you and the tools you compete with.",
@@ -1860,6 +1860,53 @@ export function ProductDashboard({
   const isFree = accessLevel === "free";
 
   const topCarouselItems = carouselItems.slice(0, 3);
+  // Lead with the value the scan actually produced. "Qualified opportunity"
+  // is a deliberately strict subset, so making a zero in that subset the
+  // overview headline hid the useful conversations, replies, and market
+  // evidence already present in the same report. Positive-only cards keep
+  // the overview truthful without advertising an internal funnel rejection.
+  const overviewMetrics = [
+    {
+      label: "Promising conversations",
+      value: carouselItems.length,
+      note: "Relevant matches, ranked by AI",
+    },
+    {
+      label: "High-intent matches",
+      value: data.metrics.highIntentOpportunities,
+      note: "Worth replying to first",
+    },
+    {
+      label: "Replies ready",
+      value: data.metrics.readyReplies,
+      note: `Ready to review${data.metrics.publishedReplies > 0 ? `, ${data.metrics.publishedReplies} posted` : " and use"}`,
+    },
+    {
+      label: "Market insights",
+      value: data.insights.length + data.conversationThemes.length,
+      note: "Demand patterns uncovered",
+    },
+    {
+      label: "Competitor signals",
+      value: data.metrics.competitorSignals,
+      note: "Mentioned in relevant results",
+    },
+    {
+      label: "Reddit posts reviewed",
+      value: data.scanEvidence?.diagnostics.normalized ?? 0,
+      note: "Checked for relevance and intent",
+    },
+    {
+      label: "Search phrases tested",
+      value: data.scanEvidence?.searchPlan.length ?? 0,
+      note: "Using your approved wording",
+    },
+    {
+      label: "Website pages analyzed",
+      value: data.business.analyzedPageCount,
+      note: "Used to understand product fit",
+    },
+  ].filter((metric) => metric.value > 0).slice(0, 4);
 
   if (activeSection === "billing") {
     const planIdForAccessLevel: Record<AccessLevel, PricingPlan["id"]> = {
@@ -2129,26 +2176,13 @@ export function ProductDashboard({
           {activeSection === "dashboard" && (
             <div className={styles.overviewGrid}>
               <div className={styles.metricsRow}>
-                <div className={styles.scMetricCard}>
-                  <span className={styles.scMetricLabel}>Opportunities found</span>
-                  <span className={styles.scMetricValue}>{data.metrics.qualifiedOpportunities}</span>
-                  <span className={styles.scMetricNote}>Qualified this scan</span>
-                </div>
-                <div className={styles.scMetricCard}>
-                  <span className={styles.scMetricLabel}>High intent</span>
-                  <span className={styles.scMetricValue}>{data.metrics.highIntentOpportunities}</span>
-                  <span className={styles.scMetricNote}>Worth replying to first</span>
-                </div>
-                <div className={styles.scMetricCard}>
-                  <span className={styles.scMetricLabel}>Replies ready</span>
-                  <span className={styles.scMetricValue}>{data.metrics.readyReplies}</span>
-                  <span className={styles.scMetricNote}>Drafted, {data.metrics.publishedReplies} posted</span>
-                </div>
-                <div className={styles.scMetricCard}>
-                  <span className={styles.scMetricLabel}>Competitor signals</span>
-                  <span className={styles.scMetricValue}>{data.metrics.competitorSignals}</span>
-                  <span className={styles.scMetricNote}>Mentioned in your results</span>
-                </div>
+                {overviewMetrics.map((metric) => (
+                  <div className={styles.scMetricCard} key={metric.label}>
+                    <span className={styles.scMetricLabel}>{metric.label}</span>
+                    <span className={styles.scMetricValue}>{metric.value}</span>
+                    <span className={styles.scMetricNote}>{metric.note}</span>
+                  </div>
+                ))}
               </div>
 
               <div className={styles.overviewColumns}>

@@ -470,6 +470,71 @@ test("durable scan polling preserves a terminal executor failure", async () => {
   );
 });
 
+test("durable scan polling tolerates a transient transport failure without losing the attempt", async () => {
+  let polls = 0;
+  const result = await waitForScanExecution({
+    signal: AbortSignal.timeout(1_000),
+    timeoutMs: 1_000,
+    pollMs: 1,
+    maxConsecutiveTransportFailures: 3,
+    poll: async () => {
+      polls += 1;
+      // Simulates a dropped connection / DNS blip to the internal executor,
+      // not a well-formed {ok:false} response -- the scan itself is still
+      // running server-side and this attempt must not be abandoned for it.
+      if (polls === 2) throw new Error("socket hang up");
+      return polls < 4
+        ? { ok: true, status: "running", complete: false }
+        : { ok: true, status: "complete", complete: true, scanId: "scan_durable" };
+    },
+  });
+  assert.equal(polls, 4);
+  assert.equal(result.scanId, "scan_durable");
+});
+
+test("durable scan polling gives up after exhausting consecutive transport failures", async () => {
+  let polls = 0;
+  await assert.rejects(
+    waitForScanExecution({
+      signal: AbortSignal.timeout(1_000),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      maxConsecutiveTransportFailures: 2,
+      poll: async () => {
+        polls += 1;
+        throw new Error("socket hang up");
+      },
+    }),
+    (error) => {
+      assert.equal(error.message, "socket hang up");
+      return true;
+    },
+  );
+  // Initial attempt plus two tolerated retries, then the third failure rethrows.
+  assert.equal(polls, 3);
+});
+
+test("durable scan polling still rejects a terminal executor failure immediately, without retrying", async () => {
+  let polls = 0;
+  await assert.rejects(
+    waitForScanExecution({
+      signal: AbortSignal.timeout(1_000),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      maxConsecutiveTransportFailures: 5,
+      poll: async () => {
+        polls += 1;
+        return { ok: false, executorStatus: 502, error: { code: "reddit_enrichment_failed", message: "Enrichment failed." } };
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "reddit_enrichment_failed");
+      return true;
+    },
+  );
+  assert.equal(polls, 1);
+});
+
 test("streamed executor errors retain machine-readable retry disposition", () => {
   assert.throws(
     () => assertSuccessfulExecutorPayload({

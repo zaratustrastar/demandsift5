@@ -1131,14 +1131,59 @@ export function assertSuccessfulExecutorPayload(payload) {
   return payload;
 }
 
+/**
+ * A single poll to the web executor can fail for reasons that have nothing
+ * to do with the scan itself -- a dropped connection, a DNS blip, the web
+ * process being briefly slow to answer under load. Prior behavior treated
+ * any such failure as fatal to the whole job attempt: it threw immediately,
+ * the executor lane failed the job, and the queue reclaimed it as a new
+ * attempt. But the scan execution this attempt kicked off is a detached
+ * server-side task (see the route's "release the HTTP request immediately"
+ * comment) -- it keeps running to completion regardless of whether this
+ * client's polling connection survives. A production scan was observed
+ * losing to exactly this race: attempt 1's real discovery work (242s) was
+ * still genuinely in progress when a transient poll failure caused the
+ * worker to give up, and the resulting new attempt claimed scan ownership
+ * out from under it (beginScanRun's newClaim path does not check
+ * liveExecution), so attempt 1's own checkpoint save failed with
+ * scan_ownership_lost the moment it finally tried to record discovery as
+ * complete -- discovery had genuinely finished, but the attempt no longer
+ * owned the scan to say so.
+ *
+ * Tolerating a bounded run of consecutive *transport*-level poll failures
+ * (network/timeout exceptions thrown by poll() itself) closes that trigger
+ * without touching ownership semantics at all: a clean {ok:false} response
+ * from the server (a real, well-formed scan failure) still rejects
+ * immediately via WorkerExecutorHttpError, exactly as before.
+ */
 export async function waitForScanExecution(options) {
   const startedAt = Date.now();
   const pollMs = Math.max(250, Math.min(Number(options.pollMs ?? 2_000), 30_000));
+  const maxConsecutiveTransportFailures = Math.max(
+    1,
+    Math.min(Number(options.maxConsecutiveTransportFailures ?? process.env.BACKGROUND_JOB_POLL_MAX_TRANSPORT_FAILURES ?? 3), 10),
+  );
+  let consecutiveTransportFailures = 0;
   while (!options.signal.aborted) {
     if (Date.now() - startedAt >= options.timeoutMs) {
       throw new WorkerExecutorTimeoutError(options.timeoutMs);
     }
-    const payload = assertSuccessfulExecutorPayload(await options.poll());
+    let payload;
+    try {
+      payload = assertSuccessfulExecutorPayload(await options.poll());
+    } catch (error) {
+      if (options.signal.aborted || error instanceof WorkerExecutorHttpError) throw error;
+      consecutiveTransportFailures += 1;
+      if (consecutiveTransportFailures > maxConsecutiveTransportFailures) throw error;
+      log("warn", "scan_poll_transport_retry", {
+        attempt: consecutiveTransportFailures,
+        maxAttempts: maxConsecutiveTransportFailures,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      await waitForNextPoll(options.signal, pollMs);
+      continue;
+    }
+    consecutiveTransportFailures = 0;
     if (payload?.complete === true || payload?.status === "complete") return payload;
     await waitForNextPoll(options.signal, pollMs);
   }

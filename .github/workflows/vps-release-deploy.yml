@@ -1,6 +1,6 @@
 name: DemandSift trusted VPS release
-# Release marker: overview value framing, completion-toast removal, and
-# quality-safe discovery/triage overlap, production default (2026-09-02).
+# Release marker: simplified completion headers and bounded DeepSeek triage
+# recovery, preserving complete scan coverage (2026-09-02 14:45 Europe/Madrid).
 
 on:
   push:

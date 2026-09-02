@@ -26,6 +26,8 @@ test("a useful report can never be presented as Save your 0 opportunities", () =
   assert.doesNotMatch(experience, /qualifiedOpportunities=\{dashboardData\.metrics\.qualifiedOpportunities\}/);
   assert.match(experience, /We found \$\{summary\.promisingConversations\} promising Reddit conversation/);
   assert.match(experience, /Save results with Google/);
+  assert.doesNotMatch(experience, /statusLabel="Save your results"/);
+  assert.doesNotMatch(experience, /statusLabel="All set"/);
 });
 
 test("the marketing fallback remains truthful when no conversation passed screening", () => {

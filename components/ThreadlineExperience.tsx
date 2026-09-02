@@ -1709,7 +1709,7 @@ function SignupGate({
 
   return (
     <main className={styles.scanScreen}>
-      <OnboardingHeader activeIndex={4} statusLabel="Save your results" />
+      <OnboardingHeader activeIndex={4} />
       <section className={`${styles.scanPanel} ${styles.signupPanel}`}>
         <div className={styles.scanKicker}>Your market intelligence is ready</div>
         <h1>
@@ -1756,7 +1756,7 @@ function DoneConfirmation({
 }) {
   return (
     <main className={styles.scanScreen}>
-      <OnboardingHeader activeIndex={4} statusLabel="All set" />
+      <OnboardingHeader activeIndex={4} />
       <section className={`${styles.scanPanel} ${styles.donePanel}`}>
         <div className={styles.doneMark} aria-hidden="true">&#10003;</div>
         <h1>{signedIn ? "Your account is set up" : "You're set for now"}</h1>

@@ -302,3 +302,4 @@ jobs:
 # trigger: deploy reconciled scan-speed rollout (2026-09-01)
 # trigger: deploy JSONB-stable website snapshot validation (2026-09-01)
 # trigger: one-year approved phrases + results conversion copy (2026-09-02)
+# trigger: worker-transport-retry-fix 20260902T011238Z

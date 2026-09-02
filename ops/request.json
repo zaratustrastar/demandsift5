@@ -1,9 +1,9 @@
 {
-  "id": "inspect-stuck-scan-d7987-2026-09-02",
+  "id": "verify-worker-transport-fix-deploy-2026-09-02",
   "ops": [
     "status",
     "runtime"
   ],
-  "inspectScans": ["scan_d798772b58914ca5888b3b48cc2fe182"],
+  "inspectScans": [],
   "startScan": null
 }

@@ -1460,7 +1460,23 @@ export async function runScan(
         since, checkpoint: scan.discoveryTriageCheckpoint,
         maxCandidates: Number(env.SCAN_EARLY_TRIAGE_LIMIT ?? 100), flushDelayMs: Number(env.SCAN_EARLY_TRIAGE_FLUSH_MS ?? 1_000),
         batchSize: aiCapacity.triageBatchSize, concurrency: aiCapacity.requestConcurrency,
-        onCheckpoint: async () => { recordScanWork(scan); await persistScan(scan); },
+        onCheckpoint: async (candidates) => {
+          recordScanWork(scan);
+          // Publish real preview cards as early judgments land, not only
+          // once the whole triage stage finishes -- this is the same
+          // publish call the final reconciliation pass below already makes;
+          // calling it again here is safe because replaceCandidatePreviews
+          // diffs by content fingerprint, so a repeat with unchanged data is
+          // a no-op and a richer/updated candidate simply supersedes its
+          // earlier preview.
+          if (scan.runConfiguration!.flags.partialResults) {
+            const judgmentsByExternalId = new Map(
+              Object.values(scan.discoveryTriageCheckpoint!.judgments).map(entry => [entry.externalId, entry.triage] as const),
+            );
+            replaceCandidatePreviews(scan, candidates, judgmentsByExternalId);
+          }
+          await persistScan(scan);
+        },
         onProgress: progress => {
           const live = runtimeProgress(scan);
           live.canonicalEligible = progress.eligible;

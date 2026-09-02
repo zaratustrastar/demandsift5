@@ -21,7 +21,11 @@ export function createDiscoveryTriageCoordinator(options: {
   since: string; checkpoint: DiscoveryTriageCheckpoint;
   maxCandidates?: number; flushDelayMs?: number; now?: () => Date;
   batchSize?: number; concurrency?: number;
-  onCheckpoint: () => Promise<void>;
+  /** Receives the coordinator's current cleaned candidate superset -- the
+   * same list `offer()` just re-cleaned -- so a caller can publish partial
+   * results (e.g. candidate previews) as early judgments land, not only
+   * once the final reconciliation pass runs. */
+  onCheckpoint: (candidates: readonly RedditDiscoveryCandidate[]) => Promise<void>;
   onProgress?: (progress: { eligible: number; succeeded: number; promising: number }) => void;
 }) {
   const maximum = Number.isFinite(options.maxCandidates) ? Math.max(0, Math.min(200, Math.floor(options.maxCandidates!))) : 100;
@@ -47,7 +51,7 @@ export function createDiscoveryTriageCoordinator(options: {
           options.checkpoint.judgments[version] = { externalId: item.externalId, triage: item.triage };
         }
       }
-      updateProgress(); await options.onCheckpoint();
+      updateProgress(); await options.onCheckpoint(latest);
     },
   });
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };

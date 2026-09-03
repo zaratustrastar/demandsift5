@@ -62,9 +62,16 @@ export interface ThemeClusteringOptions {
  */
 const PHRASE_FUNCTION_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "been", "but", "for", "from", "had",
-  "has", "have", "i", "in", "is", "it", "its", "me", "my", "no", "not", "of",
+  "has", "have", "i", "in", "is", "it", "its", "me", "my", "not", "of",
   "on", "or", "our", "so", "that", "the", "them", "they", "this", "to",
   "was", "we", "were", "with", "you", "your",
+  // "no" is deliberately absent: it is a pure negation particle standing
+  // alone ("no, thanks"), but inside fixed two-word domain compounds like
+  // "no shows" / "no-show" / "no show rate" it carries the entire meaning.
+  // Blocking it here collapsed every no-show conversation down to the
+  // fragment "shows"/"show" as the winning theme label. THEME_STOP_WORDS
+  // (the single-token filter) still drops a lone "no", so this only
+  // affects whether "no X" is allowed to form as a two-word phrase.
 ]);
 
 function allTokens(value: string): string[] {
@@ -89,13 +96,24 @@ function themeTokens(value: string): string[] {
  * "screen limits" that no conversation actually contains, and a theme label
  * has to be traceable to real wording.
  */
+// Bigram words normally need >= 3 characters (a broad filter against noise
+// like "at"/"is"/"to"). "no" is the one deliberate exception: it is only 2
+// characters but, unlike those others, carries the whole meaning of fixed
+// domain compounds ("no shows", "no-code", "no answer"). Without this
+// exception the length check silently drops "no" from every bigram before
+// the PHRASE_FUNCTION_WORDS check even runs.
+function isShortButMeaningful(token: string): boolean {
+  return token === "no";
+}
+
 function candidatePhrases(value: string): string[] {
   const sequence = allTokens(value);
   const phrases = new Set<string>();
   for (let index = 0; index + 1 < sequence.length; index += 1) {
     const left = sequence[index];
     const right = sequence[index + 1];
-    if (left.length < 3 || right.length < 3) continue;
+    if ((left.length < 3 && !isShortButMeaningful(left)) ||
+        (right.length < 3 && !isShortButMeaningful(right))) continue;
     if (PHRASE_FUNCTION_WORDS.has(left) || PHRASE_FUNCTION_WORDS.has(right)) continue;
     phrases.add(`${left} ${right}`);
   }

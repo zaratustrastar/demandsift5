@@ -1731,6 +1731,26 @@ export function ProductDashboard({
   const [creatingReplyId, setCreatingReplyId] = useState<string | null>(null);
   const [disconnectingReddit, setDisconnectingReddit] = useState(false);
 
+  // The Replies tab previously only read `rankedOpportunities` (server-
+  // persisted opportunities), so a reply generated this session via
+  // "Create reply" on a relevant-but-not-yet-an-opportunity conversation
+  // never appeared there or counted toward "drafted" -- it only lives in
+  // `createdReplies`, keyed by conversation id, until the next full data
+  // refetch. Build lightweight display cards for those so they show up
+  // immediately, without waiting on a refetch.
+  const sessionOnlyDraftedConversations = useMemo(
+    () =>
+      relevantConversations
+        .filter((conversation) => Boolean(createdReplies[conversation.id]?.trim()))
+        .map((conversation) => ({
+          id: conversation.id,
+          subreddit: conversation.subreddit,
+          title: conversation.title,
+          draftText: createdReplies[conversation.id],
+        })),
+    [relevantConversations, createdReplies],
+  );
+
   const disconnectReddit = async () => {
     if (!onDisconnectReddit || disconnectingReddit) return;
     setDisconnectingReddit(true);
@@ -1851,7 +1871,7 @@ export function ProductDashboard({
     competitors: "Reddit mentions of you and the tools you compete with.",
     visibility: "Whether assistants name you, and what they read.",
     replies: "Drafts, posted replies and what they did.",
-    results: "Everything this scan found, including what's stored but not shown.",
+    results: "Anything stored beyond what's already shown elsewhere in this scan.",
     monitoring: "Daily Reddit monitoring, watch terms and your Reddit connection.",
     settings: "Your business profile, competitors and Reddit connection.",
     billing: "Your plan and how to change it.",
@@ -2402,12 +2422,33 @@ export function ProductDashboard({
             <div className={styles.lightSection}>
               <div className={styles.simpleCard}>
                 <span className={styles.simpleCardTitle}>
-                  {publishedOpportunityIds.length} posted &middot; {rankedOpportunities.length} drafted
+                  {publishedOpportunityIds.length} posted &middot;{" "}
+                  {rankedOpportunities.length + sessionOnlyDraftedConversations.length} drafted
                 </span>
                 <p className={styles.simpleCardBody} style={{ margin: 0 }}>
                   Nothing is ever posted without you reading it first.
                 </p>
               </div>
+              {sessionOnlyDraftedConversations.map((conversation) => (
+                <div key={conversation.id} className={styles.simpleCard}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                    <span className={styles.simpleCardEyebrow}>{conversation.subreddit}</span>
+                    <span className={styles.todayTag} style={{ background: "#f4f4f5", color: "#52525b" }}>
+                      draft
+                    </span>
+                  </div>
+                  <span className={styles.simpleCardTitle}>{conversation.title}</span>
+                  <p className={styles.simpleCardBody}>{conversation.draftText}</p>
+                  <button
+                    type="button"
+                    className={styles.ghostButton}
+                    onClick={goToSection("opportunities")}
+                    style={{ alignSelf: "flex-start" }}
+                  >
+                    Open in Opportunities
+                  </button>
+                </div>
+              ))}
               {rankedOpportunities.map((opportunity) => {
                 const isPublished = publishedOpportunityIds.includes(opportunity.id);
                 return (
@@ -2445,23 +2486,51 @@ export function ProductDashboard({
 
           {activeSection === "results" && (
             <div className={styles.lightSection}>
-              {data.lockedCounts ? (
-                <div className={styles.simpleCard}>
-                  <span className={styles.simpleCardTitle}>Everything this scan found</span>
-                  <p className={styles.simpleCardBody}>
-                    {data.lockedCounts.opportunities} opportunities &middot;{" "}
-                    {data.lockedCounts.insights} insights &middot;{" "}
-                    {data.lockedCounts.competitorSignals} competitor signals &middot;{" "}
-                    {data.lockedCounts.visibilityOpportunities} visibility opportunities &middot;{" "}
-                    {data.lockedCounts.readyReplies} ready replies
-                  </p>
-                  {isFree && (
-                    <span className={styles.simpleCardMeta}>
-                      Some of this is stored but not shown on the free scan.
-                    </span>
-                  )}
-                </div>
-              ) : (
+              {data.lockedCounts ? (() => {
+                // These are counts of ADDITIONAL, currently-hidden findings
+                // beyond what's already shown elsewhere in the dashboard --
+                // not a total of everything the scan found. When nothing is
+                // held back (e.g. full access, or a small scan with nothing
+                // left over), every field here is legitimately zero. The old
+                // headline claimed this was the scan's full total, so a
+                // zero read as "the scan found nothing at all." Label what's
+                // actually being measured, and give the zero case its own
+                // honest copy instead of a misleading all-zero total.
+                const totalLocked =
+                  data.lockedCounts.opportunities +
+                  data.lockedCounts.insights +
+                  data.lockedCounts.competitorSignals +
+                  data.lockedCounts.visibilityOpportunities +
+                  data.lockedCounts.readyReplies;
+                if (totalLocked === 0) {
+                  return (
+                    <div className={styles.simpleCard}>
+                      <span className={styles.simpleCardTitle}>Nothing else is hidden</span>
+                      <p className={styles.simpleCardBody}>
+                        Everything this scan found is already visible in Opportunities,
+                        Insights, Competitors, and Replies.
+                      </p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className={styles.simpleCard}>
+                    <span className={styles.simpleCardTitle}>More is stored than shown here</span>
+                    <p className={styles.simpleCardBody}>
+                      {data.lockedCounts.opportunities} opportunities &middot;{" "}
+                      {data.lockedCounts.insights} insights &middot;{" "}
+                      {data.lockedCounts.competitorSignals} competitor signals &middot;{" "}
+                      {data.lockedCounts.visibilityOpportunities} visibility opportunities &middot;{" "}
+                      {data.lockedCounts.readyReplies} ready replies
+                    </p>
+                    {isFree && (
+                      <span className={styles.simpleCardMeta}>
+                        Some of this is stored but not shown on the free scan.
+                      </span>
+                    )}
+                  </div>
+                );
+              })() : (
                 <div className={styles.simpleEmpty}>
                   <strong>Nothing stored yet</strong>
                   <p>Results from this scan will appear here once they&apos;re available.</p>

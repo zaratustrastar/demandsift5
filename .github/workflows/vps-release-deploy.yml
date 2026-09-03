@@ -309,3 +309,4 @@ jobs:
 # trigger: fix orphaned detached scan execution + stuck recovery UI 20260902T171940Z
 # trigger: decouple live preview cards from overlapDiscoveryTriage 20260903T100328Z
 # trigger: retire scan-speed rollout with permanent kill switch 20260903T113325Z
+# trigger: pick up OPENAI_ECONOMY_FALLBACK_MODELS=gpt-5.5 for deepseek-v4-flash length-exhaustion 20260903T133030Z

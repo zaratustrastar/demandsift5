@@ -1,7 +1,6 @@
 name: DemandSift trusted VPS release
-# Release marker: correction to the Replies-tab session-draft merge fix --
-# it initially covered only relevantConversations, missing the
-# scanEvidence.candidates carousel path added by a separate, later commit
+# Release marker: remove a second fabricated hero stat ("1,412 scans run
+# so far" + fake avatar dots) missed in the earlier landing-copy pass
 # (2026-09-04).
 
 on:

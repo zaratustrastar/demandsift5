@@ -282,10 +282,10 @@ export type LandingSubmission = { mode: "website"; websiteUrl: string } | { mode
 const MIN_CONTEXT_TEXT_LENGTH = 20;
 
 const landingStats = [
-  { value: "1,412", label: "Scans run since launch" },
-  { value: "62k", label: "Conversations read and filtered" },
+  { value: "100%", label: "Source-linked, every result" },
+  { value: "0", label: "Threads posted without you reading first" },
   { value: "Live", label: "Saved progress as your scan runs" },
-  { value: "94%", label: "Of what we read never reaches you" },
+  { value: "94%", label: "Filtered out before it wastes your time" },
 ];
 
 const landingStepChips = ["social listening", "reddit monitoring", "lead discovery", "B2B SaaS"];
@@ -378,10 +378,6 @@ const landingFaq = [
     a: "No — and it would not work if it did. Every reply is drafted to answer the question that was actually asked, nothing is posted without you reading it, and if mentioning your product is relevant we add the disclosure. A reply that reads like an ad gets buried, which helps nobody.",
   },
   {
-    q: "Do you post on my behalf?",
-    a: "Only if you connect your Reddit account and press post. Without that, you copy the reply and we open the thread for you. Either way a human decides.",
-  },
-  {
     q: "How do you choose which subreddits to watch?",
     a: "We do not restrict to specific subreddits -- we search across Reddit for terms drawn from your site (what you sell, the problems you solve, your competitors), and AI checks every match for relevance before anything is kept. You can edit those search terms any time from Monitoring config.",
   },
@@ -391,11 +387,11 @@ const landingFaq = [
   },
   {
     q: "What if my website does not explain much?",
-    a: "Then correct us. After the crawl you get an editable profile of what we think you sell — fixing one line there is the single biggest improvement you can make to your results.",
+    a: "Skip the crawl and use the \"Describe your market / idea\" tab instead -- a few honest sentences in your own words usually works better than a thin site. Either way, you get an editable profile of what we think you sell before anything runs, and correcting it is the single biggest improvement you can make to your results.",
   },
   {
     q: "Can I cancel?",
-    a: "One click in billing, and the trial does not charge you if you leave before day seven.",
+    a: "Yes, anytime, in one click from Billing. Cancel before day 7 of the trial and you are not charged anything; after that it is the regular monthly rate until you cancel.",
   },
 ];
 
@@ -558,11 +554,6 @@ function Landing({
 
       <section className={styles.slHero} id="top">
         <div className={styles.slHeroInner}>
-          <div className={styles.slHeroBadge}>
-            <span>First scan is free &mdash; no card, no account</span>
-            <span className={styles.slHeroBadgeArrow} aria-hidden="true">&#8594;</span>
-          </div>
-
           <h1 className={styles.slHeroTitle}>
             Find the Reddit conversations where people are{" "}
             <span className={styles.slHeroTitleAccent}>already looking</span> for what you sell
@@ -781,7 +772,7 @@ function Landing({
         <div className={styles.slSectionInner}>
           <div className={styles.slSectionHead}>
             <span className={styles.slEyebrow}>[ how it works ]</span>
-            <h2 className={styles.slSectionTitle}>Tell us what you sell. We do the reading. You write the reply.</h2>
+            <h2 className={styles.slSectionTitle}>Tell us what you sell. We do the reading. You hit send.</h2>
             <p className={styles.slSectionSubtitle}>Three steps, and only the third one needs you.</p>
           </div>
 
@@ -915,7 +906,7 @@ function Landing({
           <div className={styles.slCompoundGrid}>
             <div className={styles.slCompoundCard}>
               <div className={styles.slCompoundIconRow}>
-                <span className={styles.slCompoundIcon} data-tone="reddit" />
+                <img src="/logos/reddit.png" alt="Reddit" className={styles.slCompoundIcon} />
                 <span>Engage on Reddit</span>
               </div>
               <div className={styles.slCompoundDemo}>
@@ -941,7 +932,7 @@ function Landing({
 
             <div className={styles.slCompoundCard}>
               <div className={styles.slCompoundIconRow}>
-                <span className={styles.slCompoundIcon} data-tone="google" />
+                <img src="/logos/google.png" alt="Google" className={styles.slCompoundIcon} />
                 <span>Rank on Google</span>
               </div>
               <div className={styles.slCompoundDemo}>
@@ -964,7 +955,11 @@ function Landing({
 
             <div className={styles.slCompoundCard}>
               <div className={styles.slCompoundIconRow}>
-                <span className={styles.slCompoundIcon} data-tone="ai" />
+                <img
+                  src="/logos/openai.png"
+                  alt="ChatGPT"
+                  className={`${styles.slCompoundIcon} ${styles.slCompoundIconOpenai}`}
+                />
                 <span>Get cited by AI</span>
               </div>
               <div className={styles.slCompoundDemo}>
@@ -991,9 +986,10 @@ function Landing({
             <span className={styles.slEyebrow}>[ daily monitoring ]</span>
             <h2 className={styles.slSectionTitleSmall}>New conversations every day, while they&rsquo;re still live</h2>
             <p className={styles.slSectionSubtitle}>
-              A thread is worth replying to for about a day. After that it&rsquo;s an archive. Scooptr
-              watches your keywords, your brand and your competitors around the clock, so the ones worth
-              answering are waiting for you in the morning rather than found three weeks late.
+              Whoever answers first usually wins the thread &mdash; and the Google ranking and the AI
+              citation that follow it. Scooptr watches your keywords, your brand and your competitors
+              around the clock, so you&rsquo;re the first real answer in the room instead of the reply
+              that shows up three weeks after a competitor already got the click.
             </p>
             <div className={styles.slMonitorPoints}>
               {landingMonitorPoints.map((p) => (

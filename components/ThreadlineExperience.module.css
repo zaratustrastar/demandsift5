@@ -429,10 +429,8 @@
 .slCompoundGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .slCompoundCard { border: 1px solid #27272a; border-radius: 12px; padding: 26px; display: flex; flex-direction: column; gap: 20px; background: #131316; }
 .slCompoundIconRow { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 600; color: #fafafa; }
-.slCompoundIcon { width: 22px; height: 22px; border-radius: 6px; display: inline-block; }
-.slCompoundIcon[data-tone="reddit"] { background: var(--sl-warm); }
-.slCompoundIcon[data-tone="google"] { background: #3b82f6; }
-.slCompoundIcon[data-tone="ai"] { background: #d4d4d8; }
+.slCompoundIcon { width: 22px; height: 22px; border-radius: 6px; display: inline-block; object-fit: contain; }
+.slCompoundIconOpenai { background: #fafafa; padding: 3px; box-sizing: border-box; }
 .slCompoundDemo { background: #1a1a1e; border: 1px solid #27272a; border-radius: 9px; padding: 15px; display: flex; flex-direction: column; gap: 11px; min-height: 176px; }
 .slCompoundCard h3 { font-size: 18px; font-weight: 600; color: #fafafa; letter-spacing: -.02em; }
 .slCompoundCard > p { font-size: 14px; line-height: 1.55; color: var(--sl-text-fainter); }

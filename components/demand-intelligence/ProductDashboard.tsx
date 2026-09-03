@@ -1738,18 +1738,14 @@ export function ProductDashboard({
   // `createdReplies`, keyed by conversation id, until the next full data
   // refetch. Build lightweight display cards for those so they show up
   // immediately, without waiting on a refetch.
-  const sessionOnlyDraftedConversations = useMemo(
-    () =>
-      relevantConversations
-        .filter((conversation) => Boolean(createdReplies[conversation.id]?.trim()))
-        .map((conversation) => ({
-          id: conversation.id,
-          subreddit: conversation.subreddit,
-          title: conversation.title,
-          draftText: createdReplies[conversation.id],
-        })),
-    [relevantConversations, createdReplies],
-  );
+  //
+  // Deliberately reads from `carouselItems` (defined below), not the raw
+  // `relevantConversations` variable: the carousel's "relevant" items are
+  // relevantConversations PLUS every scanEvidence.candidates entry folded
+  // in via candidateAsRelevantConversation. A reply can be created from
+  // either source, so filtering only relevantConversations silently missed
+  // any conversation.id that only existed via that second, candidate-based
+  // path -- exactly the gap that made this fix appear broken in practice.
 
   const disconnectReddit = async () => {
     if (!onDisconnectReddit || disconnectingReddit) return;
@@ -1859,6 +1855,21 @@ export function ProductDashboard({
       (a, b) => b.reliability - a.reliability,
     );
   }, [rankedOpportunities, relevantConversations, data.scanEvidence]);
+
+  const sessionOnlyDraftedConversations = useMemo(
+    () =>
+      carouselItems
+        .filter((item): item is Extract<CarouselItem, { kind: "relevant" }> => item.kind === "relevant")
+        .map((item) => item.conversation)
+        .filter((conversation) => Boolean(createdReplies[conversation.id]?.trim()))
+        .map((conversation) => ({
+          id: conversation.id,
+          subreddit: conversation.subreddit,
+          title: conversation.title,
+          draftText: createdReplies[conversation.id],
+        })),
+    [carouselItems, createdReplies],
+  );
 
   const hasAnyRelevantContent = carouselItems.length > 0;
 

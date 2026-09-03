@@ -62,14 +62,33 @@ test("the Replies tab counts and lists replies created this session via 'Create 
   assert.match(replies, /sessionOnlyDraftedConversations\.map/);
 });
 
-test("session-only drafted conversations are derived from createdReplies, not a separate source of truth", () => {
+test("session-only drafted conversations are derived from carouselItems, not just relevantConversations", () => {
+  // The first version of this fix filtered only `relevantConversations`,
+  // missing conversations that only exist via the second carousel source
+  // (scanEvidence.candidates, folded in through candidateAsRelevantConversation)
+  // -- so a reply created on one of those never appeared here. Deriving from
+  // carouselItems' own "relevant" items covers both sources by construction.
   assert.match(
     dashboardSource,
     /sessionOnlyDraftedConversations\s*=\s*useMemo\(/,
   );
   const memoStart = dashboardSource.indexOf("const sessionOnlyDraftedConversations = useMemo(");
-  const memoEnd = dashboardSource.indexOf(");", memoStart);
+  const memoEnd = dashboardSource.indexOf("[carouselItems, createdReplies]", memoStart);
+  assert.ok(memoEnd > memoStart, "expected the memo to depend on carouselItems, not relevantConversations directly");
   const memoSource = dashboardSource.slice(memoStart, memoEnd);
-  assert.match(memoSource, /relevantConversations/);
+  assert.match(memoSource, /carouselItems/);
+  assert.match(memoSource, /item\.kind === "relevant"/);
   assert.match(memoSource, /createdReplies\[conversation\.id\]/);
+
+  // Guard the invariant this fix relies on: carouselItems' "relevant" items
+  // must still be built from both relevantConversations AND
+  // scanEvidence.candidates. If a future change drops either source from
+  // carouselItems, or reintroduces a separate parallel source, this fix's
+  // coverage would silently narrow again the same way it did before.
+  const carouselStart = dashboardSource.indexOf("const carouselItems = useMemo<CarouselItem[]>(");
+  const carouselEnd = dashboardSource.indexOf("hasAnyRelevantContent", carouselStart);
+  const carouselSource = dashboardSource.slice(carouselStart, carouselEnd);
+  assert.match(carouselSource, /relevantConversations\.map/);
+  assert.match(carouselSource, /data\.scanEvidence\?\.candidates/);
+  assert.match(carouselSource, /candidateAsRelevantConversation/);
 });

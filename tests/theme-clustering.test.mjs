@@ -157,3 +157,23 @@ test("higher-weight evidence is listed first", () => {
   );
   assert.equal(themes[0].sourceIds[0], "strong");
 });
+
+test("a 'no ___' compound like no-shows is not collapsed to a bare fragment", () => {
+  const themes = clusterThemes(
+    [
+      struggle("s1", "Angry at no shows and last-minute cancellations"),
+      struggle("s2", "Losing $3k/week to no shows, what's working for you?"),
+      struggle("s3", "How do you deal with No-Shows?"),
+      struggle("s4", "What improves no show rates?"),
+    ],
+    "struggle",
+    options(),
+  );
+  assert.ok(themes.length >= 1);
+  const [top] = themes;
+  // Before the fix, "no" was blocked from forming any two-word phrase, so
+  // the winning label degraded to the meaningless fragment "shows"/"show".
+  assert.match(top.label.toLowerCase(), /no shows?\b/);
+  assert.notEqual(top.label.toLowerCase(), "show");
+  assert.notEqual(top.label.toLowerCase(), "shows");
+});

@@ -14,6 +14,7 @@ import {
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
+  type ApiPartialPreview,
   type ApiPartialResponse,
   type ApiScanResponse,
 } from "./demand-intelligence/from-scan";
@@ -210,7 +211,7 @@ function StageProgress({ rows, scan, connected }: { rows: StageRow[]; scan?: Api
             role="listitem"
             aria-label={`${row.label}: ${queued && row.status !== "complete" ? "queued" : retrying && row.status === "active" ? "retry scheduled" : row.status}`}
           >
-            <span aria-hidden="true">{row.status === "complete" ? "✓" : row.status === "active" && !queued ? "•" : ""}</span>
+            <span aria-hidden="true">{row.status === "complete" ? "✓" : row.status === "active" && !queued ? "●" : "○"}</span>
             <div>
               <strong>{row.label}</strong>
               <small>{progressDetail(row.id, progress, row.detail)}</small>
@@ -227,13 +228,16 @@ function StageProgress({ rows, scan, connected }: { rows: StageRow[]; scan?: Api
       {progress && progress.insights !== "unknown" && rows.some(row => row.id === "qualification") && (
         <p className={styles.progressStatus}>Findings summary: {progress.insights === "fallback" ? "sourced fallback ready" : progress.insights === "active" ? "being prepared" : progress.insights}.</p>
       )}
+      {elapsed !== null && !stoppedForGood && (
+        <p className={styles.scanRunningLabel}>Scan running · {durationLabel(elapsed)}</p>
+      )}
       <div className={styles.stageFooter}>
         {elapsed !== null && <span>Scan time: {durationLabel(elapsed)} · excludes time awaiting your review</span>}
         {lastWork && <span>Last saved progress: {lastWork} ago</span>}
         {heartbeat && <span>Worker last seen: {heartbeat} ago</span>}
       </div>
       <p className={styles.stageCloseNote}>{scan?.durable
-        ? "Your scan is saved and runs on the server. Return in this browser; if you signed in, the same account can open it on another device."
+        ? "You can leave this page. Your scan keeps running on the server -- return in this browser, or on another device if you signed in, and your saved progress will be waiting."
         : "Keep this tab open until background work is confirmed. This session has not confirmed durable acceptance."}</p>
       {scan?.durable && <button className={styles.returnLink} type="button" onClick={async () => {
         const link = new URL(window.location.pathname, window.location.origin); link.searchParams.set("scan_id", scan.id);
@@ -1323,6 +1327,16 @@ function liveReplyLabel(state: "ready" | "pending" | "failed" | undefined): stri
   return "Reply being prepared";
 }
 
+// Derived from triage's own intent judgment -- not a fabricated match score.
+// Full-context qualification (with a real percentage) has not run on these
+// yet; that is exactly what "Qualification pending" already communicates.
+function intentBadge(intent: ApiPartialPreview["intent"] | undefined): string | null {
+  if (intent === "actively_looking" || intent === "switching") return "🔥 High intent";
+  if (intent === "evaluating") return "Evaluating options";
+  if (intent === "problem_aware") return "Problem aware";
+  return null;
+}
+
 function LiveScanDashboard({
   url,
   inputMode,
@@ -1422,14 +1436,20 @@ function LiveScanDashboard({
                 <b>{partial.previews.length}</b>
               </div>
               <div className={styles.liveCardGrid}>
-                {partial.previews.map(preview => (
-                  <article className={`${styles.liveCard} ${styles.livePreviewCard}`} key={preview.id}>
-                    <div className={styles.liveCardMeta}><span>r/{preview.subreddit.replace(/^r\//, "")}</span><em>Qualification pending</em></div>
-                    <h4>{preview.title}</h4>
-                    <p>{preview.problem || preview.excerpt}</p>
-                    <small>{preview.demandSignal.replaceAll("_", " ")} · {preview.productFit} product fit</small>
-                  </article>
-                ))}
+                {partial.previews.map(preview => {
+                  const badge = intentBadge(preview.intent);
+                  return (
+                    <article className={`${styles.liveCard} ${styles.livePreviewCard}`} key={preview.id}>
+                      <div className={styles.liveCardMeta}>
+                        <span>r/{preview.subreddit.replace(/^r\//, "")}</span>
+                        {badge ? <em className={styles.liveIntentBadge}>{badge}</em> : <em>Qualification pending</em>}
+                      </div>
+                      <h4>{preview.title}</h4>
+                      <p>{preview.problem || preview.excerpt}</p>
+                      <small>{preview.demandSignal.replaceAll("_", " ")} · {preview.productFit} product fit</small>
+                    </article>
+                  );
+                })}
               </div>
             </section>
           )}

@@ -129,7 +129,7 @@ test("free partial presentation bounds screened previews and reply states to vis
   assert.equal(presenter.presentPartialResults(qualifiedRecord.partialResults, access(true)).replyStates.length, 4);
 });
 
-test("real workflow persists screened previews before a terminal downstream failure", { skip: "SCAN_SPEED_KILL_SWITCH permanently disables partialResults; this test exercises the now-retired incremental-publish path through the real workflow" }, async t => {
+test("real workflow persists screened previews before a terminal downstream failure", async t => {
   const fixture = await scanWorkflowHarness(t, { count: 5, env: { SCAN_PARTIAL_RESULTS: "1" } });
   await assert.rejects(fixture.workflow.runScan(fixture.scan.id), error => error === fixture.stop);
   assert.ok(fixture.scan.partialResults.version > 0);

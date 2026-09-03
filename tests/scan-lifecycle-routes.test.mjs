@@ -53,9 +53,17 @@ test("built API requires reviewed approval, preserves context flow and private o
   assert.ok(completed.value.report); assert.equal(completed.value.report.dataMode, "mock");
   const partial = await request(`/api/scans/${id}/partial?afterVersion=0`, { cookie });
   assert.equal(partial.response.status, 200);
-  // SCAN_SPEED_KILL_SWITCH permanently disables partialResults, so no incremental
-  // snapshot is ever published even with SCAN_PARTIAL_RESULTS=1 set above.
-  assert.equal(partial.value.changed, false); assert.equal(partial.value.version, 0);
+  // Preview publishing is unconditional now (not gated by any scan-speed
+  // flag): the plain sequential triage loop's own per-batch checkpoint
+  // publishes candidate previews as it goes. This mock fixture's synthetic
+  // candidates are all triaged as relevant, so a real snapshot is written.
+  assert.equal(partial.value.changed, true); assert.equal(partial.value.version, 1);
+  assert.equal(partial.value.partial.previews.length, 5);
+  for (const preview of partial.value.partial.previews) {
+    assert.equal(preview.kind, "candidate_preview");
+    assert.equal(preview.qualificationStatus, "pending");
+    assert.ok(preview.title); assert.ok(preview.subreddit); assert.ok(preview.intent);
+  }
   assert.equal(partial.response.headers.get("cache-control"), "private, no-store");
   assert.equal((await request(`/api/scans/${id}/partial?afterVersion=${partial.value.version}`, { cookie })).value.changed, false);
   assert.equal((await request(`/api/scans/${id}/partial?afterVersion=bad`, { cookie })).response.status, 400);

@@ -1815,19 +1815,15 @@ export async function runScan(
             scan.triageCheckpoint = next;
             updateTriageCoverage();
             scan.updatedAt = new Date().toISOString();
-            // Publish preview cards from this main-path triage loop too, not
-            // only from the overlapDiscoveryTriage coordinator's checkpoint.
-            // Before this, a scan running with overlapDiscoveryTriage off (or
-            // one where the overlap pass covered little of the final
-            // candidate set) never streamed cards at all: the only other
-            // publish call is after the entire needsTriage loop finishes, a
-            // few lines below. replaceCandidatePreviews diffs by content
-            // fingerprint, so calling it every batch is cheap (no new DB
-            // round trip -- persistScan below already runs regardless of
-            // this flag) and a repeat with unchanged data is a no-op.
-            if (scan.runConfiguration!.flags.partialResults) {
-              replaceCandidatePreviews(scan, prefilteredSurvivors, new Map(Object.entries(next)));
-            }
+            // Publish preview cards from this main-path triage loop, not
+            // gated behind any scan-speed flag: this is the plain sequential
+            // pipeline's own per-batch checkpoint, which already runs
+            // unconditionally below. replaceCandidatePreviews diffs by
+            // content fingerprint, so calling it every batch adds no new DB
+            // round trip (persistScan below already runs regardless) and a
+            // repeat with unchanged data is a no-op. This is what powers the
+            // "found so far" live preview cards during a normal scan.
+            replaceCandidatePreviews(scan, prefilteredSurvivors, new Map(Object.entries(next)));
             try {
               await persistScan(scan);
             } catch (error) {
@@ -1871,9 +1867,9 @@ export async function runScan(
     const worthEnriching = prefilteredSurvivors.filter(
       (candidate) => triageById.get(candidate.externalId)?.worthEnriching,
     );
-    if (scan.runConfiguration.flags.partialResults) {
-      replaceCandidatePreviews(scan, prefilteredSurvivors, triageById);
-    }
+    // Final triage-complete snapshot, unconditional for the same reason as
+    // the per-batch publish above: cheap, fingerprint-diffed, no flag gate.
+    replaceCandidatePreviews(scan, prefilteredSurvivors, triageById);
     const zeroResultAuditCandidates = worthEnriching.length === 0
       ? selectZeroResultAuditCandidates({
           candidates: cleaned.survivors,

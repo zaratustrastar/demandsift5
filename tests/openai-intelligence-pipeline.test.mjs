@@ -884,3 +884,75 @@ test("qualifyConversations: when Surplus's own retries are exhausted, a configur
   assert.equal(primaryAttempts, 3, "expected exactly 3 exhausted attempts against Surplus");
   assert.equal(fallbackAttempts, 1, "expected exactly one call to the direct fallback");
 });
+
+test("a duplicate answer index from analyzeVisibilityMentions is retried, not rejected on the first attempt", async () => {
+  // Observed live: a fresh AI Visibility check failed immediately with
+  // "OpenAI returned duplicate answer index 1 in visibility mentions."
+  // parseVisibilityMentions correctly detected the bad output, but
+  // isRetryableStructuredOutputError didn't recognize this message shape
+  // (it only matched the similar-but-differently-worded externalId case),
+  // so the call skipped the 3-attempt retry this same code path already
+  // gives every other structured-output error and failed on attempt one.
+  let attempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        // The model claims index 1 twice and never returns index 0.
+        return chatResponse({
+          results: [
+            { index: 1, brandRecommended: true, reasoning: "first" },
+            { index: 1, brandRecommended: false, reasoning: "duplicate" },
+          ],
+        });
+      }
+      return chatResponse({
+        results: [
+          { index: 0, brandRecommended: true, reasoning: "ok" },
+          { index: 1, brandRecommended: false, reasoning: "ok" },
+        ],
+      });
+    },
+  });
+  const result = await provider.analyzeVisibilityMentions({
+    brandName: "Example",
+    answers: [
+      { index: 0, question: "best tool for X?", answerText: "Try Example." },
+      { index: 1, question: "alternatives to Y?", answerText: "Example is fine." },
+    ],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    workspaceId: "ws_1",
+    businessId: "biz_1",
+  });
+  assert.equal(attempts, 2, "expected the bad first attempt to be retried, not thrown immediately");
+  assert.deepEqual(
+    result.value.map((row) => row.index).sort(),
+    [0, 1],
+  );
+});
+
+test("an unknown answer index from analyzeVisibilityMentions is also retried", async () => {
+  let attempts = 0;
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return chatResponse({ results: [{ index: 7, brandRecommended: true, reasoning: "wrong index" }] });
+      }
+      return chatResponse({ results: [{ index: 0, brandRecommended: true, reasoning: "ok" }] });
+    },
+  });
+  const result = await provider.analyzeVisibilityMentions({
+    brandName: "Example",
+    answers: [{ index: 0, question: "best tool for X?", answerText: "Try Example." }],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    workspaceId: "ws_1",
+    businessId: "biz_1",
+  });
+  assert.equal(attempts, 2, "expected the unknown-index attempt to be retried, not thrown immediately");
+  assert.equal(result.value[0].index, 0);
+});

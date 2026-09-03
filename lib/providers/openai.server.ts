@@ -1047,7 +1047,14 @@ function isRetryableStructuredOutputError(error: unknown): error is OpenAiProvid
   // branch, since it has no way to further exclude a type from itself.
   const message = error.message;
   if (isMalformedStructuredJson(error)) return true;
-  return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId)/.test(message);
+  // "duplicate/unknown answer index" (parseVisibilityMentions) is the same
+  // shape of transient model slip as "duplicate/unknown externalId" below --
+  // a one-off formatting mistake worth a normal retry, not a systemic
+  // failure. It used different wording and was never added here, so every
+  // visibility-mentions run failed hard on the first attempt instead of
+  // getting the 3 retries + model fallback this same function already gives
+  // the externalId case.
+  return /^OpenAI returned (?:an invalid|unknown externalId|duplicate externalId|an unknown answer index|duplicate answer index)/.test(message);
 }
 
 function isStructuredLengthExhaustion(error: unknown): error is OpenAiProviderError {

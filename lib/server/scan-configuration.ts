@@ -67,6 +67,30 @@ function rolloutPercent(value: string | undefined, name: string) {
   return parsed;
 }
 
+/**
+ * Hard kill switch for the entire scan-speed rollout (coordinatedRetries,
+ * overlapDiscoveryTriage, compactTriage, partialResults).
+ *
+ * Set to true at operator request to fully retire the T00-T19 scan-speed
+ * initiative: overlapDiscoveryTriage's overhead (re-cleaning the discovery
+ * candidate list on every offer() call, running a second parallel
+ * triage/checkpoint system concurrently with discovery) was never shown to
+ * net out faster than the plain sequential pipeline, and the whole feature
+ * added meaningful surface area (a separate coordinator, a partial-results
+ * store, per-scan config freezing) for a benefit nobody had measured.
+ *
+ * This bypasses every other gate below -- env vars, workspace rollout
+ * percentage, the SCAN_SPEED_INTERNAL_WORKSPACES allowlist, and
+ * PRODUCTION_DEFAULT_FLAGS (the flags af724cc made default-on in
+ * production independent of their own env var; the ordinary per-flag env
+ * vars alone cannot override that, which is exactly why an env-only
+ * toggle isn't enough here). No env var can turn any of these four flags
+ * back on while this is true; only this line can. To bring any of them
+ * back, flip this to false (or fork the switch per-flag) once there's
+ * real before/after evidence one is worth its cost.
+ */
+const SCAN_SPEED_KILL_SWITCH = true;
+
 function workspaceRollout(env: NodeJS.ProcessEnv, workspaceId?: string) {
   const internal = new Set((env.SCAN_SPEED_INTERNAL_WORKSPACES ?? "").split(",").map(value => value.trim()).filter(Boolean));
   const internalWorkspace = Boolean(workspaceId && internal.has(workspaceId));
@@ -76,11 +100,13 @@ function workspaceRollout(env: NodeJS.ProcessEnv, workspaceId?: string) {
   const percentages = Object.fromEntries(Object.entries(ROLLOUTS).map(([name, [, percentKey]]) =>
     [name, rolloutPercent(env[percentKey], percentKey)])) as RolloutPercentages;
   const productionRuntime = env.APP_RUNTIME_ENV?.trim().toLowerCase() === "production";
-  const enabled = Object.fromEntries(Object.entries(ROLLOUTS).map(([name, [flagKey]]) => [name,
-    (env[flagKey] === "1" || (productionRuntime && PRODUCTION_DEFAULT_FLAGS.has(name as RolloutFlag)))
-      && (internalWorkspace || (workspaceBucket !== null && workspaceBucket < percentages[name as RolloutFlag])
-      || (workspaceBucket === null && percentages[name as RolloutFlag] === 100)),
-  ])) as Record<RolloutFlag, boolean>;
+  const enabled = SCAN_SPEED_KILL_SWITCH
+    ? Object.fromEntries(Object.keys(ROLLOUTS).map(name => [name, false])) as Record<RolloutFlag, boolean>
+    : Object.fromEntries(Object.entries(ROLLOUTS).map(([name, [flagKey]]) => [name,
+        (env[flagKey] === "1" || (productionRuntime && PRODUCTION_DEFAULT_FLAGS.has(name as RolloutFlag)))
+          && (internalWorkspace || (workspaceBucket !== null && workspaceBucket < percentages[name as RolloutFlag])
+          || (workspaceBucket === null && percentages[name as RolloutFlag] === 100)),
+      ])) as Record<RolloutFlag, boolean>;
   return { workspaceBucket, internalWorkspace, percentages, enabled };
 }
 

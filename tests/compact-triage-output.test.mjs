@@ -49,14 +49,18 @@ async function run(compactOutput, output = row => semanticJudgment(row)) {
   return { result, requests };
 }
 
-test("compact triage is accepted and frozen as an opt-in scan setting", () => {
+test("compact triage stays off even when explicitly requested -- SCAN_SPEED_KILL_SWITCH overrides it", () => {
+  // See lib/server/scan-configuration.ts's SCAN_SPEED_KILL_SWITCH: the whole
+  // scan-speed rollout (this flag included) was retired at operator request.
+  // SCAN_COMPACT_TRIAGE=1 alone was never enough to turn this on in
+  // production anyway (it required 100% rollout too), but this test used to
+  // demonstrate the flag *can* flip on with the right config; now it
+  // demonstrates that no config can, which is the current intended behavior.
   const off = configuration.resolveScanConfiguration({});
-  const on = configuration.resolveScanConfiguration({ SCAN_COMPACT_TRIAGE: "1" });
+  const explicitlyRequested = configuration.resolveScanConfiguration({ SCAN_COMPACT_TRIAGE: "1", SCAN_COMPACT_TRIAGE_ROLLOUT_PERCENT: "100" });
   assert.equal(off.flags.compactTriage, false);
-  assert.equal(on.flags.compactTriage, true);
-  assert.notEqual(on.id, off.id);
-  assert.equal(configuration.environmentForScan(on, {}).SCAN_COMPACT_TRIAGE, "1");
-  assert.equal(configuration.environmentForScan(off, { SCAN_COMPACT_TRIAGE: "1" }).SCAN_COMPACT_TRIAGE, undefined);
+  assert.equal(explicitlyRequested.flags.compactTriage, false);
+  assert.equal(configuration.environmentForScan(explicitlyRequested, { SCAN_COMPACT_TRIAGE: "1" }).SCAN_COMPACT_TRIAGE, undefined);
 });
 
 test("compact policy has an exact checkpoint/cache version without invalidating legacy keys", () => {
@@ -96,12 +100,12 @@ test("compact guidance never truncates or repairs a valid verbose response", asy
   assert.equal(compact.result.coverage.complete, true);
 });
 
-test("the accepted scan flag reaches the real workflow triage request", async t => {
-  const fixture = await scanWorkflowHarness(t, { count: 1, env: { SCAN_COMPACT_TRIAGE: "1" } });
+test("the real workflow never requests compact output while the kill switch is on, even with the flag configured", async t => {
+  const fixture = await scanWorkflowHarness(t, { count: 1, env: { SCAN_COMPACT_TRIAGE: "1", SCAN_COMPACT_TRIAGE_ROLLOUT_PERCENT: "100" } });
   const original = fixture.state.ai.triageConversations;
   const seen = [];
   fixture.state.ai.triageConversations = request => { seen.push(request.compactOutput); return original(request); };
   await assert.rejects(fixture.workflow.runScan(fixture.scan.id), error => error === fixture.stop);
-  assert.deepEqual(seen, [true]);
-  assert.equal(fixture.scan.runConfiguration.flags.compactTriage, true);
+  assert.deepEqual(seen, [false]);
+  assert.equal(fixture.scan.runConfiguration.flags.compactTriage, false);
 });

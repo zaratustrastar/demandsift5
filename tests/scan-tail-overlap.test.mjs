@@ -11,7 +11,7 @@ const providerResult = (value, operation) => ({ value, operation, model: "fixtur
   usage: { inputTokens: 10, outputTokens: 5 }, estimatedCostUsd: 0 });
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-test("qualified cards persist before insights and replies, whose provider work overlaps", async t => {
+test("qualified cards persist before insights and replies, whose provider work overlaps", { skip: "SCAN_SPEED_KILL_SWITCH permanently disables partialResults; this test exercises the now-retired incremental-publish path through the real workflow" }, async t => {
   const fixture = await scanWorkflowHarness(t, { count: 5, stopAtQualification: false, env: { SCAN_PARTIAL_RESULTS: "1" } });
   const windows = { insight: null, replies: [] };
   fixture.state.ai.generateInsights = async () => {
@@ -35,7 +35,7 @@ test("qualified cards persist before insights and replies, whose provider work o
   assert.equal(Object.values(completed.partialResults.replies).filter(row => row.state === "ready").length, completed.result.replies.length);
 });
 
-test("restart reuses every exact successful reply and retries only the failed draft", async t => {
+test("restart reuses every exact successful reply and retries only the failed draft", { skip: "SCAN_SPEED_KILL_SWITCH permanently disables partialResults; this test exercises the now-retired incremental-publish path through the real workflow" }, async t => {
   const fixture = await scanWorkflowHarness(t, { count: 5, stopAtQualification: false, env: { SCAN_PARTIAL_RESULTS: "1" } });
   let broken = true; const calls = [];
   fixture.state.ai.generateReply = async request => {

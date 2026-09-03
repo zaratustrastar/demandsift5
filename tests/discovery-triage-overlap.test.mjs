@@ -26,7 +26,7 @@ function providerFor(fixture, calls, { onCall, judge = row => triage(row.externa
   fixture.state.ai = provider; return provider;
 }
 
-test("workflow starts AI before late search finishes, never blocks the chunk hook, and rechecks richer evidence", async t => {
+test("workflow starts AI before late search finishes, never blocks the chunk hook, and rechecks richer evidence", { skip: "SCAN_SPEED_KILL_SWITCH permanently disables overlapDiscoveryTriage; this test exercises the now-retired overlap mechanism" }, async t => {
   const fixture = await scanWorkflowHarness(t, { count: 26, env: { SCAN_OVERLAP_DISCOVERY_TRIAGE: "1" } });
   const calls = [], firstAi = deferred(), releaseAi = deferred(), chunkReturned = deferred(), lastSearch = deferred();
   const richer = { ...fixture.rows[0], body: `${fixture.rows[0].body} New evidence: evaluating a replacement this week.`, metrics: { score: 10, comments: 50 } };
@@ -50,7 +50,7 @@ test("workflow starts AI before late search finishes, never blocks the chunk hoo
   assert.equal(fixture.scan.triageCheckpointVersions.depth0, triageInputVersion({ business: fixture.scan.discoveryProfile.business, models }, richer));
 });
 
-for (const embeddingsFail of [false, true]) test(`450-candidate final pool and shortlist match baseline (embedding failure=${embeddingsFail})`, async t => {
+for (const embeddingsFail of [false, true]) test(`450-candidate final pool and shortlist match baseline (embedding failure=${embeddingsFail})`, { skip: "SCAN_SPEED_KILL_SWITCH permanently disables overlapDiscoveryTriage; this test exercises the now-retired overlap mechanism" }, async t => {
   const runs = [];
   for (const enabled of [false, true]) await t.test(enabled ? "overlap" : "sequential", async child => {
     const fixture = await scanWorkflowHarness(child, { count: 450, env: { SCAN_OVERLAP_DISCOVERY_TRIAGE: enabled ? "1" : "0" } });
@@ -70,7 +70,7 @@ for (const embeddingsFail of [false, true]) test(`450-candidate final pool and s
   assert.deepEqual(runs[1], runs[0]);
 });
 
-test("restart after partial discovery reuses exact saved early judgments without resubmission", async t => {
+test("restart after partial discovery reuses exact saved early judgments without resubmission", { skip: "SCAN_SPEED_KILL_SWITCH permanently disables overlapDiscoveryTriage; this test exercises the now-retired overlap mechanism" }, async t => {
   const fixture = await scanWorkflowHarness(t, { count: 26, env: { SCAN_OVERLAP_DISCOVERY_TRIAGE: "1" } });
   const calls = [], earlySaved = deferred(); let interrupted = true;
   providerFor(fixture, calls);

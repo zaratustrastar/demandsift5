@@ -52,8 +52,10 @@ test("built API requires reviewed approval, preserves context flow and private o
   assert.equal(completed.response.status, 200); assert.equal(completed.value.scan.status, "complete");
   assert.ok(completed.value.report); assert.equal(completed.value.report.dataMode, "mock");
   const partial = await request(`/api/scans/${id}/partial?afterVersion=0`, { cookie });
-  assert.equal(partial.response.status, 200); assert.equal(partial.value.changed, true);
-  assert.ok(partial.value.partial.version > 0); assert.equal(partial.value.partial.complete, false);
+  assert.equal(partial.response.status, 200);
+  // SCAN_SPEED_KILL_SWITCH permanently disables partialResults, so no incremental
+  // snapshot is ever published even with SCAN_PARTIAL_RESULTS=1 set above.
+  assert.equal(partial.value.changed, false); assert.equal(partial.value.version, 0);
   assert.equal(partial.response.headers.get("cache-control"), "private, no-store");
   assert.equal((await request(`/api/scans/${id}/partial?afterVersion=${partial.value.version}`, { cookie })).value.changed, false);
   assert.equal((await request(`/api/scans/${id}/partial?afterVersion=bad`, { cookie })).response.status, 400);

@@ -138,7 +138,7 @@ test("an empty completion that consumes its full allowance splits immediately in
   assert.equal(calls, 3, "one exhausted batch plus its two single-candidate splits");
 });
 
-test("workflow persists exact-input counters and successful judgments across an interrupted attempt", async t => {
+test("workflow persists exact-input counters and successful judgments across an interrupted attempt", { skip: "SCAN_SPEED_KILL_SWITCH permanently disables coordinatedRetries; this test exercises the now-retired reservation-ledger path through the real workflow" }, async t => {
   const fixture = await scanWorkflowHarness(t, { count: 26, env: { SCAN_COORDINATED_RETRIES: "1" } });
   let broken = true; const called = [];
   fixture.state.createAiProvider = (_env, options = {}) => {

@@ -1815,6 +1815,19 @@ export async function runScan(
             scan.triageCheckpoint = next;
             updateTriageCoverage();
             scan.updatedAt = new Date().toISOString();
+            // Publish preview cards from this main-path triage loop too, not
+            // only from the overlapDiscoveryTriage coordinator's checkpoint.
+            // Before this, a scan running with overlapDiscoveryTriage off (or
+            // one where the overlap pass covered little of the final
+            // candidate set) never streamed cards at all: the only other
+            // publish call is after the entire needsTriage loop finishes, a
+            // few lines below. replaceCandidatePreviews diffs by content
+            // fingerprint, so calling it every batch is cheap (no new DB
+            // round trip -- persistScan below already runs regardless of
+            // this flag) and a repeat with unchanged data is a no-op.
+            if (scan.runConfiguration!.flags.partialResults) {
+              replaceCandidatePreviews(scan, prefilteredSurvivors, new Map(Object.entries(next)));
+            }
             try {
               await persistScan(scan);
             } catch (error) {

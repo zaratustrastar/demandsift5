@@ -1,6 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: simplified completion headers and bounded DeepSeek triage
-# recovery, preserving complete scan coverage (2026-09-02 14:45 Europe/Madrid).
+# Release marker: dashboard honesty fixes -- Insights theme-label bug, Results
+# tab locked-count mislabeling, Replies tab session-draft merge, AI Visibility
+# duplicate/unknown-answer-index retry fix, and a landing page copy/logo pass
+# (2026-09-04).
 
 on:
   push:

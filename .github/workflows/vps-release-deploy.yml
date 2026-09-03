@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: dashboard honesty fixes -- Insights theme-label bug, Results
-# tab locked-count mislabeling, Replies tab session-draft merge, AI Visibility
-# duplicate/unknown-answer-index retry fix, and a landing page copy/logo pass
+# Release marker: correction to the Replies-tab session-draft merge fix --
+# it initially covered only relevantConversations, missing the
+# scanEvidence.candidates carousel path added by a separate, later commit
 # (2026-09-04).
 
 on:

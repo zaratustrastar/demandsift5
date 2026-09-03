@@ -638,18 +638,6 @@ function Landing({
               </p>
             )}
           </form>
-
-          <div className={styles.slAvatarRow}>
-            <div className={styles.slAvatarStack}>
-              <span className={styles.slAvatarDot} data-tone="a" />
-              <span className={styles.slAvatarDot} data-tone="b" />
-              <span className={styles.slAvatarDot} data-tone="a" />
-              <span className={styles.slAvatarDot} data-tone="c" />
-            </div>
-            <span className={styles.slScanCount}>
-              <strong>1,412</strong> scans run so far
-            </span>
-          </div>
         </div>
 
         <div className={styles.slPreviewWrap}>

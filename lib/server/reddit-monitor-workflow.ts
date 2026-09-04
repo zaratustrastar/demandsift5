@@ -123,7 +123,7 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
   if (!run) throw new Error("Reddit monitor run was not found.");
   if (run.status === "succeeded") return run;
   try {
-    const settings = await getRedditMonitorSettings(run.workspaceId);
+    const settings = await getRedditMonitorSettings(run.workspaceId, run.seedScanId);
     if (!settings || !settings.enabled) throw new Error("Reddit monitoring is no longer enabled.");
     const seed = await repository.getScan(run.seedScanId);
     if (!seed || seed.workspaceId !== run.workspaceId || seed.status !== "complete" || !seed.discoveryProfile) {

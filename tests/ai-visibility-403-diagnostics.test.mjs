@@ -183,6 +183,6 @@ test("the database has a durable provider_errors column, added via a real migrat
 });
 
 test("the AI visibility settings API exposes scan history, not just the single latest scan", () => {
-  assert.match(routeSource, /listAiVisibilityScans\(actor\.workspaceId, 8\)/);
+  assert.match(routeSource, /listAiVisibilityScans\(actor\.workspaceId, scan\.id, 8\)/);
   assert.match(routeSource, /recentScans/);
 });

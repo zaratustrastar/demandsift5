@@ -24,8 +24,8 @@ export async function GET(request: Request, context: RouteContext) {
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
 
     const [settings, scans] = await Promise.all([
-      getAiVisibilitySettings(scan.workspaceId),
-      listAiVisibilityScans(scan.workspaceId, 20),
+      getAiVisibilitySettings(scan.workspaceId, scan.id),
+      listAiVisibilityScans(scan.workspaceId, scan.id, 20),
     ]);
 
     return Response.json(

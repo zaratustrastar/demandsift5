@@ -100,12 +100,12 @@ export function redditMonitorConfiguration(environment = process.env) {
   };
 }
 
-export function redditMonitorDedupeKey(workspaceId, now) {
+export function redditMonitorDedupeKey(workspaceId, seedScanId, now) {
   const milliseconds = validTimestamp(now);
-  if (!workspaceId || milliseconds === null) {
-    throw new Error("A workspace and valid timestamp are required for Reddit monitoring.");
+  if (!workspaceId || !seedScanId || milliseconds === null) {
+    throw new Error("A workspace, seed scan, and valid timestamp are required for Reddit monitoring.");
   }
-  return `reddit-monitor:${workspaceId}:${new Date(milliseconds).toISOString().slice(0, 10)}`;
+  return `reddit-monitor:${workspaceId}:${seedScanId}:${new Date(milliseconds).toISOString().slice(0, 10)}`;
 }
 
 export function monitoringConfiguration(environment = process.env) {
@@ -634,6 +634,7 @@ export async function scheduleRedditMonitorScans(
           FROM background_jobs AS pending_job
           WHERE pending_job.type = 'reddit_monitor_scan'
             AND pending_job.payload ->> 'workspaceId' = monitor.workspace_id
+            AND pending_job.payload ->> 'seedScanId' = monitor.seed_scan_id
             AND pending_job.status IN ('queued', 'running', 'retrying')
         )
       ORDER BY monitor.next_run_at, monitor.workspace_id
@@ -654,7 +655,7 @@ export async function scheduleRedditMonitorScans(
       const windowStartedAt = monitor.last_successful_monitor_at
         ? new Date(monitor.last_successful_monitor_at)
         : new Date(nowMs - configuration.firstLookbackHours * 60 * 60 * 1_000);
-      const dedupeKey = redditMonitorDedupeKey(monitor.workspace_id, scheduledAt);
+      const dedupeKey = redditMonitorDedupeKey(monitor.workspace_id, monitor.seed_scan_id, scheduledAt);
       const record = {
         id: runId,
         workspaceId: monitor.workspace_id,
@@ -681,7 +682,7 @@ export async function scheduleRedditMonitorScans(
         ) VALUES (
           'reddit_monitor_scan',
           'queued',
-          ${transactionSql.json({ monitorRunId: runId, workspaceId: monitor.workspace_id })},
+          ${transactionSql.json({ monitorRunId: runId, workspaceId: monitor.workspace_id, seedScanId: monitor.seed_scan_id })},
           ${dedupeKey},
           0,
           1,
@@ -858,6 +859,7 @@ export async function scheduleAiVisibilityScans(
           FROM background_jobs AS pending_job
           WHERE pending_job.type = 'ai_visibility_scan'
             AND pending_job.payload ->> 'workspaceId' = schedule.workspace_id
+            AND pending_job.payload ->> 'seedScanId' = schedule.seed_scan_id
             AND pending_job.status IN ('queued', 'running', 'retrying')
         )
       ORDER BY schedule.next_run_at, schedule.workspace_id
@@ -888,7 +890,7 @@ export async function scheduleAiVisibilityScans(
         ) VALUES (
           'ai_visibility_scan',
           'queued',
-          ${transactionSql.json({ visibilityScanId: scanId, workspaceId: row.workspace_id })},
+          ${transactionSql.json({ visibilityScanId: scanId, workspaceId: row.workspace_id, seedScanId: row.seed_scan_id })},
           ${dedupeKey},
           0,
           ${maxAttempts},

@@ -2083,7 +2083,9 @@ export function ThreadlineExperience() {
   }, []);
 
   useEffect(() => {
-    if (view !== "report") return;
+    const scanId: string | undefined = scanResponse?.scan.id;
+    if (view !== "report" || !scanId) return;
+    const activeScanId: string = scanId;
     let cancelled = false;
     async function loadRedditConnection() {
       try {
@@ -2101,7 +2103,7 @@ export function ThreadlineExperience() {
 
     async function loadRedditMonitoring() {
       try {
-        const response = await fetch("/api/monitoring/settings", { cache: "no-store" });
+        const response = await fetch(`/api/monitoring/settings?scanId=${encodeURIComponent(activeScanId)}`, { cache: "no-store" });
         const payload = (await response.json()) as {
           monitoring?: RedditMonitoringStatus;
           recentRuns?: RedditMonitorRunSummary[];
@@ -2118,7 +2120,7 @@ export function ThreadlineExperience() {
 
     async function loadAiVisibility() {
       try {
-        const response = await fetch("/api/ai-visibility/settings", { cache: "no-store" });
+        const response = await fetch(`/api/ai-visibility/settings?scanId=${encodeURIComponent(activeScanId)}`, { cache: "no-store" });
         const payload = (await response.json()) as {
           visibility?: AiVisibilityStatus | null;
           recentScans?: AiVisibilityScanSummary[];
@@ -2147,7 +2149,7 @@ export function ThreadlineExperience() {
       cancelled = true;
       window.clearInterval(backgroundStatusTimer);
     };
-  }, [view, accessLevel]);
+  }, [view, accessLevel, scanResponse?.scan.id]);
 
   /** The body for POST /api/scans, matching whichever tab the user actually
    * submitted -- see LandingSubmission. The two are otherwise interchangeable
@@ -2573,11 +2575,16 @@ export function ThreadlineExperience() {
     enabled: boolean,
     watchTerms: RedditMonitoringStatus["watchTerms"],
   ): Promise<boolean> {
+    const scanId = scanResponse?.scan.id;
+    if (!scanId) {
+      setStatusMessage("Daily Reddit monitoring could not be updated.");
+      return false;
+    }
     try {
       const response = await fetch("/api/monitoring/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled, watchTerms }),
+        body: JSON.stringify({ enabled, watchTerms, scanId }),
       });
       const payload = (await response.json()) as {
         monitoring?: RedditMonitoringStatus;
@@ -2600,11 +2607,16 @@ export function ThreadlineExperience() {
   }
 
   async function updateAiVisibility(enabled: boolean): Promise<boolean> {
+    const scanId = scanResponse?.scan.id;
+    if (!scanId) {
+      setStatusMessage("AI visibility tracking could not be updated.");
+      return false;
+    }
     try {
       const response = await fetch("/api/ai-visibility/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({ enabled, scanId }),
       });
       const payload = (await response.json()) as {
         visibility?: AiVisibilityStatus;

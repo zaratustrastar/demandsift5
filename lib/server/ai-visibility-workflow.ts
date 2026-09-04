@@ -13,6 +13,7 @@ import {
   completeAiVisibilityScan,
   createAiVisibilitySettings,
   failAiVisibilityScan,
+  findAiVisibilitySettingsForWebsite,
   getAiVisibilityScan,
   getAiVisibilitySettings,
   nextMonday,
@@ -57,7 +58,15 @@ const PROVIDERS: AiVisibilityAiProvider[] = ["chatgpt", "gemini", "perplexity"];
 export async function ensureAiVisibilityTrackingStarted(scan: ScanRecord): Promise<void> {
   const repository = getStateRepository();
   if (repository.kind !== "postgres") return; // dev/test memory store: no durable job queue to enqueue into.
-  const existing = await getAiVisibilitySettings(scan.workspaceId);
+  // Check by website first: a monitoring re-scan of an already-tracked
+  // business gets a brand new scan id every cycle, so checking by this
+  // scan's own id alone would never find the existing schedule and would
+  // start a second, separate one for the same business on every pass (see
+  // findAiVisibilitySettingsForWebsite's own doc comment). Falls through to
+  // the exact-id check for context-mode businesses, which have no stable
+  // website identity to match re-scans against.
+  const existing = (await findAiVisibilitySettingsForWebsite(scan.workspaceId, scan.websiteUrl))
+    ?? (await getAiVisibilitySettings(scan.workspaceId, scan.id));
   if (existing) return;
   await createAiVisibilitySettings({
     workspaceId: scan.workspaceId,

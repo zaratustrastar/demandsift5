@@ -5,6 +5,7 @@ import {
   backgroundJobs,
   runtimeAiVisibilityScans,
   runtimeAiVisibilitySchedules,
+  runtimeScans,
 } from "@/db/postgres/schema";
 import type {
   AiVisibilityAiProvider,
@@ -25,6 +26,13 @@ import { isProductionRuntime } from "@/lib/server/runtime-env";
 
 const memorySettings = new Map<string, AiVisibilitySettingsRecord>();
 const memoryScans = new Map<string, AiVisibilityScanRecord>();
+
+// One settings row per (workspace, business) now, not per workspace --
+// see migration 0013. The memory-store map key has to carry both parts of
+// that same composite identity.
+function settingsKey(workspaceId: string, seedScanId: string): string {
+  return `${workspaceId}:${seedScanId}`;
+}
 
 function isMemoryStore(): boolean {
   const configured = process.env.STATE_STORE?.trim().toLocaleLowerCase("en-US");
@@ -83,21 +91,51 @@ function scanFromRow(row: typeof runtimeAiVisibilityScans.$inferSelect): AiVisib
   };
 }
 
-export async function getAiVisibilitySettings(workspaceId: string): Promise<AiVisibilitySettingsRecord | null> {
-  if (isMemoryStore()) return memorySettings.get(workspaceId) ?? null;
+export async function getAiVisibilitySettings(workspaceId: string, seedScanId: string): Promise<AiVisibilitySettingsRecord | null> {
+  if (isMemoryStore()) return memorySettings.get(settingsKey(workspaceId, seedScanId)) ?? null;
   const [row] = await getDb()
     .select()
     .from(runtimeAiVisibilitySchedules)
-    .where(eq(runtimeAiVisibilitySchedules.workspaceId, workspaceId))
+    .where(and(eq(runtimeAiVisibilitySchedules.workspaceId, workspaceId), eq(runtimeAiVisibilitySchedules.seedScanId, seedScanId)))
     .limit(1);
   return row ? settingsFromRow(row) : null;
 }
 
 /**
+ * Finds an already-tracked business's schedule by matching this scan's
+ * websiteUrl against the seed scan of any existing schedule in the same
+ * workspace. Used only by ensureAiVisibilityTrackingStarted: a monitoring
+ * re-scan of an already-tracked business gets a brand new scan id every
+ * cycle (see createMonitoringScanRecord in background-worker.mjs), so
+ * checking getAiVisibilitySettings by that new id alone would never find
+ * the existing schedule and would create a second, separate one for the
+ * same business on every single monitoring pass.
+ *
+ * Skipped for context-mode businesses (empty websiteUrl): they have no
+ * stable identity to match re-scans against across scans, only a scan id.
+ * Known, narrower gap -- not the cross-business collision this migration
+ * fixes -- left for a follow-up rather than expanding this one further.
+ */
+export async function findAiVisibilitySettingsForWebsite(workspaceId: string, websiteUrl: string): Promise<AiVisibilitySettingsRecord | null> {
+  if (!websiteUrl) return null;
+  if (isMemoryStore()) return null; // no cross-repository scan lookup available in the memory store.
+  const [row] = await getDb()
+    .select({ schedule: runtimeAiVisibilitySchedules })
+    .from(runtimeAiVisibilitySchedules)
+    .innerJoin(runtimeScans, eq(runtimeScans.id, runtimeAiVisibilitySchedules.seedScanId))
+    .where(and(eq(runtimeAiVisibilitySchedules.workspaceId, workspaceId), eq(runtimeScans.websiteUrl, websiteUrl)))
+    .limit(1);
+  return row ? settingsFromRow(row.schedule) : null;
+}
+
+/**
  * Creates the weekly schedule the first time AI visibility tracking starts
- * for a workspace. Idempotent by design at the call site (see
+ * for a business (identified by seedScanId, the scan that seeded it -- see
+ * migration 0013: a workspace can track several businesses over time, each
+ * with its own schedule). Idempotent by design at the call site (see
  * ensureAiVisibilityTrackingStarted in ai-visibility-workflow.ts): once a
- * schedule row exists, it is never recreated or reset by a later scan.
+ * schedule row exists for that business, it is never recreated or reset by
+ * a later scan of the same business.
  */
 export async function createAiVisibilitySettings(input: {
   workspaceId: string;
@@ -116,7 +154,7 @@ export async function createAiVisibilitySettings(input: {
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     };
-    memorySettings.set(input.workspaceId, record);
+    memorySettings.set(settingsKey(input.workspaceId, input.seedScanId), record);
     return record;
   }
   const [row] = await getDb()
@@ -128,17 +166,17 @@ export async function createAiVisibilitySettings(input: {
       nextRunAt: input.nextRunAt,
       updatedAt: now,
     })
-    .onConflictDoNothing({ target: runtimeAiVisibilitySchedules.workspaceId })
+    .onConflictDoNothing({ target: [runtimeAiVisibilitySchedules.workspaceId, runtimeAiVisibilitySchedules.seedScanId] })
     .returning();
   if (row) return settingsFromRow(row);
   // Another concurrent completion already created it; read it back.
-  const existing = await getAiVisibilitySettings(input.workspaceId);
+  const existing = await getAiVisibilitySettings(input.workspaceId, input.seedScanId);
   if (!existing) throw new Error("Could not create or read AI visibility settings.");
   return existing;
 }
 
 /**
- * Flips the per-workspace `enabled` flag from the (not-yet-built) dashboard
+ * Flips the per-business `enabled` flag from the (not-yet-built) dashboard
  * toggle -- the AI-visibility equivalent of saveRedditMonitorSettings in
  * reddit-monitor-repository.ts. Requires a settings row to already exist
  * (created by ensureAiVisibilityTrackingStarted the first time a scan
@@ -152,11 +190,13 @@ export async function createAiVisibilitySettings(input: {
  */
 export async function updateAiVisibilitySettings(input: {
   workspaceId: string;
+  seedScanId: string;
   enabled: boolean;
 }): Promise<AiVisibilitySettingsRecord> {
   const now = new Date();
   if (isMemoryStore()) {
-    const existing = memorySettings.get(input.workspaceId);
+    const key = settingsKey(input.workspaceId, input.seedScanId);
+    const existing = memorySettings.get(key);
     if (!existing) throw new Error("AI visibility settings have not been created for this workspace yet.");
     const turningOn = input.enabled && !existing.enabled;
     const record: AiVisibilitySettingsRecord = {
@@ -165,17 +205,17 @@ export async function updateAiVisibilitySettings(input: {
       nextRunAt: turningOn ? now.toISOString() : existing.nextRunAt,
       updatedAt: now.toISOString(),
     };
-    memorySettings.set(input.workspaceId, record);
+    memorySettings.set(key, record);
     return record;
   }
-  const existing = await getAiVisibilitySettings(input.workspaceId);
+  const existing = await getAiVisibilitySettings(input.workspaceId, input.seedScanId);
   if (!existing) throw new Error("AI visibility settings have not been created for this workspace yet.");
   const turningOn = input.enabled && !existing.enabled;
   const nextRunAt = turningOn ? now : new Date(existing.nextRunAt);
   const [row] = await getDb()
     .update(runtimeAiVisibilitySchedules)
     .set({ enabled: input.enabled, nextRunAt, updatedAt: now })
-    .where(eq(runtimeAiVisibilitySchedules.workspaceId, input.workspaceId))
+    .where(and(eq(runtimeAiVisibilitySchedules.workspaceId, input.workspaceId), eq(runtimeAiVisibilitySchedules.seedScanId, input.seedScanId)))
     .returning();
   if (!row) throw new Error("AI visibility settings have not been created for this workspace yet.");
   return settingsFromRow(row);
@@ -267,9 +307,10 @@ export async function completeAiVisibilityScan(record: AiVisibilityScanRecord): 
   const nextRunAt = nextMonday(completedAt);
   if (isMemoryStore()) {
     memoryScans.set(completed.id, completed);
-    const settings = memorySettings.get(completed.workspaceId);
+    const key = settingsKey(completed.workspaceId, completed.seedScanId);
+    const settings = memorySettings.get(key);
     if (settings) {
-      memorySettings.set(completed.workspaceId, {
+      memorySettings.set(key, {
         ...settings,
         lastSuccessfulScanAt: completedAt.toISOString(),
         nextRunAt: nextRunAt.toISOString(),
@@ -300,7 +341,7 @@ export async function completeAiVisibilityScan(record: AiVisibilityScanRecord): 
         lastScanId: completed.id,
         updatedAt: completedAt,
       })
-      .where(eq(runtimeAiVisibilitySchedules.workspaceId, completed.workspaceId));
+      .where(and(eq(runtimeAiVisibilitySchedules.workspaceId, completed.workspaceId), eq(runtimeAiVisibilitySchedules.seedScanId, completed.seedScanId)));
   });
 }
 
@@ -341,9 +382,10 @@ export async function failAiVisibilityScan(record: AiVisibilityScanRecord, error
   const nextRunAt = new Date(failedAt.getTime() + FAILURE_RETRY_DELAY_MS);
   if (isMemoryStore()) {
     memoryScans.set(failed.id, failed);
-    const settings = memorySettings.get(failed.workspaceId);
+    const key = settingsKey(failed.workspaceId, failed.seedScanId);
+    const settings = memorySettings.get(key);
     if (settings) {
-      memorySettings.set(failed.workspaceId, {
+      memorySettings.set(key, {
         ...settings,
         nextRunAt: nextRunAt.toISOString(),
         updatedAt: failedAt.toISOString(),
@@ -367,23 +409,23 @@ export async function failAiVisibilityScan(record: AiVisibilityScanRecord, error
     await transaction
       .update(runtimeAiVisibilitySchedules)
       .set({ nextRunAt, updatedAt: failedAt })
-      .where(eq(runtimeAiVisibilitySchedules.workspaceId, failed.workspaceId));
+      .where(and(eq(runtimeAiVisibilitySchedules.workspaceId, failed.workspaceId), eq(runtimeAiVisibilitySchedules.seedScanId, failed.seedScanId)));
   });
 }
 
-/** Scan history for a workspace, most recent first -- so weekly results can be compared. */
-export async function listAiVisibilityScans(workspaceId: string, limit = 20): Promise<AiVisibilityScanRecord[]> {
+/** Scan history for a business, most recent first -- so weekly results can be compared. */
+export async function listAiVisibilityScans(workspaceId: string, seedScanId: string, limit = 20): Promise<AiVisibilityScanRecord[]> {
   const bounded = Math.max(1, Math.min(limit, 100));
   if (isMemoryStore()) {
     return [...memoryScans.values()]
-      .filter((scan) => scan.workspaceId === workspaceId)
+      .filter((scan) => scan.workspaceId === workspaceId && scan.seedScanId === seedScanId)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .slice(0, bounded);
   }
   const rows = await getDb()
     .select()
     .from(runtimeAiVisibilityScans)
-    .where(eq(runtimeAiVisibilityScans.workspaceId, workspaceId))
+    .where(and(eq(runtimeAiVisibilityScans.workspaceId, workspaceId), eq(runtimeAiVisibilityScans.seedScanId, seedScanId)))
     .orderBy(desc(runtimeAiVisibilityScans.createdAt))
     .limit(bounded);
   return rows.map(scanFromRow);

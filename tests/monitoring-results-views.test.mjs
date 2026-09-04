@@ -22,8 +22,8 @@ const experienceSource = await read("../components/ThreadlineExperience.tsx");
 const indexSource = await read("../components/demand-intelligence/index.ts");
 
 test("a real run-history query exists and is exposed by the monitoring settings API", () => {
-  assert.match(repositorySource, /export async function listRedditMonitorRuns\(workspaceId: string, limit = 10\)/);
-  assert.match(monitoringRouteSource, /listRedditMonitorRuns\(actor\.workspaceId, 10\)/);
+  assert.match(repositorySource, /export async function listRedditMonitorRuns\(workspaceId: string, seedScanId: string, limit = 10\)/);
+  assert.match(monitoringRouteSource, /listRedditMonitorRuns\(actor\.workspaceId, seed\.id, 10\)/);
   // Both GET (initial load) and PUT (after toggling) return the same shape,
   // so flipping the toggle never leaves the run history stale.
   const getIndex = monitoringRouteSource.indexOf("export async function GET");

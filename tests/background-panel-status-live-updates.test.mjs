@@ -24,7 +24,7 @@ const experience = await readFile(
 
 function loadingEffectSource() {
   const start = experience.indexOf("async function loadRedditConnection()");
-  const end = experience.indexOf("}, [view, accessLevel]);", start);
+  const end = experience.indexOf("}, [view, accessLevel, scanResponse?.scan.id]);", start);
   assert.ok(start >= 0 && end > start, "the monitoring/visibility loading effect must exist");
   return experience.slice(start, end);
 }

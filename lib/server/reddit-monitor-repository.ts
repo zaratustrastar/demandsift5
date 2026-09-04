@@ -22,6 +22,13 @@ const memorySettings = new Map<string, RedditMonitorSettingsRecord>();
 const memoryRuns = new Map<string, RedditMonitorRunRecord>();
 const memoryMatches = new Map<string, RedditDiscoveryCandidate>();
 
+// One settings row per (workspace, business) now, not per workspace --
+// see migration 0013. The memory-store map key has to carry both parts of
+// that same composite identity.
+function settingsKey(workspaceId: string, seedScanId: string): string {
+  return `${workspaceId}:${seedScanId}`;
+}
+
 function isMemoryStore(): boolean {
   const configured = process.env.STATE_STORE?.trim().toLocaleLowerCase("en-US");
   return configured === "memory" || (!process.env.DATABASE_URL && !isProductionRuntime());
@@ -95,12 +102,12 @@ export function defaultWatchTerms(scan: ScanRecord): RedditWatchTerm[] {
   return normalizedWatchTermRecords(terms);
 }
 
-export async function getRedditMonitorSettings(workspaceId: string) {
-  if (isMemoryStore()) return memorySettings.get(workspaceId) ?? null;
+export async function getRedditMonitorSettings(workspaceId: string, seedScanId: string) {
+  if (isMemoryStore()) return memorySettings.get(settingsKey(workspaceId, seedScanId)) ?? null;
   const [row] = await getDb()
     .select()
     .from(runtimeRedditMonitors)
-    .where(eq(runtimeRedditMonitors.workspaceId, workspaceId))
+    .where(and(eq(runtimeRedditMonitors.workspaceId, workspaceId), eq(runtimeRedditMonitors.seedScanId, seedScanId)))
     .limit(1);
   return row ? settingsFromRow(row) : null;
 }
@@ -118,7 +125,8 @@ export async function saveRedditMonitorSettings(input: {
     throw new Error("Enable at least one Reddit watch term before turning monitoring on.");
   }
   if (isMemoryStore()) {
-    const existing = memorySettings.get(input.workspaceId);
+    const key = settingsKey(input.workspaceId, input.seedScanId);
+    const existing = memorySettings.get(key);
     const record: RedditMonitorSettingsRecord = {
       workspaceId: input.workspaceId,
       seedScanId: input.seedScanId,
@@ -131,10 +139,10 @@ export async function saveRedditMonitorSettings(input: {
       createdAt: existing?.createdAt ?? now.toISOString(),
       updatedAt: now.toISOString(),
     };
-    memorySettings.set(input.workspaceId, record);
+    memorySettings.set(key, record);
     return record;
   }
-  const existing = await getRedditMonitorSettings(input.workspaceId);
+  const existing = await getRedditMonitorSettings(input.workspaceId, input.seedScanId);
   const nextRunAt = input.enabled && !existing?.enabled
     ? now
     : new Date(existing?.nextRunAt ?? now.toISOString());
@@ -150,9 +158,8 @@ export async function saveRedditMonitorSettings(input: {
       updatedAt: now,
     })
     .onConflictDoUpdate({
-      target: runtimeRedditMonitors.workspaceId,
+      target: [runtimeRedditMonitors.workspaceId, runtimeRedditMonitors.seedScanId],
       set: {
-        seedScanId: input.seedScanId,
         websiteUrl: input.websiteUrl,
         enabled: input.enabled,
         watchTerms,
@@ -372,8 +379,9 @@ export async function completeRedditMonitorRun(record: RedditMonitorRunRecord): 
   const nextRunAt = new Date(Date.parse(completed.windowEndedAt) + 24 * 60 * 60 * 1_000);
   if (isMemoryStore()) {
     await saveRedditMonitorRun(completed);
-    const settings = memorySettings.get(record.workspaceId);
-    if (settings) memorySettings.set(record.workspaceId, {
+    const key = settingsKey(record.workspaceId, record.seedScanId);
+    const settings = memorySettings.get(key);
+    if (settings) memorySettings.set(key, {
       ...settings,
       lastSuccessfulMonitorAt: completed.windowEndedAt,
       nextRunAt: nextRunAt.toISOString(),
@@ -404,7 +412,7 @@ export async function completeRedditMonitorRun(record: RedditMonitorRunRecord): 
         lastRunId: completed.id,
         updatedAt: new Date(completed.updatedAt),
       })
-      .where(eq(runtimeRedditMonitors.workspaceId, completed.workspaceId));
+      .where(and(eq(runtimeRedditMonitors.workspaceId, completed.workspaceId), eq(runtimeRedditMonitors.seedScanId, completed.seedScanId)));
   });
 }
 
@@ -445,9 +453,10 @@ export async function failRedditMonitorRun(record: RedditMonitorRunRecord, error
   const nextRunAt = new Date(failedAt.getTime() + FAILURE_RETRY_DELAY_MS);
   if (isMemoryStore()) {
     await saveRedditMonitorRun(failed);
-    const settings = memorySettings.get(failed.workspaceId);
+    const key = settingsKey(failed.workspaceId, failed.seedScanId);
+    const settings = memorySettings.get(key);
     if (settings) {
-      memorySettings.set(failed.workspaceId, {
+      memorySettings.set(key, {
         ...settings,
         nextRunAt: nextRunAt.toISOString(),
         updatedAt: failedAt.toISOString(),
@@ -470,43 +479,43 @@ export async function failRedditMonitorRun(record: RedditMonitorRunRecord, error
     await transaction
       .update(runtimeRedditMonitors)
       .set({ nextRunAt, updatedAt: failedAt })
-      .where(eq(runtimeRedditMonitors.workspaceId, failed.workspaceId));
+      .where(and(eq(runtimeRedditMonitors.workspaceId, failed.workspaceId), eq(runtimeRedditMonitors.seedScanId, failed.seedScanId)));
   });
 }
 
-export async function latestRedditMonitorRun(workspaceId: string) {
+export async function latestRedditMonitorRun(workspaceId: string, seedScanId: string) {
   if (isMemoryStore()) {
     return [...memoryRuns.values()]
-      .filter((run) => run.workspaceId === workspaceId)
+      .filter((run) => run.workspaceId === workspaceId && run.seedScanId === seedScanId)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null;
   }
   const [row] = await getDb()
     .select()
     .from(runtimeRedditMonitorRuns)
-    .where(eq(runtimeRedditMonitorRuns.workspaceId, workspaceId))
+    .where(and(eq(runtimeRedditMonitorRuns.workspaceId, workspaceId), eq(runtimeRedditMonitorRuns.seedScanId, seedScanId)))
     .orderBy(desc(runtimeRedditMonitorRuns.createdAt))
     .limit(1);
   return row ? runFromRow(row) : null;
 }
 
 /**
- * Run history for a workspace, most recent first -- the daily-monitoring
+ * Run history for a business, most recent first -- the daily-monitoring
  * results view's "recent runs" list (status, counts, error if any, and the
  * scanId to jump into that run's full report), not just the single latest
  * run latestRedditMonitorRun returns.
  */
-export async function listRedditMonitorRuns(workspaceId: string, limit = 10): Promise<RedditMonitorRunRecord[]> {
+export async function listRedditMonitorRuns(workspaceId: string, seedScanId: string, limit = 10): Promise<RedditMonitorRunRecord[]> {
   const bounded = Math.max(1, Math.min(limit, 50));
   if (isMemoryStore()) {
     return [...memoryRuns.values()]
-      .filter((run) => run.workspaceId === workspaceId)
+      .filter((run) => run.workspaceId === workspaceId && run.seedScanId === seedScanId)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .slice(0, bounded);
   }
   const rows = await getDb()
     .select()
     .from(runtimeRedditMonitorRuns)
-    .where(eq(runtimeRedditMonitorRuns.workspaceId, workspaceId))
+    .where(and(eq(runtimeRedditMonitorRuns.workspaceId, workspaceId), eq(runtimeRedditMonitorRuns.seedScanId, seedScanId)))
     .orderBy(desc(runtimeRedditMonitorRuns.createdAt))
     .limit(bounded);
   return rows.map(runFromRow);

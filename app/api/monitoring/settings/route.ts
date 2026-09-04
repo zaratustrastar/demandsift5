@@ -1,4 +1,5 @@
 import { apiErrorResponse, ApiError, readJson, requireWorkspace } from "@/lib/server/http";
+import { requireOwnedScan } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
 import {
   defaultWatchTerms,
@@ -7,12 +8,12 @@ import {
   listRedditMonitorRuns,
   saveRedditMonitorSettings,
 } from "@/lib/server/reddit-monitor-repository";
-import { getStateRepository } from "@/lib/server/repository";
-import type { RedditWatchTerm } from "@/lib/server/contracts";
+import type { RedditWatchTerm, ScanRecord } from "@/lib/server/contracts";
 
 type UpdateBody = {
   enabled?: unknown;
   watchTerms?: unknown;
+  scanId?: unknown;
 };
 
 function parseWatchTerms(value: unknown): RedditWatchTerm[] {
@@ -33,17 +34,27 @@ function parseWatchTerms(value: unknown): RedditWatchTerm[] {
   });
 }
 
-async function currentSettings(workspaceId: string) {
-  const repository = getStateRepository();
-  const seed = await repository.getLatestScan(workspaceId);
-  if (!seed || seed.status !== "complete" || !seed.discoveryProfile) {
+/**
+ * scanId identifies which business this request is for -- a workspace can
+ * track several businesses (see migration 0013), so unlike before, this
+ * can no longer default to "whichever one this workspace's latest scan
+ * happens to be." Required, not optional: every caller (see the two
+ * loadRedditMonitoring fetches in ThreadlineExperience.tsx) already has a
+ * current scan in view by the time this route is ever called.
+ */
+function requireScanId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ApiError("scanId is required.", 400, "scan_id_required");
+  }
+  return value.trim();
+}
+
+async function currentSettings(workspaceId: string, seed: ScanRecord) {
+  if (seed.status !== "complete" || !seed.discoveryProfile) {
     throw new ApiError("Complete a Market Scan before configuring monitoring.", 409, "scan_required");
   }
-  let settings = await getRedditMonitorSettings(workspaceId);
-  // A workspace represents one monitored business. If the user replaces that
-  // business with a new website scan, never carry the old brand/competitor
-  // watches across silently.
-  if (!settings || settings.websiteUrl !== seed.websiteUrl) {
+  let settings = await getRedditMonitorSettings(workspaceId, seed.id);
+  if (!settings) {
     settings = await saveRedditMonitorSettings({
       workspaceId,
       seedScanId: seed.id,
@@ -58,10 +69,12 @@ async function currentSettings(workspaceId: string) {
 export async function GET(request: Request) {
   try {
     const actor = await requireWorkspace(request);
+    const scanId = requireScanId(new URL(request.url).searchParams.get("scanId"));
+    const seed = await requireOwnedScan(actor.workspaceId, scanId);
     const [settings, latestRun, recentRuns] = await Promise.all([
-      currentSettings(actor.workspaceId),
-      latestRedditMonitorRun(actor.workspaceId),
-      listRedditMonitorRuns(actor.workspaceId, 10),
+      currentSettings(actor.workspaceId, seed),
+      latestRedditMonitorRun(actor.workspaceId, seed.id),
+      listRedditMonitorRuns(actor.workspaceId, seed.id, 10),
     ]);
     return Response.json({ monitoring: settings, latestRun, recentRuns }, {
       headers: { "cache-control": "no-store" },
@@ -79,13 +92,9 @@ export async function PUT(request: Request) {
     if (typeof body.enabled !== "boolean") {
       throw new ApiError("enabled must be true or false.", 400, "invalid_monitoring_setting");
     }
-    const existing = await currentSettings(actor.workspaceId);
-    const repository = getStateRepository();
-    const latest = await repository.getLatestScan(actor.workspaceId);
-    const seed = latest?.status === "complete" && latest.discoveryProfile ? latest : await repository.getScan(existing.seedScanId);
-    if (!seed || seed.workspaceId !== actor.workspaceId || seed.status !== "complete" || !seed.discoveryProfile) {
-      throw new ApiError("The monitoring seed scan is unavailable.", 409, "scan_required");
-    }
+    const scanId = requireScanId(body.scanId);
+    const seed = await requireOwnedScan(actor.workspaceId, scanId);
+    const existing = await currentSettings(actor.workspaceId, seed);
     const watchTerms = body.watchTerms === undefined
       ? existing.watchTerms
       : parseWatchTerms(body.watchTerms);
@@ -99,8 +108,8 @@ export async function PUT(request: Request) {
     return Response.json(
       {
         monitoring: settings,
-        latestRun: await latestRedditMonitorRun(actor.workspaceId),
-        recentRuns: await listRedditMonitorRuns(actor.workspaceId, 10),
+        latestRun: await latestRedditMonitorRun(actor.workspaceId, seed.id),
+        recentRuns: await listRedditMonitorRuns(actor.workspaceId, seed.id, 10),
       },
       { headers: { "cache-control": "no-store" } },
     );

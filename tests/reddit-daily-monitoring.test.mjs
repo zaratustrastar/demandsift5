@@ -207,10 +207,17 @@ test("scheduler creates one daily job and one run containing every active term",
 test("daily monitor is independently enabled and deduped per business and UTC day", () => {
   assert.equal(redditMonitorSchedulerEnabled({}), true);
   assert.equal(redditMonitorSchedulerEnabled({ REDDIT_MONITOR_SCHEDULER_ENABLED: "false" }), false);
-  assert.equal(redditMonitorDedupeKey("ws_one", "2026-08-21T01:00:00Z"),
-    redditMonitorDedupeKey("ws_one", "2026-08-21T23:59:59Z"));
-  assert.notEqual(redditMonitorDedupeKey("ws_one", "2026-08-21T23:59:59Z"),
-    redditMonitorDedupeKey("ws_one", "2026-08-22T00:00:00Z"));
+  assert.equal(redditMonitorDedupeKey("ws_one", "scan_a", "2026-08-21T01:00:00Z"),
+    redditMonitorDedupeKey("ws_one", "scan_a", "2026-08-21T23:59:59Z"));
+  assert.notEqual(redditMonitorDedupeKey("ws_one", "scan_a", "2026-08-21T23:59:59Z"),
+    redditMonitorDedupeKey("ws_one", "scan_a", "2026-08-22T00:00:00Z"));
+  // The test's own name promised "per business," but the key was only ever
+  // workspace + day: two different businesses in the same workspace, due
+  // the same day, collided on the same key -- the second one's scheduled
+  // run silently never got created (ON CONFLICT ... DO NOTHING). Migration
+  // 0013 fixed this alongside the cross-business read bug.
+  assert.notEqual(redditMonitorDedupeKey("ws_one", "scan_a", "2026-08-21T12:00:00Z"),
+    redditMonitorDedupeKey("ws_one", "scan_b", "2026-08-21T12:00:00Z"));
 });
 
 test("monitor storage enforces cross-run dedupe and advances watermark only on success", async () => {

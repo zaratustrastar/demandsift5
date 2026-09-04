@@ -510,7 +510,7 @@ export const runtimeMonitoringSchedules = pgTable("runtime_monitoring_schedules"
 ]);
 
 export const runtimeRedditMonitors = pgTable("runtime_reddit_monitors", {
-  workspaceId: varchar("workspace_id", { length: 96 }).primaryKey().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
   seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
   websiteUrl: text("website_url").notNull(),
   enabled: boolean("enabled").default(false).notNull(),
@@ -521,6 +521,12 @@ export const runtimeRedditMonitors = pgTable("runtime_reddit_monitors", {
   createdAt,
   updatedAt,
 }, (table) => [
+  // Composite, not workspaceId alone: a workspace can run scans for
+  // several different businesses over time (see migration 0013), and each
+  // needs its own monitor settings -- a workspace-only key meant whichever
+  // business last configured monitoring silently overwrote every other
+  // business's settings and results in the same workspace.
+  primaryKey({ columns: [table.workspaceId, table.seedScanId] }),
   check("runtime_reddit_monitors_terms_check", sql`jsonb_typeof(${table.watchTerms}) = 'array'`),
   check("runtime_reddit_monitors_website_check", sql`length(trim(${table.websiteUrl})) > 0`),
   index("runtime_reddit_monitors_due_idx").on(table.enabled, table.nextRunAt),
@@ -573,7 +579,7 @@ export const runtimeRedditMonitorMatches = pgTable("runtime_reddit_monitor_match
  * computed metrics, kept as scan history for week-over-week comparison).
  */
 export const runtimeAiVisibilitySchedules = pgTable("runtime_ai_visibility_schedules", {
-  workspaceId: varchar("workspace_id", { length: 96 }).primaryKey().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
   seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
   enabled: boolean("enabled").default(true).notNull(),
   lastSuccessfulScanAt: timestamp("last_successful_scan_at", { withTimezone: true }),
@@ -582,6 +588,10 @@ export const runtimeAiVisibilitySchedules = pgTable("runtime_ai_visibility_sched
   createdAt,
   updatedAt,
 }, (table) => [
+  // Composite, not workspaceId alone -- same reasoning as
+  // runtimeRedditMonitors above: one workspace, several tracked
+  // businesses, each needs its own AI Visibility schedule and results.
+  primaryKey({ columns: [table.workspaceId, table.seedScanId] }),
   index("runtime_ai_visibility_schedules_due_idx").on(table.enabled, table.nextRunAt),
 ]);
 

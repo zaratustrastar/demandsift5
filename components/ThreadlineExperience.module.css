@@ -260,11 +260,7 @@
 .slNavCta:hover { background: #27272a; }
 
 .slLogo { display: inline-flex; align-items: center; gap: 10px; }
-.slLogoMark { display: flex; align-items: flex-end; gap: 3px; height: 20px; }
-.slLogoMark i { display: block; width: 4px; border-radius: 1px; }
-.slLogoMark i:nth-child(1) { height: 20px; background: var(--sl-primary); }
-.slLogoMark i:nth-child(2) { height: 13px; background: var(--sl-primary); opacity: .55; }
-.slLogoMark i:nth-child(3) { height: 7px; background: var(--sl-ink); }
+.slLogoMark { display: block; height: 22px; width: auto; }
 .slLogoText { font-size: 17px; font-weight: 600; letter-spacing: -.03em; }
 
 .slHero {

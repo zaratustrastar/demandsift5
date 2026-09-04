@@ -446,11 +446,7 @@ const landingPreviewWhy = [
 function LandingBrand() {
   return (
     <span className={styles.slLogo}>
-      <span className={styles.slLogoMark} aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>
+      <img src="/logos/scooptr-mark.png" alt="" className={styles.slLogoMark} />
       <span className={styles.slLogoText}>Scooptr</span>
     </span>
   );

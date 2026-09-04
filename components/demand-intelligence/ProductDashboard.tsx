@@ -648,14 +648,22 @@ type IconName =
   | "star";
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
-  const glyphs: Record<IconName, string> = {
+  if (name === "logo") {
+    return (
+      <img
+        src="/logos/scooptr-mark.png"
+        alt=""
+        style={{ height: size, width: "auto", display: "inline-block", flexShrink: 0 }}
+      />
+    );
+  }
+  const glyphs: Record<Exclude<IconName, "logo">, string> = {
     arrow: "\u2192",
     arrowLeft: "\u2190",
     check: "\u2713",
     copy: "\u29c9",
     edit: "\u270e",
     external: "\u2197",
-    logo: "\u2713",
     refresh: "\u21bb",
     star: "\u2605",
   };
@@ -1963,7 +1971,7 @@ export function ProductDashboard({
         <div className={styles.billingStandalone}>
           <header className={styles.billingHeader}>
             <button type="button" className={styles.billingHeaderLogo} onClick={goToSection("dashboard")}>
-              <Icon name="logo" size={14} />
+              <Icon name="logo" size={20} />
               Scooptr
             </button>
             <button type="button" className={styles.billingBackLink} onClick={goToSection("dashboard")}>
@@ -2089,7 +2097,7 @@ export function ProductDashboard({
       <aside className={styles.scSidebar}>
         <div className={styles.scSidebarLogo}>
           <span className={styles.scSidebarLogoMark}>
-            <Icon name="logo" size={14} />
+            <Icon name="logo" size={22} />
           </span>
           <span className={styles.scSidebarLogoText}>Scooptr</span>
         </div>

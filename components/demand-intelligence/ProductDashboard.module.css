@@ -2787,11 +2787,6 @@
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: 6px;
-  background: var(--green);
-  color: #ffffff;
-  font-size: 12px;
-  font-weight: 700;
   flex-shrink: 0;
 }
 

@@ -25,32 +25,9 @@
 }
 
 .logoMark {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 18px;
-}
-
-.logoMark i {
   display: block;
-  width: 4px;
-  border-radius: 1px;
-}
-
-.logoMark i:nth-child(1) {
-  height: 18px;
-  background: #2563eb;
-}
-
-.logoMark i:nth-child(2) {
-  height: 12px;
-  background: #2563eb;
-  opacity: 0.55;
-}
-
-.logoMark i:nth-child(3) {
-  height: 6px;
-  background: #0d0d0f;
+  height: 20px;
+  width: auto;
 }
 
 .logoText {

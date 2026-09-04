@@ -43,11 +43,7 @@ export function OnboardingHeader({
       />
       <header className={styles.bar}>
         <span className={styles.logo}>
-          <span className={styles.logoMark} aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
+          <img src="/logos/scooptr-mark.png" alt="" className={styles.logoMark} />
           <span className={styles.logoText}>Scooptr</span>
         </span>
         {statusLabel ? (

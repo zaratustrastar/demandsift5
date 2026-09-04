@@ -802,3 +802,10 @@ export type AiVisibilitySettingsRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+/** Real, honest landing-page numbers -- see runtimePublicStats in schema.ts. */
+export type PublicLandingStats = {
+  scansAnalyzed: number;
+  redditPostsAnalyzed: number;
+  updatedAt: string;
+};

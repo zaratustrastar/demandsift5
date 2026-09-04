@@ -793,6 +793,10 @@ export function aiVisibilitySchedulerEnabled(environment = process.env) {
   return String(environment.AI_VISIBILITY_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";
 }
 
+export function publicStatsSchedulerEnabled(environment = process.env) {
+  return String(environment.PUBLIC_STATS_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
 export function aiVisibilityConfiguration(environment = process.env) {
   return {
     schedulerPollMs: boundedNumber(
@@ -800,6 +804,22 @@ export function aiVisibilityConfiguration(environment = process.env) {
       300_000,
       30_000,
       3_600_000,
+    ),
+  };
+}
+
+export function publicStatsConfiguration(environment = process.env) {
+  return {
+    // The job itself only ever does real work once a day (see
+    // refreshPublicLandingStatsIfDue's own due-check) -- this just governs
+    // how promptly a poll notices that a day has passed. An hour of slack
+    // on a once-a-day number is unnoticeable, so this defaults far coarser
+    // than the other schedulers' polls.
+    schedulerPollMs: boundedNumber(
+      environment.PUBLIC_STATS_SCHEDULER_POLL_MS,
+      3_600_000,
+      60_000,
+      21_600_000,
     ),
   };
 }
@@ -923,6 +943,65 @@ async function runAiVisibilityScheduler(sql, signal) {
     await waitForNextPoll(signal, configuration.schedulerPollMs);
   }
   log("info", "ai_visibility_scheduler_stopped");
+}
+
+/**
+ * Recomputes and caches the real landing-page numbers, but only if a day
+ * has actually passed since the last refresh -- a cheap timestamp read
+ * otherwise, no aggregate query, no write. Exported (like
+ * scheduleAiVisibilityScans above) so it's independently testable.
+ *
+ * Counts only status = 'complete' AND dataMode = 'live' scans:
+ * excluding mock/apify-test scans is the whole point -- a "real" number
+ * seeded from synthetic test data would just be a differently-shaped
+ * version of the fabricated-number problem this feature replaced.
+ */
+export async function refreshPublicLandingStats(sql, { now = new Date() } = {}) {
+  const intervalMs = 24 * 60 * 60 * 1_000;
+  const [current] = await sql`
+    SELECT next_run_at FROM runtime_public_stats WHERE id = 'landing'
+  `;
+  if (current && new Date(current.next_run_at) > now) return false;
+
+  const [aggregate] = await sql`
+    SELECT
+      COUNT(*)::int AS scans_analyzed,
+      COALESCE(SUM((record -> 'result' -> 'diagnostics' ->> 'normalized')::int), 0)::int AS reddit_posts_analyzed
+    FROM runtime_scans
+    WHERE status = 'complete'
+      AND record -> 'result' ->> 'dataMode' = 'live'
+  `;
+  const scansAnalyzed = Number(aggregate?.scans_analyzed ?? 0);
+  const redditPostsAnalyzed = Number(aggregate?.reddit_posts_analyzed ?? 0);
+  const nextRunAt = new Date(now.getTime() + intervalMs);
+
+  await sql`
+    INSERT INTO runtime_public_stats (id, scans_analyzed, reddit_posts_analyzed, next_run_at, created_at, updated_at)
+    VALUES ('landing', ${scansAnalyzed}, ${redditPostsAnalyzed}, ${nextRunAt}, ${now}, ${now})
+    ON CONFLICT (id) DO UPDATE SET
+      scans_analyzed = ${scansAnalyzed},
+      reddit_posts_analyzed = ${redditPostsAnalyzed},
+      next_run_at = ${nextRunAt},
+      updated_at = ${now}
+  `;
+  return true;
+}
+
+async function runPublicStatsScheduler(sql, signal) {
+  const configuration = publicStatsConfiguration();
+  log("info", "public_stats_scheduler_started", { pollMs: configuration.schedulerPollMs });
+  while (!signal.aborted) {
+    try {
+      const refreshed = await refreshPublicLandingStats(sql);
+      if (refreshed) log("info", "public_stats_refreshed", {});
+    } catch (error) {
+      log("error", "public_stats_refresh_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "public_stats_scheduler_stopped");
 }
 
 export function jobExecutionConfiguration(environment = process.env) {
@@ -1429,11 +1508,15 @@ async function runQueueWorker(databaseUrl, signal) {
   const aiVisibilityScheduler = runsSchedulers && aiVisibilitySchedulerEnabled()
     ? runAiVisibilityScheduler(sql, queueSignal)
     : Promise.resolve();
+  const publicStatsScheduler = runsSchedulers && publicStatsSchedulerEnabled()
+    ? runPublicStatsScheduler(sql, queueSignal)
+    : Promise.resolve();
   if (!runsSchedulers || !monitoringSchedulerEnabled()) {
     log("info", "monitor_scheduler_disabled", { reason: runsSchedulers ? "single_on_demand_scan_mvp" : "worker_role" });
   }
   if (!runsSchedulers || !redditMonitorSchedulerEnabled()) log("info", "reddit_monitor_scheduler_disabled");
   if (!runsSchedulers || !aiVisibilitySchedulerEnabled()) log("info", "ai_visibility_scheduler_disabled");
+  if (!runsSchedulers || !publicStatsSchedulerEnabled()) log("info", "public_stats_scheduler_disabled");
   log("info", "queue_worker_started", { pollMs: boundedPollMs, role: queue.role,
     concurrency: runsExecutors ? queue.concurrency : 0, agingSeconds: queue.agingSeconds });
   try {
@@ -1447,10 +1530,10 @@ async function runQueueWorker(databaseUrl, signal) {
           queue.agingSeconds,
         ))
       : [waitInStandby(queueSignal)];
-    await Promise.all([...lanes, scheduler, redditMonitorScheduler, aiVisibilityScheduler]);
+    await Promise.all([...lanes, scheduler, redditMonitorScheduler, aiVisibilityScheduler, publicStatsScheduler]);
   } finally {
     queueController.abort("queue worker stopping");
-    await Promise.all([scheduler, redditMonitorScheduler, aiVisibilityScheduler]);
+    await Promise.all([scheduler, redditMonitorScheduler, aiVisibilityScheduler, publicStatsScheduler]);
     await sql.end({ timeout: 5 });
     log("info", "queue_worker_stopped");
   }

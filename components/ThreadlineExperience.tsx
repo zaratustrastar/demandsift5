@@ -281,9 +281,8 @@ export type LandingSubmission = { mode: "website"; websiteUrl: string } | { mode
 
 const MIN_CONTEXT_TEXT_LENGTH = 20;
 
-const landingStats = [
+const landingStatsBase = [
   { value: "100%", label: "Source-linked, every result" },
-  { value: "0", label: "Threads posted without you reading first" },
   { value: "Live", label: "Saved progress as your scan runs" },
   { value: "94%", label: "Filtered out before it wastes your time" },
 ];
@@ -481,6 +480,33 @@ function Landing({
   const [error, setError] = useState("");
   const [openFaq, setOpenFaq] = useState(0);
 
+  // Real numbers, not marketing copy -- see app/api/public/landing-stats
+  // and lib/server/public-stats-repository.ts. The endpoint just reads a
+  // row a daily background job maintains, so this fetch is cheap and the
+  // number is always true, unlike the hardcoded ones it replaced.
+  const [publicStats, setPublicStats] = useState<{ scansAnalyzed: number; redditPostsAnalyzed: number } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/public/landing-stats")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setPublicStats(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const landingStats = useMemo(
+    () => [
+      landingStatsBase[0],
+      { value: (publicStats?.redditPostsAnalyzed ?? 0).toLocaleString(), label: "Reddit posts analyzed" },
+      landingStatsBase[1],
+      landingStatsBase[2],
+    ],
+    [publicStats],
+  );
+
   async function signOut() {
     onSignOut();
   }
@@ -638,6 +664,14 @@ function Landing({
               </p>
             )}
           </form>
+
+          {publicStats !== null && publicStats.scansAnalyzed > 0 && (
+            <div className={styles.slAvatarRow}>
+              <span className={styles.slScanCount}>
+                <strong>{publicStats.scansAnalyzed.toLocaleString()}</strong> scans run so far
+              </span>
+            </div>
+          )}
         </div>
 
         <div className={styles.slPreviewWrap}>

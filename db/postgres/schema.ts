@@ -604,6 +604,26 @@ export const runtimeAiVisibilityScans = pgTable("runtime_ai_visibility_scans", {
   index("runtime_ai_visibility_scans_workspace_created_idx").on(table.workspaceId, table.createdAt),
 ]);
 
+/**
+ * A single cached row of real, honest landing-page numbers -- how many live
+ * (non-mock, non-test) scans have completed, and how many Reddit posts they
+ * collectively read. Computed by a daily background job (see
+ * scripts/background-worker.mjs's runPublicStatsScheduler) via one cheap
+ * SQL aggregate over runtime_scans, never per-request: the landing page
+ * only ever reads this cached row, so a real, growing number costs the app
+ * nothing extra beyond one query a day, however much traffic the page gets.
+ * Deliberately just cached facts, not a projection library: one row,
+ * "landing" as its fixed id, no history kept.
+ */
+export const runtimePublicStats = pgTable("runtime_public_stats", {
+  id: varchar("id", { length: 32 }).primaryKey(),
+  scansAnalyzed: integer("scans_analyzed").notNull().default(0),
+  redditPostsAnalyzed: integer("reddit_posts_analyzed").notNull().default(0),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }).defaultNow().notNull(),
+  createdAt,
+  updatedAt,
+});
+
 export const runtimeConversions = pgTable("runtime_conversions", {
   id: varchar("id", { length: 96 }).primaryKey(),
   workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),

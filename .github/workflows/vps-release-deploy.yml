@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: real landing-page stats (scans analyzed, Reddit posts
-# analyzed) replacing the fabricated hero/stat-grid numbers -- new
-# runtime_public_stats table + daily background job (2026-09-04).
+# Release marker: fix cross-business AI Visibility / Reddit Monitor data
+# leaking between businesses tracked in the same workspace -- composite
+# (workspace_id, seed_scan_id) keys, migration 0013 (2026-09-04).
 
 on:
   push:

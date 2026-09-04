@@ -1971,7 +1971,7 @@ export function ProductDashboard({
         <div className={styles.billingStandalone}>
           <header className={styles.billingHeader}>
             <button type="button" className={styles.billingHeaderLogo} onClick={goToSection("dashboard")}>
-              <Icon name="logo" size={20} />
+              <Icon name="logo" size={26} />
               Scooptr
             </button>
             <button type="button" className={styles.billingBackLink} onClick={goToSection("dashboard")}>
@@ -2097,7 +2097,7 @@ export function ProductDashboard({
       <aside className={styles.scSidebar}>
         <div className={styles.scSidebarLogo}>
           <span className={styles.scSidebarLogoMark}>
-            <Icon name="logo" size={22} />
+            <Icon name="logo" size={28} />
           </span>
           <span className={styles.scSidebarLogoText}>Scooptr</span>
         </div>

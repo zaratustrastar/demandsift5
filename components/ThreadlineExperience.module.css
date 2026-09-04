@@ -260,7 +260,7 @@
 .slNavCta:hover { background: #27272a; }
 
 .slLogo { display: inline-flex; align-items: center; gap: 10px; }
-.slLogoMark { display: block; height: 22px; width: auto; }
+.slLogoMark { display: block; height: 30px; width: auto; }
 .slLogoText { font-size: 17px; font-weight: 600; letter-spacing: -.03em; }
 
 .slHero {

@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: the actual logo fix -- OnboardingHeader.tsx had its own
-# independent, unfixed copy of the three-bar logo, separate from
-# LandingBrand which was already fixed. This is what every onboarding/
-# results screen actually renders (2026-09-04).
+# Release marker: increase logo mark size ~35-40% across all three
+# headers (nav, onboarding, dashboard/billing) -- was reading too small
+# next to the wordmark (2026-09-04).
 
 on:
   push:

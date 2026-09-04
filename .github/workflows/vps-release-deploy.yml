@@ -1,7 +1,6 @@
 name: DemandSift trusted VPS release
-# Release marker: fix cross-business AI Visibility / Reddit Monitor data
-# leaking between businesses tracked in the same workspace -- composite
-# (workspace_id, seed_scan_id) keys, migration 0013 (2026-09-04).
+# Release marker: replace the logo mark (landing header, dashboard
+# sidebar, billing header) with the new eyes icon (2026-09-04).
 
 on:
   push:

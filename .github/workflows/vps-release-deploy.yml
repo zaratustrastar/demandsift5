@@ -1,6 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: replace the logo mark (landing header, dashboard
-# sidebar, billing header) with the new eyes icon (2026-09-04).
+# Release marker: retry -- the previous deploy for the logo mark change
+# reported success and verified the correct commit SHA, but the served
+# JS bundle did not actually contain the change. Retrying in case this
+# was a one-off build-cache fluke (2026-09-04).
 
 on:
   push:

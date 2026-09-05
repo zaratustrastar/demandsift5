@@ -337,17 +337,20 @@ p.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); m
  * spec, which is not what a fixed 40%-down placement needs. Sitting in
  * normal flow, nudged left via align-self, avoids that entirely and is
  * exactly as robust regardless of how tall the hero ends up being. */
-/* Positioned like the reference: near the top, bleeding into the left
- * gutter past .slHeroInner's edge, with a soft glow behind it. Uses a
- * fixed pixel top (not a percentage) specifically because .slHeroInner's
- * height is auto/content-derived -- a percentage top on an absolutely
- * positioned element resolves as if "auto" against an auto-height
- * ancestor per the CSS spec, so it wouldn't reliably land here at all;
- * a fixed px offset has no such ambiguity regardless of hero height. */
+/* Static/normal-flow by default -- this is the one positioning approach
+ * that's genuinely safe at any viewport width. The alternative (floating
+ * in the left gutter near the headline, like the original reference)
+ * only actually fits without overlapping the headline on wide screens:
+ * at .slHeroInner's 900px max-width, the gutter is only wide enough for
+ * this 208px card once the viewport is roughly 1440px+ -- at more
+ * common widths (1280, 1366px laptops) the gutter is narrower than the
+ * card itself, so a fixed negative offset that looked fine on a wide
+ * test window overlapped the headline text on an ordinary one. See the
+ * 1440px override below for where the floating treatment actually has
+ * room to work. */
 .slSignalCard {
-  position: absolute;
-  top: 4px;
-  left: -200px;
+  align-self: flex-start;
+  margin-top: 28px;
   width: 208px;
   background: var(--sl-canvas);
   border: 1px solid var(--sl-border);
@@ -355,19 +358,32 @@ p.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); m
   padding: 12px 14px;
   box-shadow: 0 16px 32px -18px rgba(9,9,11,.18), 0 1px 2px rgba(9,9,11,.04);
 }
-.slSignalCard::before {
-  content: "";
-  position: absolute;
-  inset: -26px;
-  z-index: -1;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(82,82,91,.10), transparent 72%);
-}
 .slSignalMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .slSignalMeta > span:first-child { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--sl-text-fainter); }
 .slSignalCard p { margin: 7px 0 0; font-size: 13px; line-height: 1.4; color: var(--sl-text); font-weight: 500; }
 .slSignalTag { font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap; }
 .slSignalTagBlue { background: var(--sl-primary-tint); color: var(--sl-primary-deep); }
+
+/* Only at genuinely wide viewports is there enough real gutter space
+ * (see the note above) for the card to float near the headline the way
+ * the reference showed, without needing to overlap it. */
+@media (min-width: 1440px) {
+  .slSignalCard {
+    position: absolute;
+    top: 4px;
+    left: -200px;
+    align-self: auto;
+    margin-top: 0;
+  }
+  .slSignalCard::before {
+    content: "";
+    position: absolute;
+    inset: -26px;
+    z-index: -1;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(82,82,91,.10), transparent 72%);
+  }
+}
 
 .slPreviewTopbar { display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--sl-divider); background: #fcfcfd; }
 .slPreviewDots { display: flex; gap: 6px; }
@@ -654,15 +670,11 @@ p.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); m
   .slPage * { transition: none !important; }
 }
 
-/* On narrow screens there's no left gutter for the card to bleed into,
- * so it drops into normal flow after the form instead of floating with a
- * negative offset that would just clip or overlap awkwardly. The glow
- * pseudo-element is positioned relative to the card itself, which needs
- * position: absolute for that to work -- switching the card to static
- * means hiding the glow here rather than leaving it mispositioned. */
+/* On narrow screens the default 208px width (pinned left via
+ * align-self) is too wide relative to the viewport -- center it and cap
+ * the width instead, matching the rest of the form. */
 @media (max-width: 700px) {
-  .slSignalCard { position: static; align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; margin-top: 22px; }
-  .slSignalCard::before { display: none; }
+  .slSignalCard { align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; margin-top: 22px; }
 }
 
 /* Results -> Signup -> Done (onboarding steps 6-8). Reuses .scanScreen /

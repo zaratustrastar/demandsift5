@@ -1,6 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: landing copy -- remove hero disclaimer line, rewrite
-# step 03 (title, body, example reply) (2026-09-05).
+# Release marker: hero redesign per design brief -- compact height,
+# new headline/subhead, floating opportunity-fragment cards, real
+# CTA copy, no fake social proof (2026-09-05).
 
 on:
   push:

@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix the actual specificity bug behind broken hero
-# spacing (margin-bottom was losing to a global reset), remove the
-# preview label, restore the card's original top-left placement
+# Release marker: fix the floating card overlapping the headline at
+# common (~1280-1366px) viewport widths -- floating position now only
+# applies at 1440px+ where there's actually gutter room for it
 # (2026-09-05).
 
 on:

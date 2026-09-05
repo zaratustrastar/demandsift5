@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: tighten hero type scale (headline 70px, forced 2-line
-# break) and spacing (eyebrow/headline/subhead/tabs/input/microcopy) to
-# exact spec; nav/tabs/CTA sizes bumped to 15-17px (2026-09-05).
+# Release marker: refine the floating card -- lighter/softer style,
+# larger legible type, -4deg diagonal placement, pale blue oval glow
+# (2026-09-05).
 
 on:
   push:

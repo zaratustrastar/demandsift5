@@ -361,15 +361,15 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
 .slSignalCard {
   align-self: flex-start;
   margin-top: 28px;
-  width: 200px;
+  width: 220px;
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.06);
   border-radius: 19px;
   padding: 14px 16px;
   box-shadow: 0 20px 40px -22px rgba(9,9,11,.14), 0 2px 6px -2px rgba(9,9,11,.05);
 }
-.slSignalMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.slSignalMeta > span:first-child { font-family: "IBM Plex Mono", monospace; font-size: 14px; color: var(--sl-text-faint); }
+.slSignalMeta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.slSignalMeta > span:first-child { font-family: "IBM Plex Mono", monospace; font-size: 14px; color: var(--sl-text-faint); white-space: nowrap; }
 .slSignalCard p { margin: 9px 0 0; font-size: 18px; line-height: 1.28; color: var(--sl-ink); font-weight: 500; }
 .slSignalTag { font-size: 13.5px; font-weight: 500; padding: 4px 10px; border-radius: 20px; white-space: nowrap; }
 .slSignalTagBlue { background: var(--sl-primary-tint); color: var(--sl-primary-deep); }
@@ -381,7 +381,7 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
   .slSignalCard {
     position: absolute;
     top: -10px;
-    left: -195px;
+    left: -215px;
     align-self: auto;
     margin-top: 0;
     transform: rotate(-4deg);

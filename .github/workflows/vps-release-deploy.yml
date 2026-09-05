@@ -1,6 +1,6 @@
 name: DemandSift trusted VPS release
-# Release marker: refine the floating card -- lighter/softer style,
-# larger legible type, -4deg diagonal placement, pale blue oval glow
+# Release marker: fix the card's meta row wrapping awkwardly after the
+# larger-text refinement -- widened slightly, offset adjusted to match
 # (2026-09-05).
 
 on:

@@ -246,17 +246,17 @@
 .slNavInner { max-width: 1800px; margin: 0 auto; padding: 0 40px; height: 66px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; }
 .slNavBrand { display: flex; align-items: center; justify-self: start; }
 .slNavLinks { display: flex; align-items: center; gap: 40px; justify-self: center; }
-.slNavLinks a { font-size: 14px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
+.slNavLinks a { font-size: 16px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
 .slNavLinks a:hover { color: var(--sl-ink); }
 .slNavRight { display: flex; align-items: center; gap: 18px; justify-self: end; }
-.slNavLogin { font-size: 14px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
+.slNavLogin { font-size: 16px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
 .slNavLogin:hover { color: var(--sl-ink); }
 .slNavAccount { display: inline-flex; align-items: center; gap: 8px; }
 .slNavAccountAvatar { width: 24px; height: 24px; border-radius: 24px; background: var(--sl-primary-tint); color: var(--sl-primary-hover); font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .slNavAccountLabel { font-size: 13.5px; color: var(--sl-text-muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slNavSignOut { border: 0; background: transparent; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 500; color: var(--sl-text-faint); padding: 0; }
 .slNavSignOut:hover { color: var(--sl-warm-text); }
-.slNavCta { font-size: 14px; font-weight: 600; color: #fafafa; background: var(--sl-primary); padding: 9px 17px; border-radius: 7px; text-decoration: none; }
+.slNavCta { font-size: 16px; font-weight: 600; color: #fafafa; background: var(--sl-primary); padding: 9px 17px; border-radius: 7px; text-decoration: none; }
 .slNavCta:hover { background: var(--sl-primary-hover); }
 
 .slLogo { display: inline-flex; align-items: center; gap: 10px; }
@@ -274,7 +274,7 @@
   overflow: hidden;
 }
 .slHeroInner { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; text-align: center; position: relative; z-index: 2; }
-.slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 20px; }
+.slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 13.5px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 18px; }
 .slHeroBadge { display: inline-flex; align-items: center; gap: 9px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 40px; padding: 6px 8px 6px 14px; box-shadow: 0 1px 2px rgba(9,9,11,.04); font-size: 13px; font-weight: 500; color: #3f3f46; }
 .slHeroBadgeArrow { width: 20px; height: 20px; border-radius: 20px; background: var(--sl-ink); color: #fafafa; font-size: 11px; display: flex; align-items: center; justify-content: center; }
 /* Element-qualified (h1.x, not just .x) deliberately: .slPage's global
@@ -284,25 +284,35 @@
  * that reset and rendering as 0px regardless of the value written here --
  * this is what actually caused the "headline almost overlaps
  * subheadline" report, not merely an insufficient px value. */
-h1.slHeroTitle { font-size: clamp(32px, 5.2vw, 65px); line-height: 1.02; letter-spacing: -.038em; font-weight: 600; max-width: 860px; margin-bottom: 44px; }
+h1.slHeroTitle { font-size: clamp(34px, 5.4vw, 70px); line-height: .98; letter-spacing: -.038em; font-weight: 600; max-width: 820px; margin-bottom: 24px; }
 .slHeroTitleAccent { color: var(--sl-primary); }
-p.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 36px; }
+p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 28px; }
 
-.slHeroForm { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 17px; text-align: left; }
-.slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 2px; background: var(--sl-surface-alt); border-radius: 9px; padding: 2px; }
-.slModeBtn { cursor: pointer; border: 0; background: transparent; color: var(--sl-text-muted); font-family: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 14px; border-radius: 7px; white-space: nowrap; }
+.slHeroForm { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 0; text-align: left; }
+/* Two distinct gaps (tabs->input 16px, input->microcopy 14px) instead of
+ * one uniform flex gap -- close enough to look interchangeable at a
+ * glance, but the brief asked for them separately, so each transition
+ * gets its own margin rather than being rounded to a single compromise
+ * value. */
+.slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 2px; background: var(--sl-surface-alt); border-radius: 9px; padding: 2px; margin-bottom: 16px; }
+.slModeBtn { cursor: pointer; border: 0; background: transparent; color: var(--sl-text-muted); font-family: inherit; font-size: 15px; font-weight: 600; padding: 8px 15px; border-radius: 7px; white-space: nowrap; }
 .slModeBtnActive { background: var(--sl-canvas); color: var(--sl-ink); box-shadow: 0 1px 2px rgba(9,9,11,.06); }
 
-.slUrlBar { display: flex; align-items: center; gap: 10px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px; padding: 11px 11px 11px 22px; box-shadow: 0 8px 24px -12px rgba(9,9,11,.16), 0 1px 2px rgba(9,9,11,.05); }
+.slUrlBar { display: flex; align-items: center; gap: 10px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px; padding: 11px 11px 11px 22px; box-shadow: 0 8px 24px -12px rgba(9,9,11,.16), 0 1px 2px rgba(9,9,11,.05); margin-bottom: 14px; }
 .slUrlProto { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--sl-text-fainter); flex-shrink: 0; }
 .slUrlBar input,
-.slClosingForm input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 17px; color: var(--sl-ink); min-width: 0; font-family: inherit; }
+.slClosingForm input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--sl-ink); min-width: 0; font-family: inherit; }
+.slUrlBar input { font-size: 16px; }
+.slClosingForm input { font-size: 17px; }
 .slUrlBar input::placeholder,
 .slClosingForm input::placeholder { color: var(--sl-text-muted); }
 .slUrlSubmit { border: 0; cursor: pointer; background: var(--sl-primary); color: #fff; font-size: 15.5px; font-weight: 700; padding: 18px 22px; min-width: 34%; justify-content: center; border-radius: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 10px 22px -10px rgba(37,99,235,.55); }
+/* Scoped to just the hero's button, not .slClosingForm's, which reuses
+ * this same class further down the page. */
+.slHeroForm .slUrlSubmit { font-size: 16.5px; }
 .slUrlSubmit:hover { background: var(--sl-primary-hover); }
 
-.slIdeaBox { display: flex; flex-direction: column; gap: 9px; }
+.slIdeaBox { display: flex; flex-direction: column; gap: 9px; margin-bottom: 14px; }
 .slIdeaBox textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--sl-border); border-radius: 12px; padding: 15px 17px; font-family: inherit; font-size: 15.5px; line-height: 1.55; color: var(--sl-ink); resize: vertical; min-height: 104px; outline: 0; box-shadow: 0 8px 24px -12px rgba(9,9,11,.16); }
 .slIdeaBox textarea:focus { border-color: var(--sl-primary); }
 .slIdeaBox textarea::placeholder { color: var(--sl-text-muted); }

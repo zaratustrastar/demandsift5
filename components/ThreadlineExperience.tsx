@@ -585,8 +585,9 @@ function Landing({
           <span className={styles.slHeroEyebrow}>Reddit demand intelligence</span>
 
           <h1 className={styles.slHeroTitle}>
-            Find people <span className={styles.slHeroTitleAccent}>already asking</span> for what
-            you sell.
+            Find people <span className={styles.slHeroTitleAccent}>already asking</span>
+            <br />
+            for what you sell.
           </h1>
 
           <p className={styles.slHeroLead}>

@@ -624,7 +624,7 @@ function Landing({
                   placeholder="yourcompany.com"
                   value={url}
                   onChange={(event) => setUrl(event.target.value)}
-                  aria-describedby={error ? "sl-url-error" : "sl-scan-note"}
+                  aria-describedby={error ? "sl-url-error" : undefined}
                 />
                 <button type="submit" className={styles.slUrlSubmit}>
                   Run free scan <span aria-hidden="true">&#8594;</span>
@@ -637,7 +637,7 @@ function Landing({
                   placeholder="A parental controls app for Android TV with daily time limits and no subscription."
                   value={contextText}
                   onChange={(event) => setContextText(event.target.value)}
-                  aria-describedby={error ? "sl-url-error" : "sl-scan-note"}
+                  aria-describedby={error ? "sl-url-error" : undefined}
                 />
                 <div className={styles.slIdeaFooter}>
                   <span className={styles.slIdeaNote}>No website needed &mdash; a couple of sentences is enough.</span>
@@ -652,13 +652,7 @@ function Landing({
               <p className={styles.slFormError} id="sl-url-error">
                 {error}
               </p>
-            ) : (
-              <p className={styles.slFormNote} id="sl-scan-note">
-                {mode === "website"
-                  ? "No card required · Public same-domain pages only · Saved scan progress"
-                  : "No card required · No website needed · Saved scan progress"}
-              </p>
-            )}
+            ) : null}
           </form>
 
           {publicStats !== null && publicStats.scansAnalyzed > 0 && (
@@ -847,10 +841,10 @@ function Landing({
 
             <div className={styles.slHowCard}>
               <span className={styles.slHowNum}>03</span>
-              <h3>Reply in your own words</h3>
+              <h3>Join the conversation naturally</h3>
               <p>
-                We draft something useful and grounded in your site. You edit it, or write your own. It
-                only goes live when you say so.
+                We turn each relevant thread into a contextual reply grounded in your business.
+                Review it, edit anything you want, and post when it sounds like you.
               </p>
               <div className={styles.slHowDemo}>
                 <div className={styles.slHowDemoReplyAuthor}>
@@ -858,8 +852,8 @@ function Landing({
                   u/you
                 </div>
                 <p className={styles.slHowDemoReplyText}>
-                  We were on three tools for this and cut it down to one. The thing that mattered was
-                  owning the keyword list ourselves
+                  We tried three different tools for this. What finally worked was keeping control of
+                  the keyword list ourselves &mdash; it gave us much better results.
                   <span className={styles.slHowDemoCaret} />
                 </p>
               </div>

@@ -1,3 +1,17 @@
+export type ConversationTheme = {
+  id: string;
+  label: string;
+  kind: "struggle" | "request";
+  conversationCount: number;
+  /** Supporting conversations, so every theme can show its evidence. */
+  evidence: Array<{
+    sourceId: string;
+    title: string;
+    subreddit: string;
+    permalink: string;
+  }>;
+};
+
 export type NavigationSectionId =
   | "dashboard"
   | "opportunities"
@@ -6,8 +20,9 @@ export type NavigationSectionId =
   | "visibility"
   | "replies"
   | "results"
-  | "billing"
-  | "settings";
+  | "monitoring"
+  | "settings"
+  | "billing";
 
 export type ProvenanceKind =
   | "website-page"
@@ -73,6 +88,7 @@ export interface InsightEvidence {
   quote: string;
   sourceLabel: string;
   provenanceId: string;
+  sourceUrl?: string | null;
 }
 
 export interface DemandInsight {
@@ -86,6 +102,39 @@ export interface DemandInsight {
   signalStrength: ConfidenceLevel;
   opportunityIds: string[];
   provenanceIds: string[];
+  evidenceScope?: "single-conversation" | "recurring-pattern";
+  sourceCount?: number;
+}
+
+export interface RelevantConversation {
+  id: string;
+  /** Reddit's own id for this conversation -- the join key for on-demand actions like Create reply. */
+  externalId: string;
+  provider: string;
+  isMock: boolean;
+  title: string;
+  summary: string;
+  subreddit: string;
+  authorLabel: string;
+  capturedAt: string;
+  permalink: string | null;
+  tags: string[];
+  demandSignals: string[];
+  competitorName: string | null;
+  provenanceIds: string[];
+  /**
+   * Same 0-100 scale as RedditOpportunity.classification.relevanceScore --
+   * lets the UI merge opportunities and relevant-but-not-lead conversations
+   * into a single carousel ordered by one reliability axis.
+   */
+  reliabilityScore: number;
+  /**
+   * Present only when this conversation was independently classified as
+   * reply-suitable and a grounded reply was drafted for it. Never implies
+   * potential-customer/lead status -- it is shown as a research signal with
+   * an available reply, not as an opportunity.
+   */
+  reply?: SuggestedReply;
 }
 
 export interface CompetitorWeakness {
@@ -144,6 +193,8 @@ export interface RedditOpportunity {
   supportingSignalCount?: number;
   supportingSourceIds?: string[];
   appearedInPreviousDemandDrop?: boolean;
+  mentionProduct?: boolean;
+  disclosureRequired?: boolean;
   matchReasons: string[];
   classification: OpportunityClassification;
   reply: SuggestedReply;
@@ -188,6 +239,7 @@ export interface PotentialCustomerSummary {
 
 export interface LockedResultCounts {
   opportunities: number;
+  relevantConversations?: number;
   insights: number;
   competitorSignals: number;
   visibilityOpportunities: number;
@@ -231,6 +283,77 @@ export interface SearchVisibilityOpportunity {
   provenanceIds: string[];
 }
 
+export interface ScanEvidenceCandidate {
+  externalId: string;
+  title: string | null;
+  excerpt: string;
+  subreddit: string;
+  author: string | null;
+  permalink: string | null;
+  sourceCreatedAt: string;
+  matchedQueries: string[];
+  discoveryLanes: string[];
+  fullContextVerified: boolean;
+  triage: {
+    relevant: boolean;
+    intent: string;
+    demandSignal: string;
+    productFit: string;
+    timing: string;
+    replyability: string;
+    worthEnriching: boolean;
+    reason: string;
+  };
+  deepQualification: null | {
+    leadStatus: string;
+    demandSignals: string[];
+    intelligenceTags: string[];
+    productFit: string;
+    painSeverity: string;
+    intent: string;
+    timing: string;
+    evidenceQuality: string;
+    replyability: string;
+    whyItMatters: string;
+    shouldReply: boolean;
+  };
+  /**
+   * Same 0-100 reliability axis as RedditOpportunity.classification.relevanceScore
+   * and RelevantConversation.reliabilityScore, computed server-side by
+   * candidateReliabilityScore() -- lets the dashboard rank every candidate the
+   * lightweight AI shortlisted (not only the ones that became a published
+   * opportunity or relevant conversation) on one consistent scale.
+   */
+  reliabilityScore: number;
+}
+
+export interface ScanEvidence {
+  searchPlan: Array<{ lane: string; query: string; seed?: string }>;
+  diagnostics: {
+    retrieved: number;
+    normalized: number;
+    deterministicSurvivors: number;
+    providerRejectedByReason: Record<string, number>;
+    deterministicRejectedByReason: Record<string, number>;
+    submittedForTriage: number;
+    triageReturned: number;
+    worthEnriching: number;
+    requestedForEnrichment: number;
+    enrichedSuccessfully: number;
+    enrichmentFailures: number;
+    requiredFullContextReviews?: number;
+    coverageLimited?: boolean;
+    enrichmentReplacementAttempts?: number;
+    enrichmentReplacementSuccesses?: number;
+    unverifiedPotentialCustomerSignals?: number;
+    submittedForDeepQualification: number;
+    deepQualificationsReturned: number;
+    potentialCustomerConversations: number;
+    uniquePotentialCustomers: number;
+  };
+  candidates: ScanEvidenceCandidate[];
+}
+
 export interface RedditDemandDemoData {
   fixtureLabel: string;
   fixtureDisclosure: string;
@@ -238,9 +361,19 @@ export interface RedditDemandDemoData {
   business: BusinessProfile;
   provenance: ProvenanceSource[];
   insights: DemandInsight[];
+  /** Recurring struggles and requests aggregated from the relevant corpus. */
+  conversationThemes: ConversationTheme[];
+  relevantConversations?: RelevantConversation[];
   competitorWeaknesses: CompetitorWeakness[];
   opportunities: RedditOpportunity[];
   potentialCustomers?: PotentialCustomerSummary;
+  qualificationCoverage?: {
+    credibleCandidates: number;
+    fullContextReviewed: number;
+    requiredFullContextReviews?: number;
+    limited?: boolean;
+  };
+  scanEvidence?: ScanEvidence;
   lockedResults: LockedStoredResult[];
   lockedCounts: LockedResultCounts;
   metrics: DashboardMetrics;

@@ -1,6 +1,6 @@
-# Threadline
+# Scooptr
 
-Threadline is a focused Reddit demand-intelligence MVP. A visitor submits a
+Scooptr is a focused Reddit demand-intelligence MVP. A visitor submits a
 business website, the backend safely reads a small set of public pages on that
 domain, builds a source-backed business profile, finds relevant conversations
 through an approved Reddit provider, and produces a short list of useful

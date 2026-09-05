@@ -1,17 +1,44 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import {
   claimJob,
   createMonitoringScanRecord,
+  assertSuccessfulExecutorPayload,
   isMonitoringCandidateDue,
+  jobExecutionConfiguration,
+  jobFailureDisposition,
+  refreshJobLease,
   monitoringConfiguration,
   monitoringDedupeKey,
+  postJsonWithLongTimeout,
   scheduleMonitoringScans,
+  waitForScanExecution,
+  WorkerExecutorHttpError,
+  workerQueueConfiguration,
 } from "../scripts/background-worker.mjs";
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
+
+test("two executor lanes require global provider ceilings and expose scheduler roles", () => {
+  assert.deepEqual(workerQueueConfiguration({}), { concurrency: 1, role: "combined", agingSeconds: 300 });
+  assert.throws(
+    () => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "2" }),
+    /requires PROVIDER_GLOBAL_CAPS=1/u,
+  );
+  assert.deepEqual(workerQueueConfiguration({
+    BACKGROUND_WORKER_CONCURRENCY: "2",
+    PROVIDER_GLOBAL_CAPS: "1",
+    BACKGROUND_WORKER_ROLE: "executor",
+    BACKGROUND_JOB_AGING_SECONDS: "120",
+  }), { concurrency: 2, role: "executor", agingSeconds: 120 });
+  assert.equal(workerQueueConfiguration({ BACKGROUND_WORKER_ROLE: "scheduler" }).role, "scheduler");
+  assert.throws(() => workerQueueConfiguration({ BACKGROUND_WORKER_ROLE: "anything" }), /must be/u);
+  assert.throws(() => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "3" }), /must be 1 or 2/u);
+  assert.throws(() => workerQueueConfiguration({ BACKGROUND_JOB_AGING_SECONDS: "2.5" }), /must be an integer/u);
+});
 
 test("monitoring configuration has launch defaults and bounded overrides", () => {
   assert.deepEqual(monitoringConfiguration({}), {
@@ -64,8 +91,6 @@ test("only due active paid schedules qualify, while Core survives browser-sessio
   const dueCore = {
     ...duePass,
     plan: "core",
-    // Core eligibility follows verified active subscription state. Unlike the
-    // fixed seven-day pass, it does not require a future accessUntil value.
     accessUntil: new Date(NOW.getTime() - DAY_MS).toISOString(),
     workspaceExpiresAt: new Date(NOW.getTime() - DAY_MS).toISOString(),
   };
@@ -89,7 +114,7 @@ test("monitoring dedupe keys are stable within a plan interval bucket", () => {
   );
 });
 
-test("scheduled monitoring records exactly match the ScanRecord stage contract", () => {
+test("scheduled monitoring records exactly match the new scan-stage contract", () => {
   assert.deepEqual(createMonitoringScanRecord({
     scanId: "scan_fixed",
     workspaceId: "ws_fixed",
@@ -111,37 +136,37 @@ test("scheduled monitoring records exactly match the ScanRecord stage contract",
         id: "understanding",
         label: "Mapping the problems you solve",
         status: "pending",
-        detail: "Building a source-backed product, audience and problem profile.",
+        detail: "Building a source-backed company context pack.",
       },
       {
         id: "discovery",
         label: "Searching recent Reddit conversations",
         status: "pending",
-        detail: "Looking only inside the current seven-day scan window.",
+        detail: "Searching explicit demand, pain, switching, recommendation and brand lanes.",
       },
       {
-        id: "reading",
-        label: "Reading relevant posts and replies",
+        id: "triage",
+        label: "Reading every credible candidate",
         status: "pending",
-        detail: "Checking context, problem fit and source quality.",
+        detail: "Using high-recall AI triage before spending on full thread context.",
       },
       {
-        id: "ranking",
+        id: "enrichment",
+        label: "Opening the strongest conversations",
+        status: "pending",
+        detail: "Fetching useful thread context only for candidates worth deeper review.",
+      },
+      {
+        id: "qualification",
         label: "Identifying potential customers",
         status: "pending",
-        detail: "Removing noise and deduplicating qualified people by Reddit author.",
-      },
-      {
-        id: "competitors",
-        label: "Checking competitor frustrations",
-        status: "pending",
-        detail: "Verifying complaints and alternative-seeking signals from their sources.",
+        detail: "Qualifying first, then ranking and deduplicating people by Reddit author.",
       },
       {
         id: "replies",
-        label: "Ranking the strongest opportunities",
+        label: "Preparing the best next move",
         status: "pending",
-        detail: "Ordering the best fits and preparing source-grounded replies.",
+        detail: "Generating one grounded reply only when the conversation is appropriate to join.",
       },
     ],
     createdAt: NOW.toISOString(),
@@ -296,4 +321,292 @@ test("job claiming never reclaims a job at its maximum attempt count", async () 
   };
   assert.equal(await claimJob(sql, "worker_test"), null);
   assert.match(query, /attempts < max_attempts/u);
+});
+
+test("long scan timeout is independent from the heartbeat lease", () => {
+  assert.deepEqual(jobExecutionConfiguration({}), {
+    timeoutSeconds: 1_200,
+    heartbeatSeconds: 15,
+    staleSeconds: 90,
+  });
+  assert.deepEqual(jobExecutionConfiguration({
+    BACKGROUND_JOB_TIMEOUT_SECONDS: "1800",
+    BACKGROUND_JOB_HEARTBEAT_SECONDS: "20",
+    BACKGROUND_JOB_LEASE_STALE_SECONDS: "120",
+  }), {
+    timeoutSeconds: 1_800,
+    heartbeatSeconds: 20,
+    staleSeconds: 120,
+  });
+  // Ceiling raised from 1_800s to 5_400s alongside
+  // lib/server/scan-execution.ts's ScanExecutionTimeoutError so an operator
+  // can let the worker wait as long as a detached execution is allowed to
+  // run before it self-aborts, instead of the worker giving up first and
+  // orphaning still-progressing work.
+  assert.equal(jobExecutionConfiguration({ BACKGROUND_JOB_TIMEOUT_SECONDS: "5400" }).timeoutSeconds, 5_400);
+  assert.equal(jobExecutionConfiguration({ BACKGROUND_JOB_TIMEOUT_SECONDS: "999999" }).timeoutSeconds, 5_400);
+});
+
+test("job lease heartbeat only refreshes a still-owned running job", async () => {
+  let query = "";
+  const sql = async (strings) => {
+    query = strings.join("?").replace(/\s+/gu, " ").trim();
+    return [{ id: "job_owned" }];
+  };
+  assert.equal(await refreshJobLease(sql, "job_owned", "worker_owned", 2), true);
+  assert.match(query, /UPDATE background_jobs SET locked_at = now\(\), updated_at = now\(\)/u);
+  assert.match(query, /status = 'running'/u);
+  assert.match(query, /locked_by = \?/u);
+  assert.match(query, /attempts = \?/u);
+});
+
+test("long worker execution helper uses the configured timeout rather than fetch defaults", async () => {
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ received: JSON.parse(body), ok: true }));
+      }, 80);
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  try {
+    const result = await postJsonWithLongTimeout(
+      `http://127.0.0.1:${address.port}/execute`,
+      {
+        headers: { "content-type": "application/json" },
+        body: { workerId: "worker_test" },
+        signal: AbortSignal.timeout(1_000),
+        timeoutMs: 1_000,
+      },
+    );
+    assert.deepEqual(result, { received: { workerId: "worker_test" }, ok: true });
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("long worker execution helper fails explicitly on its own timeout", async () => {
+  const server = createServer((_request, response) => {
+    setTimeout(() => {
+      if (!response.destroyed) response.end(JSON.stringify({ late: true }));
+    }, 200);
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  try {
+    await assert.rejects(
+      postJsonWithLongTimeout(
+        `http://127.0.0.1:${address.port}/execute`,
+        {
+          body: {},
+          signal: AbortSignal.timeout(500),
+          timeoutMs: 40,
+        },
+      ),
+      /timed out after 40ms/i,
+    );
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("executor heartbeats keep a request alive until the final JSON payload", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    const heartbeat = setInterval(() => response.write("\n"), 20);
+    setTimeout(() => {
+      clearInterval(heartbeat);
+      response.end(JSON.stringify({ ok: true, scanId: "scan_heartbeat" }));
+    }, 110);
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  try {
+    const result = await postJsonWithLongTimeout(
+      `http://127.0.0.1:${address.port}/execute`,
+      {
+        body: {},
+        signal: AbortSignal.timeout(1_000),
+        timeoutMs: 40,
+      },
+    );
+    assert.deepEqual(result, { ok: true, scanId: "scan_heartbeat" });
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test("durable scan polling completes without one long-lived HTTP response", async () => {
+  let polls = 0;
+  const result = await waitForScanExecution({
+    signal: AbortSignal.timeout(1_000),
+    timeoutMs: 1_000,
+    pollMs: 1,
+    poll: async () => {
+      polls += 1;
+      return polls < 3
+        ? { ok: true, status: "running", complete: false }
+        : { ok: true, status: "complete", complete: true, scanId: "scan_durable" };
+    },
+  });
+  assert.equal(polls, 3);
+  assert.equal(result.scanId, "scan_durable");
+});
+
+test("durable scan polling preserves a terminal executor failure", async () => {
+  await assert.rejects(
+    waitForScanExecution({
+      signal: AbortSignal.timeout(1_000),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      poll: async () => ({
+        ok: false,
+        executorStatus: 502,
+        error: { code: "reddit_enrichment_failed", message: "Enrichment failed." },
+      }),
+    }),
+    (error) => {
+      assert.equal(error.code, "reddit_enrichment_failed");
+      return true;
+    },
+  );
+});
+
+test("durable scan polling tolerates a transient transport failure without losing the attempt", async () => {
+  let polls = 0;
+  const result = await waitForScanExecution({
+    signal: AbortSignal.timeout(1_000),
+    timeoutMs: 1_000,
+    pollMs: 1,
+    maxConsecutiveTransportFailures: 3,
+    poll: async () => {
+      polls += 1;
+      // Simulates a dropped connection / DNS blip to the internal executor,
+      // not a well-formed {ok:false} response -- the scan itself is still
+      // running server-side and this attempt must not be abandoned for it.
+      if (polls === 2) throw new Error("socket hang up");
+      return polls < 4
+        ? { ok: true, status: "running", complete: false }
+        : { ok: true, status: "complete", complete: true, scanId: "scan_durable" };
+    },
+  });
+  assert.equal(polls, 4);
+  assert.equal(result.scanId, "scan_durable");
+});
+
+test("durable scan polling gives up after exhausting consecutive transport failures", async () => {
+  let polls = 0;
+  await assert.rejects(
+    waitForScanExecution({
+      signal: AbortSignal.timeout(1_000),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      maxConsecutiveTransportFailures: 2,
+      poll: async () => {
+        polls += 1;
+        throw new Error("socket hang up");
+      },
+    }),
+    (error) => {
+      assert.equal(error.message, "socket hang up");
+      return true;
+    },
+  );
+  // Initial attempt plus two tolerated retries, then the third failure rethrows.
+  assert.equal(polls, 3);
+});
+
+test("durable scan polling still rejects a terminal executor failure immediately, without retrying", async () => {
+  let polls = 0;
+  await assert.rejects(
+    waitForScanExecution({
+      signal: AbortSignal.timeout(1_000),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      maxConsecutiveTransportFailures: 5,
+      poll: async () => {
+        polls += 1;
+        return { ok: false, executorStatus: 502, error: { code: "reddit_enrichment_failed", message: "Enrichment failed." } };
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "reddit_enrichment_failed");
+      return true;
+    },
+  );
+  assert.equal(polls, 1);
+});
+
+test("streamed executor errors retain machine-readable retry disposition", () => {
+  assert.throws(
+    () => assertSuccessfulExecutorPayload({
+      ok: false,
+      executorStatus: 502,
+      error: {
+        code: "openai_structured_output_failed",
+        message: "The provider exhausted bounded recovery.",
+      },
+    }),
+    (error) => {
+      assert.equal(error.status, 502);
+      assert.equal(error.code, "openai_structured_output_failed");
+      return true;
+    },
+  );
+});
+
+test("reddit enrichment failure is terminal and cannot restart discovery", async () => {
+  const executorError = new WorkerExecutorHttpError(502, JSON.stringify({
+    error: {
+      code: "reddit_enrichment_failed",
+      message: "Selected Reddit candidates could not be enriched.",
+    },
+  }));
+
+  const disposition = jobFailureDisposition(
+    { attempts: 1, max_attempts: 5 },
+    executorError,
+    NOW,
+  );
+  assert.equal(executorError.code, "reddit_enrichment_failed");
+  assert.equal(disposition.retryable, false);
+  assert.equal(disposition.terminal, true);
+  assert.equal(disposition.status, "failed");
+  assert.equal(disposition.finishedAt, NOW);
+});
+
+test("exhausted structured AI recovery is terminal and cannot restart discovery", () => {
+  const executorError = new WorkerExecutorHttpError(502, JSON.stringify({
+    error: {
+      code: "openai_structured_output_failed",
+      message: "The AI provider could not produce valid structured output.",
+    },
+  }));
+
+  const disposition = jobFailureDisposition(
+    { attempts: 1, max_attempts: 5 },
+    executorError,
+    NOW,
+  );
+  assert.equal(executorError.code, "openai_structured_output_failed");
+  assert.equal(disposition.retryable, false);
+  assert.equal(disposition.terminal, true);
+  assert.equal(disposition.status, "failed");
+});
+
+test("transient executor failures remain retryable before attempts are exhausted", () => {
+  const disposition = jobFailureDisposition(
+    { attempts: 1, max_attempts: 5 },
+    new Error("temporary network failure"),
+    NOW,
+  );
+  assert.equal(disposition.retryable, true);
+  assert.equal(disposition.terminal, false);
+  assert.equal(disposition.status, "retrying");
+  assert.equal(disposition.finishedAt, null);
 });

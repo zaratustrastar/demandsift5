@@ -1,0 +1,10 @@
+{
+  "id": "watch-live-scan-4206-2026-09-02-0702",
+  "ops": [
+    "logs",
+    "status",
+    "runtime"
+  ],
+  "inspectScans": [],
+  "startScan": null
+}

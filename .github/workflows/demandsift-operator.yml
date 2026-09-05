@@ -1,0 +1,148 @@
+name: DemandSift operator
+
+# One reusable harness for production operations, driven by ops/request.json so
+# each operation is a small data commit rather than a new workflow.
+#
+# Self-hosted job runs sanctioned demandsift-ops verbs; the GitHub-hosted job
+# talks to the public API and publishes results, because the VPS runner cannot
+# reach the GitHub comments API.
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - ops/request.json
+
+permissions:
+  contents: read
+
+jobs:
+  vps:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 25
+    outputs:
+      out_b64: ${{ steps.export.outputs.out_b64 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Run requested ops verbs
+        id: run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > /tmp/vps.log 2>&1
+          OPS="sudo /usr/local/bin/demandsift-ops"
+          REQ=ops/request.json
+
+          echo "request_id=$(python3 -c 'import json;print(json.load(open("ops/request.json")).get("id",""))')"
+
+          # `ops` is a list of verb strings, e.g. ["runtime","logs"].
+          python3 -c 'import json;print("\n".join(json.load(open("ops/request.json")).get("ops",[])))' > /tmp/verbs.txt
+          while read -r verb; do
+            [ -n "$verb" ] || continue
+            echo "===== ops $verb ====="
+            # shellcheck disable=SC2086
+            $OPS $verb 2>&1 | tail -n 120 || echo "verb_failed=$verb"
+            echo
+          done < /tmp/verbs.txt
+
+      - name: Export
+        id: export
+        if: always()
+        shell: bash
+        run: |
+          tail -c 20000 /tmp/vps.log > /tmp/vps.trim.log 2>/dev/null || echo "no vps log" > /tmp/vps.trim.log
+          echo "out_b64=$(base64 -w0 /tmp/vps.trim.log)" >> "$GITHUB_OUTPUT"
+
+  api:
+    needs: vps
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      out_b64: ${{ steps.run.outputs.out_b64 }}
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Run requested API actions
+        id: run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 ops/operator.py > /tmp/api.log 2>&1 || true
+          tail -c 40000 /tmp/api.log > /tmp/api.trim.log
+          cat /tmp/api.trim.log
+          echo "out_b64=$(base64 -w0 /tmp/api.trim.log)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: [vps, api]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
+      - name: Publish operator output
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VPS_B64: ${{ needs.vps.outputs.out_b64 }}
+          API_B64: ${{ needs.api.outputs.out_b64 }}
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "## DemandSift operator report"
+            echo
+            echo "### VPS ops"
+            echo '```'
+            if [ -n "${VPS_B64:-}" ]; then echo "$VPS_B64" | base64 -d; else echo "no vps output"; fi
+            echo '```'
+            echo "### API"
+            echo '```'
+            if [ -n "${API_B64:-}" ]; then echo "$API_B64" | base64 -d; else echo "no api output"; fi
+            echo '```'
+          } > /tmp/r.md
+          python3 - <<'PY' > /tmp/body.json
+          import json
+          print(json.dumps({"body": open("/tmp/r.md").read()[:62000]}))
+          PY
+          curl -sS -o /dev/null -w 'comment_http=%{http_code}\n' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/1/comments" \
+            --data @/tmp/body.json
+
+      - name: Commit output for direct git retrieval (API reads are unreliable for the requester)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p ops/reports
+          cp /tmp/r.md "ops/reports/$(date -u +%Y%m%dT%H%M%SZ)-${{ github.sha }}.md"
+          git config user.email "ops-report@demandsift.local"
+          git config user.name "DemandSift Ops Report"
+          git add ops/reports
+          if git diff --cached --quiet; then
+            echo "no report changes"
+            exit 0
+          fi
+          git commit -m "report: operator run for ${{ github.sha }}"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin feature/reddit-intelligence-pipeline
+            git rebase origin/feature/reddit-intelligence-pipeline && break
+            git rebase --abort || true
+            sleep $((attempt * 3))
+          done
+          git push origin HEAD:feature/reddit-intelligence-pipeline

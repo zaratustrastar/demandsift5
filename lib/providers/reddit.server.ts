@@ -1,3 +1,4 @@
+import { HarshmaurRedditProvider } from "@/lib/providers/reddit-harshmaur.server";
 import { MockRedditProvider } from "@/lib/providers/mock-reddit";
 import {
   contentFingerprint,
@@ -5,12 +6,30 @@ import {
   normalizeSearchText,
 } from "@/lib/intelligence/opportunity-ranking";
 import type {
+  ProviderRejectionReason,
+  RedditDiscoverOptions,
+  RedditDiscoveryDiagnostics,
+  RedditDiscoveryResponse,
+  RedditEnrichmentRequest,
+  RedditEnrichmentResponse,
   RedditProvider,
+  RedditSearchConcepts,
+  RedditSearchPlanEntry,
   RedditSearchRequest,
   RedditSearchResponse,
 } from "@/lib/providers/contracts";
 import { isProductionRuntime } from "@/lib/server/runtime-env";
-import type { RedditConversation } from "@/lib/domain/types";
+import { ApifyTransientError } from "@/lib/providers/apify-retry";
+import { ApifyRunRecovery, ApifyRecoveryError } from "./apify-run-recovery";
+import { withRetry } from "@/lib/server/resilience";
+import type {
+  EnrichedRedditConversation,
+  RedditContextMessage,
+  RedditConversation,
+  RedditDiscoveryCandidate,
+  RedditSearchLane,
+  RedditStructuredContext,
+} from "@/lib/domain/types";
 
 type ApprovedProviderConversation = {
   externalId?: unknown;
@@ -55,7 +74,7 @@ type ApifyRedditItem = {
 type ApifySearchActorInput = {
   searches: string[];
   ignoreStartUrls: true;
-  skipComments: true;
+  skipComments?: true;
   skipUserPosts: true;
   skipCommunity: true;
   includeMediaLinks: false;
@@ -64,8 +83,10 @@ type ApifySearchActorInput = {
   searchCommunities: false;
   searchUsers: false;
   searchMedia: false;
-  sort: "relevance";
+  sort: "relevance" | "new";
   time: "day" | "week" | "month" | "year" | "all";
+  postDateLimit?: string;
+  commentDateLimit?: string;
   includeNSFW: false;
   maxItems: number;
   maxPostCount: number;
@@ -76,8 +97,6 @@ type ApifySearchActorInput = {
   navigationTimeout: number;
   debugMode: false;
   searchCommunityName?: string;
-  postDateLimit?: string;
-  commentDateLimit?: string;
   proxy: {
     useApifyProxy: true;
     apifyProxyGroups: ["RESIDENTIAL"];
@@ -107,18 +126,17 @@ type ApifyEnrichmentActorInput = {
 
 export type ApifyRedditActorInput = ApifySearchActorInput | ApifyEnrichmentActorInput;
 
-type ApifyCandidate = {
-  item: ApifyRedditItem;
-  externalId: string;
-  kind: "post" | "comment";
-  permalink: string;
-  subreddit: string;
-  title?: string;
-  body: string;
-  author?: string;
-  createdAt?: string;
-  matchedQuery?: string;
-};
+/**
+ * Trudax charges for at least ten initialized items and rejects smaller
+ * maxItems values even when a startUrls run only opens one selected thread.
+ */
+export const APIFY_REDDIT_ENRICHMENT_MIN_ITEMS = 10;
+
+type ApifyCandidate = RedditDiscoveryCandidate & { item: ApifyRedditItem };
+
+type CandidateParseResult =
+  | { candidate: ApifyCandidate; reason?: never }
+  | { candidate?: never; reason: ProviderRejectionReason };
 
 function required(value: string | undefined, name: string): string {
   const normalized = value?.trim();
@@ -166,10 +184,7 @@ function cleanSearchTerm(value: string): string {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint <= 31 || codePoint === 127 ? " " : character;
   }).join("");
-  return withoutControls
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
+  return withoutControls.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -210,37 +225,213 @@ function wordCount(value: string): number {
   return cleanSearchTerm(value).split(/\s+/).filter(Boolean).length;
 }
 
-function usefulShortPhrase(value: string, maximumWords = 7): boolean {
+function usefulShortPhrase(value: string, maximumWords = 8): boolean {
   return wordCount(value) <= maximumWords && isUsefulSearchPhrase(value);
 }
 
-function redditSearchAtom(value: string): string {
-  const normalized = normalizeSearchText(cleanSearchTerm(value))
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 8)
-    .join(" ");
-  if (!normalized) return "";
-  return normalized.includes(" ") ? `"${normalized}"` : normalized;
-}
-
-function redditExclusions(values: readonly string[]): string {
-  const atoms = [...new Set(values.map(redditSearchAtom).filter(Boolean))].slice(0, 5);
-  return atoms.length > 0 ? ` NOT (${atoms.join(" OR ")})` : "";
-}
-
 const PROBLEM_TOKEN_STOP_WORDS = new Set([
-  "about", "across", "and", "are", "for", "from", "have", "into", "our", "that",
-  "the", "their", "this", "too", "using", "with", "without", "your",
+  "about", "across", "and", "are", "can", "for", "from", "have", "into", "our", "that",
+  "the", "their", "this", "using", "with", "without", "your", "a", "an", "to", "of",
+  "or", "is", "be", "being", "been", "lengthy", "new", "start", "starts", "starting",
+  "am", "as", "at", "by", "do", "go", "he", "if", "in", "it", "me", "my", "no",
+  "on", "so", "up", "us", "we",
 ]);
 
-function problemSearchExpression(value: string): string {
-  const tokens = normalizeSearchText(value)
+/**
+ * Cross-industry concept synonyms. Keys are canonical concept phrases; values
+ * are the surface forms real posts actually use. This exists because a market
+ * qualifier is rarely written the same way twice: someone shopping for an
+ * Android TV parental control writes "television", "smart TV" or "Chromecast"
+ * far more often than the vendor's own category label.
+ *
+ * Business-specific vocabulary is derived from the crawled profile at runtime;
+ * this table only supplies the generic equivalences that no profile states.
+ */
+type ConceptKind = "market" | "problem";
+
+interface ConceptEntry {
+  kind: ConceptKind;
+  variants: readonly string[];
+}
+
+/**
+ * Cross-industry concept synonyms, each tagged with the kind of evidence it
+ * supplies. The tagging matters: a category label such as "Android TV parental
+ * control app" contains both a market concept ("tv") and a problem concept
+ * ("parental control"). If they are pooled, a phone thread mentioning parental
+ * controls satisfies the market requirement and the gate is back where it
+ * started. Market evidence and problem evidence must come from different
+ * concepts to be independent.
+ *
+ * Business-specific vocabulary is derived from the crawled profile at runtime;
+ * this table only supplies generic equivalences no profile states.
+ */
+const CONCEPT_SYNONYMS: ReadonlyMap<string, ConceptEntry> = new Map([
+  // Market concepts - devices, platforms, domains.
+  ["tv", { kind: "market", variants: ["tv", "tvs", "television", "televisions", "smart tv", "google tv", "android tv", "apple tv", "fire tv", "firestick", "chromecast", "roku", "set top box", "streaming box", "living room tv"] }],
+  ["vr", { kind: "market", variants: ["vr", "virtual reality", "headset", "oculus", "meta quest", "quest"] }],
+  ["ar", { kind: "market", variants: ["ar", "augmented reality"] }],
+  ["pc", { kind: "market", variants: ["pc", "desktop", "windows machine"] }],
+  ["os", { kind: "market", variants: ["os", "operating system"] }],
+  ["phone", { kind: "market", variants: ["phone", "phones", "mobile", "smartphone", "handset"] }],
+  ["tablet", { kind: "market", variants: ["tablet", "tablets", "ipad"] }],
+  ["ai", { kind: "market", variants: ["ai", "artificial intelligence", "llm", "llms", "gpt", "machine learning", "chatbot"] }],
+  ["hr", { kind: "market", variants: ["hr", "human resources", "people ops", "hris"] }],
+  ["crm", { kind: "market", variants: ["crm", "customer relationship", "sales pipeline"] }],
+  ["seo", { kind: "market", variants: ["seo", "search rankings", "organic traffic", "serp"] }],
+  ["ui", { kind: "market", variants: ["ui", "user interface"] }],
+  ["ux", { kind: "market", variants: ["ux", "user experience", "usability"] }],
+  ["qa", { kind: "market", variants: ["qa", "quality assurance"] }],
+  ["bi", { kind: "market", variants: ["bi", "business intelligence", "dashboards"] }],
+  ["b2b", { kind: "market", variants: ["b2b", "business to business"] }],
+  // Problem and use-case concepts.
+  ["parental control", { kind: "problem", variants: ["parental control", "parental controls", "parental lock", "child lock", "kids mode", "restricted mode", "content restrictions", "block apps", "lock apps"] }],
+  ["screen time", { kind: "problem", variants: ["screen time", "screentime", "time limit", "time limits", "daily limit", "usage limit", "watching too long", "too much time", "hours a day", "outside allowed hours"] }],
+  ["kids watching", { kind: "problem", variants: ["kids watching", "kid watching", "children watching", "kids watch", "kid watches", "children watch", "my kids watch", "my son watches", "my daughter watches"] }],
+  ["block youtube", { kind: "problem", variants: ["block youtube", "blocking youtube", "restrict youtube", "youtube kids"] }],
+  ["time tracking", { kind: "problem", variants: ["time tracking", "timesheet", "log hours"] }],
+  ["scheduling", { kind: "problem", variants: ["scheduling", "book a time", "appointments"] }],
+  ["invoicing", { kind: "problem", variants: ["invoicing", "invoices", "billing", "get paid"] }],
+]);
+
+/** Generic words that cannot on their own identify a market. */
+const GENERIC_CONCEPT_TOKENS = new Set([
+  "app", "apps", "business", "company", "online", "platform", "product",
+  "service", "services", "software", "solution", "solutions", "system",
+  "systems", "tool", "tools", "best", "top", "free", "new",
+]);
+
+const BUILT_IN_INTENT_VARIANTS: readonly string[] = [
+  "recommend", "recommendation", "recommendations", "looking for", "any suggestions",
+  "suggestions", "alternative", "alternatives", "how can i", "how do i", "need a",
+  "need help", "what do you use", "anyone using", "which tool", "worth it",
+];
+
+/** Adjacent word pairs, so "android tv" survives as a unit. */
+function adjacentBigrams(value: string): string[] {
+  const words = normalizeSearchText(value).split(" ").filter(Boolean);
+  const pairs: string[] = [];
+  for (let index = 0; index + 1 < words.length; index += 1) {
+    pairs.push(`${words[index]} ${words[index + 1]}`);
+  }
+  return pairs;
+}
+
+/** Function words that carry no concept meaning on their own. */
+const CONCEPT_FUNCTION_WORDS = new Set([
+  "a", "an", "and", "any", "are", "as", "at", "be", "by", "do", "for", "from",
+  "get", "has", "have", "how", "in", "is", "it", "its", "my", "no", "not", "of",
+  "on", "or", "our", "so", "the", "their", "this", "to", "too", "up", "was",
+  "what", "when", "why", "with", "you", "your",
+]);
+
+/** Singular form, so "parental controls" reaches the "parental control" entry. */
+function singular(word: string): string {
+  if (word.length > 3 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 3 && word.endsWith("ses")) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
+function lemmatize(phrase: string): string {
+  return phrase.split(" ").map(singular).join(" ");
+}
+
+/**
+ * Every lexicon key a phrase touches. Both the literal and the lemmatised form
+ * are tried: profiles say "parental controls" while the lexicon is keyed on the
+ * singular, and missing that hit used to collapse the phrase to bare tokens.
+ */
+function lexiconHits(normalized: string): Array<[string, ConceptEntry]> {
+  const candidates = [normalized, ...adjacentBigrams(normalized), ...normalized.split(" ")];
+  const hits: Array<[string, ConceptEntry]> = [];
+  for (const candidate of candidates) {
+    for (const key of [candidate, lemmatize(candidate)]) {
+      const entry = CONCEPT_SYNONYMS.get(key);
+      if (entry && !hits.some(([seen]) => seen === key)) hits.push([key, entry]);
+    }
+  }
+  return hits;
+}
+
+/**
+ * Expand grounded phrases into the surface forms a real post might use,
+ * restricted to one kind of evidence. Tokens belonging to the opposite kind
+ * are excluded so the two requirements stay independent.
+ */
+function conceptVariants(phrases: readonly string[], kind: ConceptKind): string[] {
+  const variants = new Set<string>();
+  const add = (value: string) => {
+    const normalized = normalizeSearchText(value);
+    if (normalized.length >= 2) variants.add(normalized);
+  };
+
+  for (const phrase of phrases) {
+    const normalized = normalizeSearchText(phrase);
+    if (!normalized) continue;
+
+    const hits = lexiconHits(normalized);
+    const matching = hits.filter(([, entry]) => entry.kind === kind);
+    for (const [, entry] of matching) {
+      for (const variant of entry.variants) add(variant);
+    }
+
+    // Words already claimed by the opposite kind must not leak across.
+    const claimedByOther = new Set(
+      hits
+        .filter(([, entry]) => entry.kind !== kind)
+        .flatMap(([key]) => key.split(" ")),
+    );
+    const distinctive = normalized
+      .split(" ")
+      .filter(
+        (token) =>
+          token.length >= 2 &&
+          !PROBLEM_TOKEN_STOP_WORDS.has(token) &&
+          !GENERIC_CONCEPT_TOKENS.has(token) &&
+          !claimedByOther.has(token),
+      );
+
+    if (matching.length > 0) continue;
+
+    // No lexicon hit: fall back to the profile's own wording. Bigrams are used
+    // in preference to single tokens, because one bare token ("android") is
+    // usually the neighbouring market rather than this problem.
+    const bigrams = adjacentBigrams(normalized).filter((bigram) => {
+      const words = bigram.split(" ");
+      if (words.some((word) => claimedByOther.has(word))) return false;
+      if (words.some((word) => CONCEPT_FUNCTION_WORDS.has(word))) return false;
+      if (words.every((word) => GENERIC_CONCEPT_TOKENS.has(word))) return false;
+      return true;
+    });
+    if (bigrams.length > 0) {
+      for (const bigram of bigrams) add(bigram);
+      continue;
+    }
+    for (const token of distinctive.filter((token) => !CONCEPT_FUNCTION_WORDS.has(token))) {
+      add(token);
+    }
+  }
+  return [...variants].slice(0, 40);
+}
+
+/** True when any variant appears in the text as a whole word or phrase. */
+function matchesAnyVariant(text: string, variants: readonly string[]): boolean {
+  const padded = ` ${text} `;
+  return variants.some((variant) => {
+    if (!variant) return false;
+    return padded.includes(` ${variant} `);
+  });
+}
+
+function problemTokens(value: string): string[] {
+  return normalizeSearchText(value)
     .split(" ")
-    .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token))
-    .slice(0, 4);
-  if (tokens.length < 2) return "";
-  return `(${tokens.join(" AND ")}) AND (tool OR software OR solution OR help)`;
+    .filter((token) => token.length >= 2 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
+}
+
+function naturalKeywordPhrase(value: string, maximumWords = 5): string {
+  return problemTokens(value).slice(0, maximumWords).join(" ");
 }
 
 function automatedAuthor(value: string): boolean {
@@ -254,123 +445,547 @@ function automatedAuthor(value: string): boolean {
   );
 }
 
-/** Build precise Reddit-native Boolean searches for the actor's discovery run. */
-export function buildApifyRedditSearches(request: RedditSearchRequest): string[] {
-  const productTerms = request.queries.productTerms
-    .map(cleanSearchTerm)
-    .filter(isUsefulSearchPhrase);
-  const productCategories = (request.queries.productCategories ?? [])
-    .map(cleanSearchTerm)
-    .filter((term) => usefulShortPhrase(term, 6));
-  const problems = request.queries.customerProblems
-    .map(cleanSearchTerm)
-    .filter((term) => usefulShortPhrase(term, 7));
-  const competitors = request.queries.competitors
-    .map(cleanSearchTerm)
-    .filter(isUsefulSearchPhrase);
-  const primaryProduct = productTerms[0] ?? "";
-  const primaryCategory = productCategories[0] ?? productTerms[1] ?? "";
-  const brand = redditSearchAtom(primaryProduct);
-  const category = redditSearchAtom(primaryCategory);
-  const exclusions = redditExclusions(request.queries.excludedTerms);
-  const candidates = [
-    category && `${category} AND (recommendations OR recommend OR alternative OR options)${exclusions}`,
-    category && `${category} AND ("looking for" OR "need a" OR "what are you using" OR "which tool")${exclusions}`,
-    brand && `${brand} AND (alternative OR switching OR frustrated OR problem OR issue OR notifications)${exclusions}`,
-    brand && category && `${brand} AND ${category}${exclusions}`,
-    ...problems.slice(0, 3).map((problem) => {
-      const expression = problemSearchExpression(problem);
-      return expression ? `${expression}${exclusions}` : "";
-    }),
-    ...competitors.slice(0, 2).map((name) => {
-      const competitor = redditSearchAtom(name);
-      if (!competitor) return "";
-      return `${competitor} AND (alternative OR switching OR frustrated OR problem)${category ? ` AND ${category}` : ""}${exclusions}`;
-    }),
-  ];
-  const seen = new Set<string>();
-  return candidates.flatMap((candidate) => {
-    const cleaned = candidate.replace(/\s+/g, " ").trim().slice(0, 280);
-    const key = cleaned.toLowerCase();
-    if (
-      cleaned.length < 2 ||
-      seen.has(key)
-    ) return [];
-    seen.add(key);
-    return [cleaned];
-  }).slice(0, 8);
+function boundedPlanEntry(
+  lane: RedditSearchLane,
+  query: string,
+  seed?: string,
+  concepts?: RedditSearchConcepts,
+): RedditSearchPlanEntry | null {
+  const cleaned = query.replace(/\s+/g, " ").trim().slice(0, 300);
+  return cleaned.length >= 2
+    ? { lane, query: cleaned, ...(seed ? { seed } : {}), ...(concepts ? { concepts } : {}) }
+    : null;
 }
-
-function phraseEvidence(text: string, phrases: readonly string[]): boolean {
-  return phrases.some((value) => {
-    const phrase = normalizeSearchText(value);
-    if (!phrase) return false;
-    if (text.includes(phrase)) return true;
-    const tokens = phrase
-      .split(" ")
-      .filter((token) => token.length >= 3 && !PROBLEM_TOKEN_STOP_WORDS.has(token));
-    if (tokens.length < 2) return false;
-    const matches = tokens.filter((token) => text.includes(token)).length;
-    return matches >= Math.min(3, tokens.length) && matches / tokens.length >= 0.6;
-  });
-}
-
-const DEMAND_SIGNAL_PATTERN = /\b(alternatives?|compare|comparing|frustrated|help|issues?|looking for|need|notifications?|problems?|recommend(?:ation)?s?|replace|switching|tools?|workarounds?)\b/i;
-
-const STRONG_DEMAND_SIGNAL_PATTERN = /\b(alternatives?|any recommendations|compare|comparing|frustrated|looking for|need a|recommend(?:ation)?s?|replace|switching|what are you using|which tool)\b/i;
 
 /**
- * Cheap deterministic gate before enrichment and AI calls. It intentionally
- * requires business context in addition to a brand token, which removes
- * homonyms such as a mountain "basecamp".
+ * Build a bounded high-recall search plan around observable demand signals.
+ *
+ * The website/AI layer supplies grounded search hypotheses. This layer keeps
+ * Reddit syntax deterministic and deliberately avoids over-constraining those
+ * hypotheses with extra "pain words".
  */
-export function isApifyCandidateRelevant(
-  candidate: Pick<ApifyCandidate, "title" | "body">,
-  request: RedditSearchRequest,
-): boolean {
-  const text = normalizeSearchText(`${candidate.title ?? ""}\n${candidate.body}`);
-  if (!text) return false;
-  const excluded = request.queries.excludedTerms
-    .map(normalizeSearchText)
-    .filter((term) => term.length >= 3);
-  if (excluded.some((term) => text.includes(term))) return false;
+export function buildApifyRedditSearchPlan(request: RedditSearchRequest): RedditSearchPlanEntry[] {
+  type DemandLane =
+    | "direct_buying_intent"
+    | "problem_pain"
+    | "competitor_switching"
+    | "category_recommendation"
+    | "brand_competitor_mentions"
+    | "workaround"
+    | "timing";
 
-  const productTerms = request.queries.productTerms.filter(isUsefulSearchPhrase);
-  const categories = (request.queries.productCategories ?? []).filter(isUsefulSearchPhrase);
-  const problems = request.queries.customerProblems.filter(isUsefulSearchPhrase);
-  const competitors = request.queries.competitors.filter(isUsefulSearchPhrase);
-  const brandMatch = phraseEvidence(text, productTerms.slice(0, 1));
-  const productContext = phraseEvidence(text, productTerms.slice(1));
-  const categoryMatch = phraseEvidence(text, categories);
-  const problemMatch = phraseEvidence(text, problems);
-  const competitorMatch = phraseEvidence(text, competitors);
-  const demandSignal = DEMAND_SIGNAL_PATTERN.test(text);
+  const cleanUnique = (values: readonly string[], maximumWords: number): string[] => {
+    const seen = new Set<string>();
+    return values.flatMap((value) => {
+      const cleaned = cleanSearchTerm(value);
+      if (!usefulShortPhrase(cleaned, maximumWords)) return [];
+      const key = normalizeSearchText(cleaned);
+      if (!key || seen.has(key)) return [];
+      seen.add(key);
+      return [cleaned];
+    });
+  };
 
-  return (
-    categoryMatch ||
-    problemMatch ||
-    productContext ||
-    (brandMatch && demandSignal) ||
-    (competitorMatch && (demandSignal || categoryMatch))
+  const manifestationExpression = (value: string): string => {
+    return naturalKeywordPhrase(value, 5);
+  };
+
+  const categoryExpression = (value: string): string => {
+    const tokens = problemTokens(value);
+    if (tokens.length === 0) return "";
+
+    // Preserve enough grounded category language to keep market qualifiers.
+    // Example: "Android TV parental control app" must not collapse to
+    // "android parental app".
+    const selected = tokens.slice(0, 5);
+    const descriptor = tokens.find((token) =>
+      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
+    );
+    if (descriptor && !selected.includes(descriptor)) {
+      if (selected.length >= 5) selected[selected.length - 1] = descriptor;
+      else selected.push(descriptor);
+    }
+    return selected.join(" ");
+  };
+
+  const categorySearchExpressions = (value: string): string[] => {
+    const normalized = normalizeSearchText(value);
+    const descriptor = problemTokens(value).find((token) =>
+      /^(?:app|apps|platform|software|system|tool|tools)$/.test(token),
+    ) ?? "software";
+    const fragments = normalized
+      .split(/\band\b/g)
+      .map((fragment) => categoryExpression(fragment))
+      .filter(Boolean)
+      .map((fragment) =>
+        /\b(?:app|apps|platform|software|system|tool|tools)\b/.test(fragment)
+          ? fragment
+          : `${fragment} ${descriptor}`,
+      );
+    const variants = [...fragments];
+
+    /* "Team work apps" is common customer language for the formal category
+     * "team collaboration software". Keeping this deterministic synonym here
+     * lets discovery retrieve that wording without teaching the classifier to
+     * accept unrelated app discussions. */
+    if (/\bteam\b/.test(normalized) && /\bcollaborat\w*\b/.test(normalized)) {
+      variants.splice(Math.min(1, variants.length), 0, "team work apps");
+    }
+
+    return [...new Set(variants.map((variant) => variant.trim()).filter(Boolean))].slice(0, 3);
+  };
+
+  const triggerExpression = (value: string): string => {
+    return naturalKeywordPhrase(value, 5);
+  };
+
+  const contextOrExpression = (value: string): string => {
+    const generic = new Set([
+      "keep", "keeping", "manage", "managing", "organize", "organized",
+      "organizing", "coordinate", "coordinating", "use", "using",
+      "help", "helps", "solve", "solves", "make", "makes",
+    ]);
+    const tokens = problemTokens(value)
+      .filter((token) => !generic.has(token))
+      .slice(0, 2);
+
+    if (tokens.length === 0) return "";
+    return tokens.join(" ");
+  };
+
+  const productTerms = cleanUnique(request.queries.productTerms, 8);
+  const categories = cleanUnique(request.queries.productCategories ?? [], 6);
+  const problems = cleanUnique(request.queries.customerProblems, 8);
+  const jobs = cleanUnique(request.queries.jobsToBeDone ?? [], 10);
+  const workarounds = cleanUnique(request.queries.workarounds ?? [], 8);
+  const triggers = cleanUnique(request.queries.triggerEvents ?? [], 10);
+  const competitors = cleanUnique(request.queries.competitors, 6);
+  const brandTerms = cleanUnique(
+    request.queries.brandTerms?.length
+      ? request.queries.brandTerms
+      : productTerms.slice(0, 1),
+    6,
   );
+
+  const pools: Record<DemandLane, RedditSearchPlanEntry[]> = {
+    direct_buying_intent: [],
+    problem_pain: [],
+    competitor_switching: [],
+    category_recommendation: [],
+    brand_competitor_mentions: [],
+    workaround: [],
+    timing: [],
+  };
+
+  const seenQueries = new Set<string>();
+
+  /**
+   * Market evidence is shared by every entry and comes from the category the
+   * business actually sells into. Problem evidence is specific to the seed the
+   * entry was built from, so each search demands its own use case rather than
+   * any use case.
+   */
+  const marketVariants = conceptVariants(
+    [...categories.slice(0, 2), ...productTerms.slice(0, 2)],
+    "market",
+  );
+  const intentVariants = [
+    ...new Set([...conceptVariants(request.queries.buyerIntent ?? [], "problem"), ...BUILT_IN_INTENT_VARIANTS]),
+  ];
+
+  /**
+   * Problem evidence is the union of the business's use-case vocabulary rather
+   * than only the seed that produced this query. A thread about screen time is
+   * relevant to a parental-control product even when the search that surfaced
+   * it was seeded from a different pain. Precision still comes from the market
+   * requirement; seed specificity continues to influence score, not admission.
+   */
+  const problemVariants = conceptVariants(
+    [
+      ...problems.slice(0, 6),
+      ...jobs.slice(0, 4),
+      ...categories.slice(0, 2),
+    ],
+    "problem",
+  );
+
+  /**
+   * Concept gating applies only where the market has a distinguishing concept -
+   * a device, platform or domain that posts actually name ("tv", "hr", "ai").
+   * That is precisely where token counting failed, because the one qualifier
+   * separating two markets was outvoted by shared generic words.
+   *
+   * A category like "project management software" has no such qualifier: buyers
+   * describe the pain without ever naming the category, so demanding market
+   * evidence in the text would discard real demand. Those profiles keep the
+   * existing token behaviour.
+   */
+  const hasDistinguishingMarket = [...categories.slice(0, 2), ...productTerms.slice(0, 2)].some(
+    (phrase) =>
+      lexiconHits(normalizeSearchText(phrase)).some(([, entry]) => entry.kind === "market"),
+  );
+
+  const conceptsFor = (seed?: string): RedditSearchConcepts | undefined => {
+    if (!seed || !hasDistinguishingMarket || marketVariants.length === 0) return undefined;
+    const seedProblem = conceptVariants([seed], "problem");
+    const problem = [...new Set([...problemVariants, ...seedProblem])];
+    if (problem.length === 0) return undefined;
+    return { market: marketVariants, problem, intent: intentVariants };
+  };
+
+  const push = (lane: DemandLane, query: string, seed?: string) => {
+    const entry = boundedPlanEntry(lane, query, seed, conceptsFor(seed));
+    if (!entry) return;
+
+    const key = normalizeSearchText(entry.query);
+    if (!key || seenQueries.has(key)) return;
+
+    seenQueries.add(key);
+    pools[lane].push(entry);
+  };
+
+  const categorySeed =
+    categories[0] ??
+    productTerms.find(
+      (term) =>
+        normalizeSearchText(term) !== normalizeSearchText(brandTerms[0] ?? ""),
+    ) ??
+    productTerms[0] ??
+    "";
+
+  const contextSeed =
+    categories[0] ??
+    jobs[0] ??
+    problems[0] ??
+    productTerms[0] ??
+    "";
+
+  const context = contextOrExpression(contextSeed);
+  const categoryContext = categoryExpression(categorySeed) || context;
+
+  /* Direct buying intent and category recommendations stay separate so a
+   * result can be traced back to the signal we intended to retrieve. */
+  const categorySearches = categorySearchExpressions(categorySeed);
+  const category = categorySearches[0] ?? "";
+  if (category) {
+    push(
+      "direct_buying_intent",
+      `looking for ${category}`,
+      categorySeed,
+    );
+    push(
+      "category_recommendation",
+      `${category} recommendations`,
+      categorySeed,
+    );
+  }
+  for (const customerCategory of categorySearches.slice(1, 2)) {
+    push("direct_buying_intent", customerCategory, customerCategory);
+  }
+
+  for (const seed of [...problems, ...jobs].slice(0, 8)) {
+    const manifestation = manifestationExpression(seed);
+    if (!manifestation) continue;
+
+    push(
+      "direct_buying_intent",
+      `need help ${manifestation}`,
+      seed,
+    );
+  }
+
+  /*
+   * PAIN
+   *
+   * The problem manifestation itself is evidence. Do not require a second
+   * generic word such as "frustrated" or "problem".
+   */
+  for (const seed of problems.slice(0, 8)) {
+    const manifestation = manifestationExpression(seed);
+    if (manifestation) push("problem_pain", manifestation, seed);
+  }
+
+  /* Competitor switching and broader competitor-frustration discussions are
+   * distinct. Only website-verified competitors reach this request. */
+  for (const competitorName of competitors.slice(0, 4)) {
+    const competitor = cleanSearchTerm(competitorName);
+    if (!competitor) continue;
+
+    push(
+      "competitor_switching",
+      `${competitor} alternative${categoryContext ? ` ${categoryContext}` : ""}`,
+      competitorName,
+    );
+    push(
+      "brand_competitor_mentions",
+      `${competitor} problem${categoryContext ? ` ${categoryContext}` : ""}`,
+      competitorName,
+    );
+  }
+
+  /*
+   * WORKAROUNDS
+   *
+   * Workaround hypotheses are allowed to be broad, but connect them to a small
+   * OR-context rather than requiring an entire formal JTBD phrase.
+   */
+  for (const seed of workarounds.slice(0, 6)) {
+    const workaround = manifestationExpression(seed);
+    if (!workaround) continue;
+
+    push(
+      "workaround",
+      `${workaround}${context ? ` ${context}` : ""}`,
+      seed,
+    );
+  }
+
+  /*
+   * TIMING
+   *
+   * Keep only the strongest part of the trigger and connect it to broad
+   * business context. Do not search an AI-written sentence verbatim.
+   */
+  for (const seed of triggers.slice(0, 6)) {
+    const trigger = triggerExpression(seed);
+    if (!trigger) continue;
+
+    push(
+      "timing",
+      `${trigger}${context ? ` ${context}` : ""}`,
+      seed,
+    );
+  }
+
+  const quotas: Array<[DemandLane, number]> = [
+    ["direct_buying_intent", 2],
+    ["problem_pain", 2],
+    ["competitor_switching", 1],
+    ["category_recommendation", 1],
+    ["brand_competitor_mentions", 1],
+    ["workaround", 1],
+    ["timing", 1],
+  ];
+
+  const selected: RedditSearchPlanEntry[] = [];
+  const selectedKeys = new Set<string>();
+
+  const selectEntry = (entry: RedditSearchPlanEntry | undefined): boolean => {
+    if (!entry) return false;
+    const key = `${entry.lane}:${normalizeSearchText(entry.query)}`;
+    if (selectedKeys.has(key)) return false;
+    selectedKeys.add(key);
+    selected.push(entry);
+    return true;
+  };
+
+  for (const [lane, quota] of quotas) {
+    for (const entry of pools[lane].slice(0, quota)) selectEntry(entry);
+  }
+
+  const laneOrder: DemandLane[] = [
+    "direct_buying_intent",
+    "problem_pain",
+    "competitor_switching",
+    "category_recommendation",
+    "brand_competitor_mentions",
+    "workaround",
+    "timing",
+  ];
+
+  while (selected.length < 9) {
+    let added = false;
+
+    for (const lane of laneOrder) {
+      const next = pools[lane].find((entry) => {
+        const key = `${entry.lane}:${normalizeSearchText(entry.query)}`;
+        return !selectedKeys.has(key);
+      });
+
+      if (selectEntry(next)) {
+        added = true;
+        if (selected.length >= 9) break;
+      }
+    }
+
+    if (!added) break;
+  }
+
+  return selected.slice(0, 9);
 }
 
-function candidateDiscoveryScore(candidate: ApifyCandidate, request: RedditSearchRequest): number {
-  const text = `${candidate.title ?? ""}\n${candidate.body}`;
-  const normalized = normalizeSearchText(text);
-  const title = normalizeSearchText(candidate.title ?? "");
-  const brand = request.queries.productTerms[0] ?? "";
-  const problems = request.queries.customerProblems.filter(isUsefulSearchPhrase);
-  const competitors = request.queries.competitors.filter(isUsefulSearchPhrase);
-  let score = 0;
-  if (STRONG_DEMAND_SIGNAL_PATTERN.test(title)) score += 5;
-  else if (STRONG_DEMAND_SIGNAL_PATTERN.test(normalized)) score += 3;
-  if (phraseEvidence(normalized, problems)) score += 3;
-  if (phraseEvidence(normalized, competitors)) score += 2;
-  if (phraseEvidence(normalized, [brand]) && DEMAND_SIGNAL_PATTERN.test(normalized)) score += 2;
-  if (candidate.kind === "post") score += 1;
-  if (candidate.body.length >= 120) score += 1;
-  return score;
+/** Compatibility helper for tests/callers that only need query strings. */
+export function buildApifyRedditSearches(request: RedditSearchRequest): string[] {
+  return buildApifyRedditSearchPlan(request).map((entry) => entry.query);
+}
+
+export function searchPlanMatches(
+  title: string | undefined,
+  body: string,
+  plan: readonly RedditSearchPlanEntry[],
+): RedditSearchPlanEntry[] {
+  const text = normalizeSearchText(`${title ?? ""}\n${body}`);
+  const textTokens = text.split(" ").filter(Boolean);
+  const textTokenSet = new Set(textTokens);
+
+  const matchesWithinWindow = (
+    targets: readonly string[],
+    required: number,
+    windowSize = 18,
+  ): boolean => {
+    if (required <= 0) return true;
+    for (let start = 0; start < textTokens.length; start += 1) {
+      const present = new Set(textTokens.slice(start, start + windowSize));
+      if (targets.filter((token) => present.has(token)).length >= required) return true;
+    }
+    return false;
+  };
+
+  const scored = plan.flatMap((entry) => {
+    const seed = normalizeSearchText(entry.seed ?? "");
+    if (!seed) return [];
+
+    const seedTokens = problemTokens(seed).slice(0, 6);
+
+    if (seedTokens.length === 0) return [];
+
+    let seedScore = 0;
+
+    const matched = seedTokens.filter((token) => textTokenSet.has(token)).length;
+    const isCompetitorLane =
+      entry.lane === "competitor_switching" ||
+      entry.lane === "switching" ||
+      entry.lane === "brand_competitor_mentions";
+    const isBrandLane = entry.lane === "brand_competitor_mentions";
+    const isDemandLane =
+      entry.lane === "direct_buying_intent" ||
+      entry.lane === "explicit_demand" ||
+      entry.lane === "category_recommendation";
+    const required = isCompetitorLane
+      ? seedTokens.length
+      : isDemandLane
+        ? Math.min(seedTokens.length, 2)
+        : seedTokens.length <= 4
+          ? seedTokens.length
+          : Math.min(seedTokens.length, Math.max(2, Math.ceil(seedTokens.length * 0.75)));
+
+    const concepts = entry.concepts;
+    if (concepts && concepts.market.length > 0) {
+      /**
+       * Concept gate. Counting how many seed tokens appear cannot tell one
+       * market from its neighbour - "android tv parental control app" matches
+       * an Android *phone* thread on most of its tokens, and requiring "2 of N"
+       * let exactly that through. Require the two things that actually make a
+       * conversation ours: evidence of the market, and evidence of the problem.
+       * Each accepts synonyms, so "television" or "screen time" still count.
+       */
+      const marketMatched = matchesAnyVariant(text, concepts.market);
+      if (!marketMatched) return [];
+
+      // Concepts add requirements; they never relax existing ones. A competitor
+      // or brand lane still has to see the name itself, otherwise market plus
+      // generic intent would admit any on-topic chatter.
+      if ((isCompetitorLane || isBrandLane) && matched < seedTokens.length) return [];
+
+      const problemMatched =
+        concepts.problem.length === 0 || matchesAnyVariant(text, concepts.problem);
+      const intentMatched = matchesAnyVariant(text, concepts.intent ?? []);
+
+      // Naming a competitor or the brand is itself use-case evidence, so those
+      // lanes may substitute buying intent for an explicit problem statement.
+      const problemSatisfied =
+        problemMatched || ((isCompetitorLane || isBrandLane) && intentMatched);
+      if (!problemSatisfied) return [];
+
+      const exactSeed = seed.length >= 4 && text.includes(seed);
+      seedScore =
+        (exactSeed ? 4 : 0) +
+        2 + // market evidence
+        (problemMatched ? 2 : 0) +
+        (intentMatched ? 1 : 0) +
+        Math.min(matched, 3);
+    } else if (seed.length >= 4 && text.includes(seed)) {
+      seedScore = seedTokens.length + 4;
+    } else {
+      if (matched < required) return [];
+      if (!isCompetitorLane && !isDemandLane && !matchesWithinWindow(seedTokens, required)) return [];
+      seedScore = matched;
+    }
+
+    if (isCompetitorLane && seedTokens.length === 1) {
+      const signalWords = new Set([
+        "alternative", "alternatives", "expensive", "frustrated", "issue", "limitation",
+        "missing", "moving", "overkill", "problem", "replace", "switch", "switching",
+      ]);
+      const contextTokens = problemTokens(entry.query)
+        .filter((token) => !seedTokens.includes(token) && !signalWords.has(token))
+        .slice(0, 4);
+      const contextRequired = Math.min(2, contextTokens.length);
+      if (contextRequired > 0 && contextTokens.filter((token) => textTokenSet.has(token)).length < contextRequired) {
+        return [];
+      }
+    }
+
+    const explicitDemandSignal =
+      /\b(?:advice|any suggestions|anyone using|hoping someone|looking for|need help|recommend|recommendation|suggestions?|alternative|which tool|what do you use)\b/.test(text);
+    const categoryRecommendationSignal =
+      /\b(?:advice|any suggestions|anyone using|hoping someone|recommend|recommendation|suggestions?|which tool|what do you use|best tool)\b/.test(text);
+    const competitorSwitchingSignal =
+      /\b(?:alternative|switch|switching|replace|moving away|frustrated|expensive|overkill)\b/.test(text);
+    const competitorProblemSignal =
+      /\b(?:problem|issue|frustrat|hate|missing|limitation|expensive|overkill)\w*\b/.test(text);
+
+    const requiresSignal =
+      entry.lane === "direct_buying_intent" ||
+      entry.lane === "explicit_demand" ||
+      entry.lane === "category_recommendation" ||
+      entry.lane === "competitor_switching" ||
+      entry.lane === "switching" ||
+      entry.lane === "brand_competitor_mentions";
+    const signalMatched =
+      entry.lane === "direct_buying_intent" || entry.lane === "explicit_demand"
+        ? explicitDemandSignal
+        : entry.lane === "category_recommendation"
+          ? categoryRecommendationSignal
+          : entry.lane === "competitor_switching" || entry.lane === "switching"
+            ? competitorSwitchingSignal
+            : entry.lane === "brand_competitor_mentions"
+              ? competitorProblemSignal
+              : true;
+
+    if (requiresSignal && !signalMatched) return [];
+
+    const signalBoost =
+      explicitDemandSignal &&
+      (entry.lane === "direct_buying_intent" || entry.lane === "explicit_demand")
+        ? 2
+        : categoryRecommendationSignal && entry.lane === "category_recommendation"
+          ? 2
+          : competitorSwitchingSignal &&
+            (entry.lane === "competitor_switching" || entry.lane === "switching")
+          ? 2
+          : (entry.lane === "problem_pain" || entry.lane === "pain") &&
+              /\b(?:missed|buried|scattered|struggl|frustrat|messy|manual|difficult|overwhelm|nightmare)\w*\b/.test(text)
+            ? 1
+            : competitorProblemSignal && entry.lane === "brand_competitor_mentions"
+              ? 1
+            : entry.lane === "workaround" &&
+                /\b(?:spreadsheet|email|manual|workaround|copy paste)\w*\b/.test(text)
+              ? 1
+              : entry.lane === "timing" &&
+                  /\b(?:grow|grew|growth|outgrown|outgrowing|scal|more clients|new clients)\w*\b/.test(text)
+                ? 1
+                : 0;
+
+    return [{ entry, score: seedScore + signalBoost }];
+  });
+
+  if (scored.length === 0) return [];
+
+  const best = Math.max(...scored.map((row) => row.score));
+  return scored
+    .filter((row) => row.score >= Math.max(1, best - 2))
+    .map((row) => row.entry);
 }
 
 function subredditFromItem(item: ApifyRedditItem, permalink: string | undefined): string {
@@ -383,119 +998,86 @@ function subredditFromItem(item: ApifyRedditItem, permalink: string | undefined)
   return /^[A-Za-z0-9_]{1,32}$/.test(candidate) ? candidate : "";
 }
 
-function matchedSearchQuery(
-  title: string | undefined,
-  body: string,
-  searches: readonly string[],
-): string | undefined {
-  const text = normalizeSearchText(`${title ?? ""}\n${body}`);
-  return searches.find((query) => {
-    const quoted = [...query.matchAll(/"([^"]+)"/g)]
-      .map((match) => normalizeSearchText(match[1] ?? ""))
-      .filter(Boolean);
-    if (quoted.some((phrase) => text.includes(phrase))) return true;
-    const terms = normalizeSearchText(query.replace(/\b(?:AND|OR|NOT)\b/g, " "))
-      .split(" ")
-      .filter((term) => term.length >= 4 && !PROBLEM_TOKEN_STOP_WORDS.has(term));
-    return terms.filter((term) => text.includes(term)).length >= Math.min(2, terms.length);
-  });
-}
-
-function apifyCandidate(
+function candidateFromApify(
   value: unknown,
-  searches: readonly string[] = [],
-): ApifyCandidate | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  plan: readonly RedditSearchPlanEntry[] = [],
+): CandidateParseResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { reason: "invalid_record" };
+  }
   const item = value as ApifyRedditItem;
   const dataType = stringValue(item.dataType, 20).toLowerCase();
-  if (dataType !== "post" && dataType !== "comment") return null;
-  if (item.isAd === true || item.over18 === true) return null;
+  if (dataType !== "post" && dataType !== "comment") return { reason: "invalid_record" };
+  if (item.isAd === true) return { reason: "invalid_record" };
+  if (item.over18 === true) return { reason: "nsfw" };
 
   const title = cleanRedditText(item.title, 500) || undefined;
   const body = cleanRedditText(item.body) || title || "";
   const permalink = safeRedditPermalink(item.url);
+  if (!permalink) return { reason: "invalid_url" };
   const subreddit = subredditFromItem(item, permalink);
-  if (!body || !permalink || !subreddit) return null;
+  if (!body || !subreddit) return { reason: "invalid_record" };
 
   const author = cleanRedditText(item.username, 100) || undefined;
-  if (author && automatedAuthor(author)) return null;
-  if (/^\[(?:deleted|removed)\]$/i.test(body)) return null;
+  if (author && automatedAuthor(author)) return { reason: "bot_author" };
+  if (/^\[(?:deleted|removed)\]$/i.test(body)) return { reason: "deleted" };
+
+  const rawCreatedAt = stringValue(item.createdAt, 80);
+  const parsedCreatedAt = Date.parse(rawCreatedAt);
+  if (!Number.isFinite(parsedCreatedAt)) return { reason: "missing_timestamp" };
+
   const externalId =
     stringValue(item.parsedId, 200) ||
     stringValue(item.id, 200).replace(/^t[13]_/i, "") ||
     `derived_${contentFingerprint(`${permalink}\n${body}`)}`;
-  const rawCreatedAt = stringValue(item.createdAt, 80);
-  const parsedCreatedAt = Date.parse(rawCreatedAt);
-  return {
-    item,
-    externalId,
-    kind: dataType,
-    permalink,
-    subreddit,
-    title,
-    body,
-    author,
-    createdAt: Number.isFinite(parsedCreatedAt)
-      ? new Date(parsedCreatedAt).toISOString()
-      : undefined,
-    matchedQuery: matchedSearchQuery(title, body, searches),
-  };
-}
-
-/** Normalize one documented Trudax Reddit Scraper dataset item. */
-export function normalizeApifyRedditItem(
-  value: unknown,
-  actorId: string,
-  searches: readonly string[] = [],
-  options: { fallback?: ApifyCandidate; threadContext?: string } = {},
-): RedditConversation | null {
-  const candidate = apifyCandidate(value, searches) ?? options.fallback;
-  if (!candidate) return null;
-  const item = candidate.item;
-  const createdAt = candidate.createdAt ?? options.fallback?.createdAt;
-  if (!createdAt) return null;
-  const parentExternalId =
-    stringValue(item.parentId, 200) || stringValue(item.postId, 200) || undefined;
+  const matches = searchPlanMatches(title, body, plan);
+  /* The Actor already returned this structurally valid, recent Reddit record
+   * from one of our searches. Local matching is attribution metadata only; it
+   * must not become a semantic rejection gate that can hide real demand before
+   * AI triage. */
+  const matchedQueries = [...new Set(matches.map((entry) => entry.query))];
+  const discoveryLanes = [...new Set(matches.map((entry) => entry.lane))];
+  const provider = "apify-test";
   const observedAt = new Date().toISOString();
-  const provider = `apify:${actorId}`;
+
   return {
-    provider,
-    sourceMode: "apify-test",
-    externalId: candidate.externalId,
-    kind: candidate.kind,
-    parentExternalId,
-    subreddit: candidate.subreddit,
-    title: candidate.title,
-    body: candidate.body,
-    threadContext: options.threadContext?.trim().slice(0, 6_000) || undefined,
-    author: candidate.author,
-    permalink: candidate.permalink,
-    createdAt,
-    metrics: {
-      score: nonNegativeInteger(item.upVotes),
-      comments:
-        candidate.kind === "comment"
+    candidate: {
+      item,
+      provider,
+      sourceMode: "apify-test",
+      externalId,
+      kind: dataType,
+      parentExternalId: stringValue(item.parentId, 200) || stringValue(item.postId, 200) || undefined,
+      subreddit,
+      title,
+      body,
+      author,
+      permalink,
+      createdAt: new Date(parsedCreatedAt).toISOString(),
+      metrics: {
+        score: nonNegativeInteger(item.upVotes),
+        comments: dataType === "comment"
           ? nonNegativeInteger(item.numberOfReplies)
           : nonNegativeInteger(item.numberOfComments),
-    },
-    matchedQuery: candidate.matchedQuery ?? options.fallback?.matchedQuery,
-    provenance: {
-      id: `reddit_apify_${contentFingerprint(candidate.externalId)}`,
-      kind: "reddit",
-      provider,
-      providerExternalId: candidate.externalId,
-      url: candidate.permalink,
-      title: candidate.title,
-      excerpt: candidate.body.slice(0, 280),
-      contentHash: contentFingerprint(
-        `${candidate.title ?? ""}\n${candidate.body}\n${options.threadContext ?? ""}`,
-      ),
-      observedAt,
-      isMock: false,
-      metadata: {
-        actorId,
-        testOnly: true,
-        acquisitionMethod: "web-scraping",
+      },
+      matchedQuery: matchedQueries[0],
+      matchedQueries,
+      discoveryLanes,
+      provenance: {
+        id: `reddit_apify_${contentFingerprint(externalId)}`,
+        kind: "reddit",
+        provider,
+        providerExternalId: externalId,
+        url: permalink,
+        title,
+        excerpt: body.slice(0, 280),
+        contentHash: contentFingerprint(`${title ?? ""}\n${body}`),
+        observedAt,
+        isMock: false,
+        metadata: {
+          testOnly: true,
+          acquisitionMethod: "web-scraping",
+        },
       },
     },
   };
@@ -513,36 +1095,292 @@ function redditPostIdFromPermalink(value: string): string | undefined {
   }
 }
 
-function threadContextForCandidate(candidate: ApifyCandidate, payload: readonly unknown[]): string {
-  const postId = redditPostIdFromPermalink(candidate.permalink);
-  if (!postId) return "";
-  const comments = payload.flatMap((value) => {
-    const item = apifyCandidate(value);
-    if (
-      !item ||
-      item.kind !== "comment" ||
-      item.externalId === candidate.externalId ||
-      redditPostIdFromPermalink(item.permalink) !== postId
-    ) return [];
-    return [`${item.author ? `${item.author}: ` : ""}${item.body}`];
+function redditThreadPermalink(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (host === "redd.it") {
+      url.hash = "";
+      url.search = "";
+      return url.toString();
+    }
+    if (host !== "reddit.com" && !host.endsWith(".reddit.com")) return undefined;
+    const segments = url.pathname.split("/").filter(Boolean);
+    const commentsIndex = segments.findIndex((segment) => segment.toLowerCase() === "comments");
+    if (commentsIndex < 0 || !segments[commentsIndex + 1]) return undefined;
+    const titleIndex = commentsIndex + 2;
+    const end = segments[titleIndex] ? titleIndex + 1 : commentsIndex + 2;
+    url.pathname = `/${segments.slice(0, end).join("/")}/`;
+    url.hash = "";
+    url.search = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function rawExternalId(item: ApifyRedditItem): string {
+  return stringValue(item.parsedId, 200) || stringValue(item.id, 200).replace(/^t[13]_/i, "");
+}
+
+function contextMessage(value: unknown): RedditContextMessage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as ApifyRedditItem;
+  const dataType = stringValue(item.dataType, 20).toLowerCase();
+  if (dataType !== "post" && dataType !== "comment") return null;
+  if (item.isAd === true || item.over18 === true) return null;
+  const body = cleanRedditText(item.body) || cleanRedditText(item.title, 500);
+  const externalId = rawExternalId(item);
+  if (!body || !externalId || /^\[(?:deleted|removed)\]$/i.test(body)) return null;
+  const createdAtRaw = stringValue(item.createdAt, 80);
+  const createdAtMs = Date.parse(createdAtRaw);
+  return {
+    externalId,
+    kind: dataType,
+    author: cleanRedditText(item.username, 100) || undefined,
+    body,
+    parentExternalId: stringValue(item.parentId, 200) || stringValue(item.postId, 200) || undefined,
+    createdAt: Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : undefined,
+  };
+}
+
+function postIdForItem(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as ApifyRedditItem;
+  const direct = stringValue(item.postId, 200).replace(/^t3_/i, "");
+  if (direct) return direct.toLowerCase();
+  const permalink = safeRedditPermalink(item.url);
+  return permalink ? redditPostIdFromPermalink(permalink) : undefined;
+}
+
+function structuredContextForCandidate(
+  candidate: RedditDiscoveryCandidate,
+  payload: readonly unknown[],
+): RedditStructuredContext {
+  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;
+  const messages = payload.flatMap((value) => {
+    const message = contextMessage(value);
+    if (!message || (postId && postIdForItem(value) !== postId)) return [];
+    return [{ value, message }];
   });
-  return [...new Set(comments)].slice(0, 8).join("\n\n").slice(0, 6_000);
+  const byId = new Map(messages.map((row) => [row.message.externalId.replace(/^t[13]_/i, ""), row.message]));
+  const matched = byId.get(candidate.externalId.replace(/^t[13]_/i, "")) ?? {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  const originalPost = messages.find((row) => row.message.kind === "post")?.message ??
+    (candidate.kind === "post" ? matched : undefined);
+
+  const parentChain: RedditContextMessage[] = [];
+  let parentId = matched.parentExternalId?.replace(/^t[13]_/i, "");
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId) && parentChain.length < 6) {
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    parentChain.unshift(parent);
+    parentId = parent.parentExternalId?.replace(/^t[13]_/i, "");
+  }
+
+  const replies = messages
+    .map((row) => row.message)
+    .filter((message) =>
+      message.kind === "comment" &&
+      message.parentExternalId?.replace(/^t[13]_/i, "") === candidate.externalId.replace(/^t[13]_/i, ""),
+    )
+    .slice(0, 6);
+  const used = new Set([
+    matched.externalId,
+    ...parentChain.map((message) => message.externalId),
+    ...replies.map((message) => message.externalId),
+    ...(originalPost ? [originalPost.externalId] : []),
+  ]);
+  const surroundingComments = messages
+    .map((row) => row.message)
+    .filter((message) => message.kind === "comment" && !used.has(message.externalId))
+    .slice(0, 6);
+
+  return { originalPost, matched, parentChain, replies, surroundingComments };
+}
+
+function flattenStructuredContext(context: RedditStructuredContext): string {
+  const sections: string[] = [];
+  if (context.originalPost && context.originalPost.externalId !== context.matched.externalId) {
+    sections.push(`Original post${context.originalPost.author ? ` by ${context.originalPost.author}` : ""}: ${context.originalPost.body}`);
+  }
+  if (context.parentChain.length > 0) {
+    sections.push(`Parent chain:\n${context.parentChain.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  if (context.replies.length > 0) {
+    sections.push(`Replies:\n${context.replies.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  if (context.surroundingComments.length > 0) {
+    sections.push(`Other comments:\n${context.surroundingComments.map((row) => `${row.author ?? "Reddit user"}: ${row.body}`).join("\n")}`);
+  }
+  return sections.join("\n\n").slice(0, 8_000);
 }
 
 function enrichedItemForCandidate(
-  candidate: ApifyCandidate,
+  candidate: RedditDiscoveryCandidate,
   payload: readonly unknown[],
 ): unknown | undefined {
-  const postId = redditPostIdFromPermalink(candidate.permalink);
-  return payload.find((value) => {
-    const item = apifyCandidate(value);
-    if (!item || item.kind !== candidate.kind) return false;
-    if (item.externalId.replace(/^t[13]_/i, "") === candidate.externalId.replace(/^t[13]_/i, "")) {
-      return true;
-    }
-    return candidate.kind === "post" && postId !== undefined &&
-      redditPostIdFromPermalink(item.permalink) === postId;
+  const candidateId = candidate.externalId.replace(/^t[13]_/i, "").toLowerCase();
+  const exact = payload.find((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const item = value as ApifyRedditItem;
+    const dataType = stringValue(item.dataType, 20).toLowerCase();
+    if (dataType !== candidate.kind) return false;
+    const itemId = rawExternalId(item).replace(/^t[13]_/i, "").toLowerCase();
+    return Boolean(itemId && itemId === candidateId);
   });
+  if (exact) return exact;
+
+  // Comment deep-links are not guaranteed to be emitted as an item by the Actor
+  // even when the Actor successfully opens the parent thread. Discovery already
+  // verified the matched author's words, so any item from the same Reddit thread
+  // is a safe anchor for adding surrounding context without substituting content.
+  const postId = candidate.permalink ? redditPostIdFromPermalink(candidate.permalink) : undefined;
+  if (!postId) return undefined;
+  return payload.find((value) => postIdForItem(value) === postId);
+}
+
+function enrichedConversation(
+  candidate: RedditDiscoveryCandidate,
+  enrichedValue: unknown,
+  payload: readonly unknown[],
+  provider: string,
+): EnrichedRedditConversation | null {
+  if (!enrichedValue || typeof enrichedValue !== "object" || Array.isArray(enrichedValue)) return null;
+  const item = enrichedValue as ApifyRedditItem;
+  const anchorId = rawExternalId(item).replace(/^t[13]_/i, "").toLowerCase();
+  const candidateId = candidate.externalId.replace(/^t[13]_/i, "").toLowerCase();
+  const anchorKind = stringValue(item.dataType, 20).toLowerCase();
+  const exactItemMatch = anchorKind === candidate.kind && Boolean(anchorId && anchorId === candidateId);
+  const context = structuredContextForCandidate(candidate, payload);
+  const threadContext = flattenStructuredContext(context);
+  const contentHash = contentFingerprint(
+    `${candidate.title ?? ""}
+${candidate.body}
+${JSON.stringify(context)}`,
+  );
+  return {
+    provider,
+    sourceMode: candidate.sourceMode,
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    parentExternalId: candidate.parentExternalId,
+    subreddit: candidate.subreddit,
+    // The discovery candidate remains authoritative. A same-thread Actor item is
+    // only an anchor for surrounding context and must never overwrite the matched
+    // author's title/body/identity with another comment from the thread.
+    title: candidate.title ?? (cleanRedditText(item.title, 500) || undefined),
+    body: candidate.body,
+    threadContext: threadContext || undefined,
+    structuredContext: context,
+    author: candidate.author,
+    permalink: candidate.permalink,
+    createdAt: candidate.createdAt,
+    metrics: candidate.metrics,
+    matchedQuery: candidate.matchedQuery,
+    matchedQueries: candidate.matchedQueries,
+    discoveryLanes: candidate.discoveryLanes,
+    provenance: {
+      ...candidate.provenance,
+      provider,
+      contentHash,
+      observedAt: new Date().toISOString(),
+      metadata: {
+        ...(candidate.provenance.metadata ?? {}),
+        enriched: true,
+        enrichmentMatch: exactItemMatch ? "exact-item" : "same-thread-anchor",
+      },
+    },
+  };
+}
+
+/**
+ * Preserve a verified discovery record when the optional thread-opening call
+ * fails. This does not invent replies or surrounding context: deep
+ * qualification receives only the selected author's already verified words.
+ */
+function discoveryFallbackConversation(
+  candidate: RedditDiscoveryCandidate,
+  provider: string,
+): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    provider,
+    sourceMode: candidate.sourceMode,
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    parentExternalId: candidate.parentExternalId,
+    subreddit: candidate.subreddit,
+    title: candidate.title,
+    body: candidate.body,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+    author: candidate.author,
+    permalink: candidate.permalink,
+    createdAt: candidate.createdAt,
+    metrics: candidate.metrics,
+    matchedQuery: candidate.matchedQuery,
+    matchedQueries: candidate.matchedQueries,
+    discoveryLanes: candidate.discoveryLanes,
+    provenance: {
+      ...candidate.provenance,
+      provider,
+      observedAt: new Date().toISOString(),
+      metadata: {
+        ...(candidate.provenance.metadata ?? {}),
+        enriched: false,
+        enrichmentFallback: "verified_discovery_record",
+      },
+    },
+  };
+}
+
+/**
+ * Give the Actor a shorter runtime budget than the client request. That lets
+ * us observe a terminal Actor status instead of aborting the HTTP poll at the
+ * exact instant the remote timeout is reached.
+ */
+export function apifyActorTimeoutSeconds(clientTimeoutMs: number): number {
+  const boundedClientMs = Math.max(20_000, Math.trunc(clientTimeoutMs));
+  return Math.max(20, Math.floor((boundedClientMs - 30_000) / 1_000));
+}
+
+/**
+ * Thread opening gives verified full-context text for qualification; a
+ * discovery-only fallback record is not trusted enough to count toward the
+ * scan's required full-context review target (see requiredFullContextReviews
+ * in scan-workflow.ts). Production evidence (2026-08-17, tvcp.app scan
+ * scan_e551e8add6034308b94d27356dcbbdba) showed 6 of 7 real enrichment runs
+ * ending in Apify status TIMED-OUT with zero retained dataset items at a
+ * 120s cap, starving qualification of verified conversations even when
+ * discovery found credible candidates. 200s keeps a meaningful margin below
+ * the documented per-call actor budget (APIFY_REDDIT_TIMEOUT_MS, recommended
+ * 260s) while giving the residential-proxy thread crawl real headroom to
+ * finish instead of aborting on cold start + navigation.
+ */
+export function apifyEnrichmentTimeoutMs(configuredTimeoutMs: number): number {
+  return Math.max(20_000, Math.min(Math.trunc(configuredTimeoutMs), 200_000));
 }
 
 function positiveInteger(
@@ -565,9 +1403,37 @@ function apifyActorId(value: string): string {
   return normalized;
 }
 
+function emptyProviderRejections(): Record<ProviderRejectionReason, number> {
+  return {
+    invalid_record: 0,
+    invalid_url: 0,
+    query_mismatch: 0,
+    bot_author: 0,
+    deleted: 0,
+    nsfw: 0,
+    missing_timestamp: 0,
+    outside_window: 0,
+  };
+}
+
+function boundedSearchTime(
+  configured: ApifySearchActorInput["time"],
+  since: string | undefined,
+  now = Date.now(),
+): ApifySearchActorInput["time"] {
+  const sinceMs = since ? Date.parse(since) : Number.NaN;
+  if (!Number.isFinite(sinceMs) || sinceMs > now) return configured;
+
+  const ageDays = (now - sinceMs) / 86_400_000;
+  const requested: ApifySearchActorInput["time"] =
+    ageDays <= 1.25 ? "day" : ageDays <= 8 ? "week" : ageDays <= 32 ? "month" : configured;
+  const order: ApifySearchActorInput["time"][] = ["day", "week", "month", "year", "all"];
+  return order.indexOf(requested) < order.indexOf(configured) ? requested : configured;
+}
+
 /**
- * Real-data MVP test adapter for Trudax's Reddit Scraper family. It is opt-in,
- * source-labeled, and intentionally not a production Reddit API provider.
+ * Real-data MVP test adapter for Trudax's Reddit Scraper family. Discovery and
+ * enrichment are intentionally separate; the scan workflow owns the budget.
  */
 export class ApifyRedditTestProvider implements RedditProvider {
   readonly name = "apify-reddit-test";
@@ -580,6 +1446,10 @@ export class ApifyRedditTestProvider implements RedditProvider {
   private readonly timeoutMs: number;
   private readonly timeRange: ApifySearchActorInput["time"];
   private readonly fetchImpl: typeof fetch;
+  private readonly discoveryRetryAttempts: number;
+  private readonly runRecovery: ApifyRunRecovery;
+  private readonly signal?: AbortSignal;
+  private readonly onActorStarted?: (checkpoint: import("./contracts").RedditActorCheckpoint) => Promise<void>;
 
   constructor(input: {
     actorId: string;
@@ -589,87 +1459,59 @@ export class ApifyRedditTestProvider implements RedditProvider {
     enrichmentComments?: number;
     timeoutMs?: number;
     timeRange?: ApifySearchActorInput["time"];
+    discoveryRetryAttempts?: number;
+    runRecovery?: ApifyRunRecovery;
+    signal?: AbortSignal;
+    onActorStarted?: (checkpoint: import("./contracts").RedditActorCheckpoint) => Promise<void>;
     fetchImpl?: typeof fetch;
   }) {
     this.actorId = apifyActorId(input.actorId);
     this.token = input.token.trim();
     if (!this.token) throw new Error("APIFY_TOKEN is required for the Apify Reddit test provider.");
-    this.maximumItems = Math.max(1, Math.min(100, Math.trunc(input.maximumItems ?? 40)));
+    this.maximumItems = Math.max(1, Math.min(400, Math.trunc(input.maximumItems ?? 250)));
     this.enrichmentLimit = Math.max(1, Math.min(20, Math.trunc(input.enrichmentLimit ?? 8)));
     this.enrichmentComments = Math.max(0, Math.min(20, Math.trunc(input.enrichmentComments ?? 6)));
-    this.timeoutMs = Math.max(20_000, Math.min(290_000, Math.trunc(input.timeoutMs ?? 260_000)));
+    this.timeoutMs = Math.max(20_000, Math.min(900_000, Math.trunc(input.timeoutMs ?? 360_000)));
     this.timeRange = input.timeRange ?? "month";
+    this.discoveryRetryAttempts = Math.max(1, Math.min(5, Math.trunc(input.discoveryRetryAttempts ?? 3)));
     this.fetchImpl = input.fetchImpl ?? fetch;
+    this.runRecovery = input.runRecovery ?? new ApifyRunRecovery();
+    this.signal = input.signal;
+    this.onActorStarted = input.onActorStarted;
   }
 
-  private async runActor(actorInput: ApifyRedditActorInput): Promise<unknown[]> {
-    const endpoint = new URL(
-      `/v2/acts/${encodeURIComponent(this.actorId)}/run-sync-get-dataset-items`,
-      "https://api.apify.com",
-    );
-    endpoint.searchParams.set("clean", "true");
-    endpoint.searchParams.set("format", "json");
-    endpoint.searchParams.set("timeout", String(Math.floor(this.timeoutMs / 1_000)));
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
-    try {
-      response = await this.fetchImpl(endpoint, {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${this.token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(actorInput),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (controller.signal.aborted) {
-        throw new Error("The Apify Reddit test run timed out.");
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const declaredBytes = Number(response.headers.get("content-length") ?? 0);
-    if (Number.isFinite(declaredBytes) && declaredBytes > 5_000_000) {
-      throw new Error("The Apify Reddit test response exceeded the size limit.");
-    }
-    const raw = await response.text();
-    if (new TextEncoder().encode(raw).byteLength > 5_000_000) {
-      throw new Error("The Apify Reddit test response exceeded the size limit.");
-    }
-    if (!response.ok) {
-      throw new Error(`Apify Reddit test request failed with HTTP ${response.status}.`);
-    }
-    let payload: unknown;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      throw new Error("The Apify Reddit test provider returned invalid JSON.");
-    }
-    if (!Array.isArray(payload)) {
-      throw new Error("The Apify Reddit test provider returned an invalid dataset.");
-    }
-    return payload;
+  private async runActor(actorInput: ApifyRedditActorInput, timeoutMs = this.timeoutMs, purpose?: "mapping-recovery"): Promise<unknown[]> {
+    return this.runRecovery.run({ actorId: this.actorId, actorInput,
+      platformMaxItems: Math.min(400, actorInput.maxItems), wantedItems: Math.max(1, actorInput.maxItems),
+      maxChargeUsd: Math.min(3, Math.max(0.5, actorInput.maxItems * 0.006)), timeoutMs,
+      actorTimeoutSeconds: apifyActorTimeoutSeconds(timeoutMs), maxStarts: Math.max(3, this.discoveryRetryAttempts),
+      token: this.token, fetchImpl: this.fetchImpl, signal: this.signal, label: "Apify Reddit test",
+      maximumMetadataBytes: 1_000_000, maximumDatasetPageBytes: 5_000_000, onStarted: this.onActorStarted, purpose });
   }
 
-  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
-    const searches = buildApifyRedditSearches(request);
-    if (searches.length === 0) {
-      throw new Error("The business profile did not produce any usable Reddit search terms.");
+  async discover(
+    request: RedditSearchRequest,
+    options?: RedditDiscoverOptions,
+  ): Promise<RedditDiscoveryResponse> {
+    const searchPlan = buildApifyRedditSearchPlan(request);
+    if (searchPlan.length === 0) {
+      throw new Error("The company context did not produce any usable Reddit search lanes.");
     }
-    const maxItems = Math.min(
-      this.maximumItems,
-      Math.max(8, Math.min(100, request.limit * 2)),
-    );
-    const subreddit =
-      request.subreddits?.length === 1
-        ? request.subreddits[0]?.replace(/^r\//i, "").trim()
-        : undefined;
-    const postsPerSearch = Math.max(2, Math.ceil(maxItems / searches.length));
+    const searches = searchPlan.map((entry) => entry.query);
+    // Acquisition volume must track the requested limit. This was clamped to 36,
+    // then to 50, regardless of what the pipeline asked for, which starved every
+    // downstream stage; the provider-level `maximumItems` remains the real bound.
+    // The floor of 40 keeps small requests above the actor's useful minimum.
+    const maxItems = Math.min(this.maximumItems, Math.max(40, request.limit));
+    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))
+      ? Date.parse(request.since)
+      : null;
+    const dateLimit = sinceMs === null
+      ? undefined
+      : new Date(sinceMs).toISOString().slice(0, 10);
+    const subreddit = request.subreddits?.length === 1
+      ? request.subreddits[0]?.replace(/^r\//i, "").trim()
+      : undefined;
     const discoveryInput: ApifySearchActorInput = {
       searches,
       ignoreStartUrls: true,
@@ -682,12 +1524,18 @@ export class ApifyRedditTestProvider implements RedditProvider {
       searchCommunities: false,
       searchUsers: false,
       searchMedia: false,
+      // Rank by semantic relevance, but bound both posts and comments by the
+      // explicit recent cutoff. skipComments only prevents traversing every
+      // matched post; direct comment search remains enabled.
       sort: "relevance",
-      time: this.timeRange,
+      time: boundedSearchTime(this.timeRange, request.since),
+      ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),
       includeNSFW: false,
       maxItems,
-      maxPostCount: postsPerSearch,
-      maxComments: 0,
+      maxPostCount: maxItems,
+      // This bounds direct comment result pages while skipComments prevents
+      // unrelated thread traversal from consuming the global discovery budget.
+      maxComments: 10,
       maxCommunitiesCount: 0,
       maxUserCount: 0,
       scrollTimeout: 20,
@@ -700,42 +1548,97 @@ export class ApifyRedditTestProvider implements RedditProvider {
       ...(subreddit && /^[A-Za-z0-9_]{1,32}$/.test(subreddit)
         ? { searchCommunityName: subreddit }
         : {}),
-      ...(request.since && Number.isFinite(Date.parse(request.since))
-        ? {
-            postDateLimit: request.since,
-            commentDateLimit: request.since,
-          }
-        : {}),
     };
-    const discoveryPayload = await this.runActor(discoveryInput);
-    const discovered = discoveryPayload.flatMap((item) => {
-      const candidate = apifyCandidate(item, searches);
-      return candidate ? [candidate] : [];
+
+    // Nine bounded searches with a residential proxy can legitimately run
+    // longer than the old eight-minute client budget. Items and per-run charge
+    // remain capped; the remote Actor receives a 570-second budget and the
+    // client gets 30 seconds to observe its terminal status and dataset.
+    const discoveryTimeoutMs = Math.min(600_000, Math.max(this.timeoutMs, 600_000));
+    const payload = await withRetry(() => this.runActor(discoveryInput, discoveryTimeoutMs), {
+      signal: this.signal,
+      attempts: this.discoveryRetryAttempts,
+      initialDelayMs: 1_500,
+      maximumDelayMs: 8_000,
+      shouldRetry: (error) => error instanceof ApifyTransientError,
+      onRetry: async (error, attempt, delayMs) => {
+        await options?.onRetry?.({
+          reason: error instanceof Error ? error.message : "Reddit search hit a transient error.",
+          attempt,
+          maxAttempts: this.discoveryRetryAttempts,
+          delayMs,
+        });
+      },
     });
-    const relevant = discovered
-      .filter((candidate) => isApifyCandidateRelevant(candidate, request))
-      .sort(
-        (left, right) =>
-          candidateDiscoveryScore(right, request) - candidateDiscoveryScore(left, request),
-      );
-    const uniqueCandidates: ApifyCandidate[] = [];
-    const seenCandidateKeys = new Set<string>();
-    for (const candidate of relevant) {
-      const key = `${candidate.kind}:${candidate.externalId}:${candidate.permalink}`;
-      if (seenCandidateKeys.has(key)) continue;
-      seenCandidateKeys.add(key);
-      uniqueCandidates.push(candidate);
+    const rejectedByReason = emptyProviderRejections();
+    const parsed: ApifyCandidate[] = [];
+    for (const value of payload) {
+      const result = candidateFromApify(value, searchPlan);
+      if (!result.candidate) {
+        rejectedByReason[result.reason] += 1;
+        continue;
+      }
+      if (sinceMs !== null && Date.parse(result.candidate.createdAt) < sinceMs) {
+        rejectedByReason.outside_window += 1;
+        continue;
+      }
+      parsed.push(result.candidate);
     }
 
-    const selectedCandidates = uniqueCandidates.slice(
+    const byKey = new Map<string, ApifyCandidate>();
+    for (const candidate of parsed) {
+      const key = `${candidate.kind}:${candidate.externalId}`;
+      const current = byKey.get(key);
+      if (!current) {
+        byKey.set(key, candidate);
+        continue;
+      }
+      byKey.set(key, {
+        ...current,
+        matchedQuery: current.matchedQuery ?? candidate.matchedQuery,
+        matchedQueries: [...new Set([...current.matchedQueries, ...candidate.matchedQueries])],
+        discoveryLanes: [...new Set([...current.discoveryLanes, ...candidate.discoveryLanes])],
+      });
+    }
+
+    const candidates = [...byKey.values()].slice(0, maxItems).map((candidate) => {
+      const normalized = { ...candidate };
+      Reflect.deleteProperty(normalized, "item");
+      return normalized;
+    });
+    const laneQueryCounts: Partial<Record<RedditSearchLane, number>> = {};
+    for (const entry of searchPlan) laneQueryCounts[entry.lane] = (laneQueryCounts[entry.lane] ?? 0) + 1;
+    const diagnostics: RedditDiscoveryDiagnostics = {
+      queryCount: searchPlan.length,
+      fetchedCandidates: payload.length,
+      normalizedCandidates: parsed.length,
+      verifiedRecentCandidates: candidates.length,
+      rejectedByReason,
+      laneQueryCounts,
+    };
+    return { candidates, searchPlan, sourceMode: this.sourceMode, diagnostics };
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const candidates = request.candidates.slice(0, this.enrichmentLimit);
+    if (candidates.length === 0) {
+      return {
+        conversations: [],
+        sourceMode: this.sourceMode,
+        diagnostics: { requested: 0, enriched: 0, failed: 0, fallbackUsed: 0 },
+      };
+    }
+    const maxComments = Math.max(
       0,
-      Math.min(this.enrichmentLimit, request.limit),
+      Math.min(request.maxComments ?? this.enrichmentComments, 20),
     );
-    let enrichmentPayload: unknown[] = [];
-    let enrichmentFailed = false;
-    if (selectedCandidates.length > 0) {
-      const enrichmentInput: ApifyEnrichmentActorInput = {
-        startUrls: selectedCandidates.map((candidate) => ({ url: candidate.permalink })),
+    const buildInput = (batch: readonly RedditDiscoveryCandidate[]): ApifyEnrichmentActorInput => {
+      const threadUrls = [...new Set(batch.flatMap((candidate) => {
+        const url = redditThreadPermalink(candidate.permalink);
+        return url ? [url] : [];
+      }))];
+      return {
+        startUrls: threadUrls.map((url) => ({ url })),
         skipComments: false,
         skipUserPosts: true,
         skipCommunity: true,
@@ -743,10 +1646,13 @@ export class ApifyRedditTestProvider implements RedditProvider {
         includeNSFW: false,
         maxItems: Math.min(
           100,
-          selectedCandidates.length * (this.enrichmentComments + 1),
+          Math.max(
+            APIFY_REDDIT_ENRICHMENT_MIN_ITEMS,
+            Math.max(1, threadUrls.length) * (maxComments + 1),
+          ),
         ),
-        maxPostCount: selectedCandidates.length,
-        maxComments: this.enrichmentComments,
+        maxPostCount: Math.max(1, threadUrls.length),
+        maxComments,
         maxCommunitiesCount: 0,
         maxUserCount: 0,
         scrollTimeout: 20,
@@ -757,61 +1663,141 @@ export class ApifyRedditTestProvider implements RedditProvider {
           apifyProxyGroups: ["RESIDENTIAL"],
         },
       };
-      try {
-        enrichmentPayload = await this.runActor(enrichmentInput);
-      } catch (error) {
-        enrichmentFailed = true;
-        console.error("Apify Reddit thread enrichment failed; using complete discovery records", error);
+    };
+
+    const primaryInput = buildInput(candidates);
+    if (primaryInput.startUrls.length === 0) {
+      return {
+        conversations: candidates.map((candidate) =>
+          discoveryFallbackConversation(candidate, `apify:${this.actorId}`),
+        ),
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: "missing_reddit_thread_urls",
+        },
+      };
+    }
+
+    let payload: unknown[];
+    try {
+      payload = await this.runActor(primaryInput, apifyEnrichmentTimeoutMs(this.timeoutMs));
+    } catch (error) {
+      console.error("Apify Reddit thread enrichment failed", error);
+      this.signal?.throwIfAborted();
+      if (error instanceof ApifyRecoveryError) throw error;
+      const message = error instanceof Error ? error.message : "Unknown Apify enrichment failure.";
+      return {
+        conversations: candidates.map((candidate) =>
+          discoveryFallbackConversation(candidate, `apify:${this.actorId}`),
+        ),
+        sourceMode: this.sourceMode,
+        diagnostics: {
+          requested: candidates.length,
+          enriched: 0,
+          failed: candidates.length,
+          fallbackUsed: candidates.length,
+          failureReason: `actor_error:${message.slice(0, 500)}`,
+        },
+      };
+    }
+
+    const mapped = new Map<string, EnrichedRedditConversation>();
+    const mapFromPayload = (batch: readonly RedditDiscoveryCandidate[], sourcePayload: readonly unknown[]) => {
+      for (const candidate of batch) {
+        if (mapped.has(candidate.externalId)) continue;
+        const anchor = enrichedItemForCandidate(candidate, sourcePayload);
+        if (!anchor) continue;
+        const conversation = enrichedConversation(
+          candidate,
+          anchor,
+          sourcePayload,
+          `apify:${this.actorId}`,
+        );
+        if (conversation) mapped.set(candidate.externalId, conversation);
+      }
+    };
+
+    mapFromPayload(candidates, payload);
+    const initiallyUnmatched = candidates.filter((candidate) => !mapped.has(candidate.externalId));
+    let recoveryAttempted = false;
+    let recovered = 0;
+    let recoveryPayloadItems = 0;
+    let recoveryError = false;
+
+    // A single bounded recovery run protects future scans from partial multi-URL
+    // Actor datasets. It runs only after a successful paid run whose dataset did
+    // not map completely, so normal scans keep the one-run cost profile.
+    if (initiallyUnmatched.length > 0) {
+      const recoveryInput = buildInput(initiallyUnmatched);
+      if (recoveryInput.startUrls.length > 0) {
+        recoveryAttempted = true;
+        try {
+          const recoveryPayload = await this.runActor(
+            recoveryInput,
+            apifyEnrichmentTimeoutMs(this.timeoutMs),
+            "mapping-recovery",
+          );
+          recoveryPayloadItems = recoveryPayload.length;
+          const before = mapped.size;
+          mapFromPayload(initiallyUnmatched, recoveryPayload);
+          recovered = mapped.size - before;
+        } catch (error) {
+          this.signal?.throwIfAborted();
+          if (error instanceof ApifyRecoveryError) throw error;
+          recoveryError = true;
+          console.error("Apify Reddit thread enrichment recovery failed", error);
+        }
       }
     }
 
-    const validSince = request.since && Number.isFinite(Date.parse(request.since))
-      ? Date.parse(request.since)
-      : undefined;
-    let enrichmentFallbacks = 0;
-    let enrichedConversations = 0;
-    let missingVerifiedTimestamps = 0;
-    const seen = new Set<string>();
-    const conversations = selectedCandidates.flatMap((candidate) => {
-      const enriched = enrichmentFailed
-        ? undefined
-        : enrichedItemForCandidate(candidate, enrichmentPayload);
-      if (!enriched) enrichmentFallbacks += 1;
-      const normalized = normalizeApifyRedditItem(
-        enriched ?? candidate.item,
-        this.actorId,
-        searches,
-        {
-          fallback: candidate,
-          threadContext: enrichmentFailed
-            ? ""
-            : threadContextForCandidate(candidate, enrichmentPayload),
-        },
-      );
-      if (enriched && normalized) enrichedConversations += 1;
-      if (!normalized && !candidate.createdAt) missingVerifiedTimestamps += 1;
-      if (
-        !normalized ||
-        (validSince !== undefined && Date.parse(normalized.createdAt) < validSince) ||
-        seen.has(normalized.externalId)
-      ) return [];
-      seen.add(normalized.externalId);
-      return [normalized];
-    });
+    const conversations = candidates.map((candidate) =>
+      mapped.get(candidate.externalId) ??
+        discoveryFallbackConversation(candidate, `apify:${this.actorId}`),
+    );
+    const failed = candidates.length - mapped.size;
     return {
       conversations,
-      sourceMode: "apify-test",
+      sourceMode: this.sourceMode,
       diagnostics: {
-        queryCount: searches.length,
-        fetchedCandidates: discoveryPayload.length,
-        normalizedCandidates: discovered.length,
-        locallyMatchedCandidates: uniqueCandidates.length,
-        enrichmentAttempts: selectedCandidates.length,
-        enrichedConversations,
-        verifiedRecentConversations: conversations.length,
-        missingVerifiedTimestamps,
-        rejectedCandidates: Math.max(0, discoveryPayload.length - uniqueCandidates.length),
-        enrichmentFallbacks,
+        requested: candidates.length,
+        enriched: mapped.size,
+        failed,
+        fallbackUsed: failed,
+        ...(failed > 0
+          ? {
+              failureReason:
+                `actor_succeeded_mapping_failure:unmatched=${failed};payload_items=${payload.length};` +
+                `recovery_attempted=${recoveryAttempted ? 1 : 0};recovered=${recovered};` +
+                `recovery_payload_items=${recoveryPayloadItems};recovery_error=${recoveryError ? 1 : 0}`,
+            }
+          : {}),
+      },
+    };
+  }
+
+  /** Deprecated compatibility path. The active scan uses discover -> AI -> enrich. */
+  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+    const discovery = await this.discover(request);
+    const selected = discovery.candidates.slice(0, Math.min(this.enrichmentLimit, request.limit));
+    const enrichment = await this.enrich({ candidates: selected });
+    return {
+      conversations: enrichment.conversations,
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        queryCount: discovery.diagnostics.queryCount,
+        fetchedCandidates: discovery.diagnostics.fetchedCandidates,
+        normalizedCandidates: discovery.diagnostics.normalizedCandidates,
+        locallyMatchedCandidates: discovery.candidates.length,
+        enrichmentAttempts: enrichment.diagnostics.requested,
+        enrichedConversations: enrichment.diagnostics.enriched,
+        verifiedRecentConversations: enrichment.conversations.length,
+        missingVerifiedTimestamps: discovery.diagnostics.rejectedByReason.missing_timestamp,
+        rejectedCandidates: Object.values(discovery.diagnostics.rejectedByReason).reduce((sum, count) => sum + count, 0),
+        enrichmentFallbacks: enrichment.diagnostics.fallbackUsed,
       },
     };
   }
@@ -851,6 +1837,8 @@ function normalizedConversation(
       score: Number.isFinite(score) ? Math.max(0, Math.trunc(score)) : 0,
       comments: Number.isFinite(comments) ? Math.max(0, Math.trunc(comments)) : 0,
     },
+    matchedQueries: [],
+    discoveryLanes: [],
     provenance: {
       id: `reddit_${providerName}_${contentFingerprint(externalId)}`,
       kind: "reddit",
@@ -866,10 +1854,53 @@ function normalizedConversation(
   };
 }
 
+function discoveryCandidateFromConversation(conversation: RedditConversation): RedditDiscoveryCandidate {
+  return {
+    provider: conversation.provider,
+    sourceMode: conversation.sourceMode,
+    externalId: conversation.externalId,
+    kind: conversation.kind,
+    parentExternalId: conversation.parentExternalId,
+    subreddit: conversation.subreddit,
+    title: conversation.title,
+    body: conversation.body,
+    author: conversation.author,
+    permalink: conversation.permalink,
+    createdAt: conversation.createdAt,
+    metrics: conversation.metrics,
+    matchedQuery: conversation.matchedQuery,
+    matchedQueries: conversation.matchedQueries ?? (conversation.matchedQuery ? [conversation.matchedQuery] : []),
+    discoveryLanes: conversation.discoveryLanes ?? [],
+    provenance: conversation.provenance,
+  };
+}
+
+function matchedOnlyEnriched(candidate: RedditDiscoveryCandidate): EnrichedRedditConversation {
+  const matched: RedditContextMessage = {
+    externalId: candidate.externalId,
+    kind: candidate.kind,
+    author: candidate.author,
+    body: candidate.body,
+    parentExternalId: candidate.parentExternalId,
+    createdAt: candidate.createdAt,
+  };
+  return {
+    ...candidate,
+    structuredContext: {
+      originalPost: candidate.kind === "post" ? matched : undefined,
+      matched,
+      parentChain: [],
+      replies: [],
+      surroundingComments: [],
+    },
+  };
+}
+
 /**
- * Normalized adapter for an approved Reddit API provider. The configured
- * service must expose POST /search and return provider-authorized public Reddit
- * records; this adapter never requests or parses Reddit HTML.
+ * Normalized adapter for an approved Reddit API provider. Discovery uses its
+ * existing /search contract. Until an approved provider exposes a thread API,
+ * enrichment preserves the matched record as structured context without
+ * inventing surrounding comments.
  */
 export class ApprovedHttpRedditProvider implements RedditProvider {
   readonly name: string;
@@ -894,7 +1925,7 @@ export class ApprovedHttpRedditProvider implements RedditProvider {
     this.fetchImpl = input.fetchImpl ?? fetch;
   }
 
-  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+  private async rawSearch(request: RedditSearchRequest): Promise<{ conversations: RedditConversation[]; nextCursor?: string }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     let response: Response;
@@ -917,42 +1948,77 @@ export class ApprovedHttpRedditProvider implements RedditProvider {
       throw new Error("The approved Reddit provider response exceeded the size limit.");
     }
     const raw = await response.text();
-    if (raw.length > 2_000_000) {
-      throw new Error("The approved Reddit provider response exceeded the size limit.");
-    }
-    if (!response.ok) {
-      throw new Error(`Approved Reddit provider request failed with HTTP ${response.status}.`);
-    }
+    if (raw.length > 2_000_000) throw new Error("The approved Reddit provider response exceeded the size limit.");
+    if (!response.ok) throw new Error(`Approved Reddit provider request failed with HTTP ${response.status}.`);
     const payload = JSON.parse(raw) as ApprovedProviderResponse;
     if (!Array.isArray(payload.conversations)) {
       throw new Error("The approved Reddit provider returned an invalid response.");
     }
-    const conversations = payload.conversations.map((value) =>
-      normalizedConversation(value as ApprovedProviderConversation, this.name),
-    );
+    return {
+      conversations: payload.conversations.map((value) =>
+        normalizedConversation(value as ApprovedProviderConversation, this.name),
+      ),
+      nextCursor: typeof payload.nextCursor === "string" ? payload.nextCursor : undefined,
+    };
+  }
+
+  async discover(request: RedditSearchRequest): Promise<RedditDiscoveryResponse> {
+    const raw = await this.rawSearch(request);
+    const candidates = raw.conversations.map(discoveryCandidateFromConversation);
+    return {
+      candidates,
+      nextCursor: raw.nextCursor,
+      searchPlan: [],
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        queryCount: 0,
+        fetchedCandidates: candidates.length,
+        normalizedCandidates: candidates.length,
+        verifiedRecentCandidates: candidates.length,
+        rejectedByReason: emptyProviderRejections(),
+        laneQueryCounts: {},
+      },
+    };
+  }
+
+  async enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse> {
+    const conversations = request.candidates.map(matchedOnlyEnriched);
     return {
       conversations,
-      nextCursor: typeof payload.nextCursor === "string" ? payload.nextCursor : undefined,
-      sourceMode: "live",
+      sourceMode: this.sourceMode,
+      diagnostics: {
+        requested: request.candidates.length,
+        enriched: conversations.length,
+        failed: 0,
+        fallbackUsed: conversations.length,
+      },
+    };
+  }
+
+  async search(request: RedditSearchRequest): Promise<RedditSearchResponse> {
+    const discovery = await this.discover(request);
+    return {
+      conversations: discovery.candidates.map(matchedOnlyEnriched),
+      nextCursor: discovery.nextCursor,
+      sourceMode: this.sourceMode,
     };
   }
 }
 
-/**
- * Provider selection is deliberately explicit. Missing production credentials
- * never masquerade as live Reddit data: development must opt into `mock` and
- * production adapters must be registered by name.
- */
+/** Provider selection is deliberately explicit; missing credentials never masquerade as live data. */
 export function createRedditProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   liveProviders: Readonly<Record<string, RedditProvider>> = {},
+  observation: { onActorRun?: (event: import("./contracts").RedditActorEvent) => void | Promise<void>;
+    onActorStarted?: (event: import("./contracts").RedditActorCheckpoint) => Promise<void>; fetchImpl?: typeof fetch;
+    runRecovery?: ApifyRunRecovery; signal?: AbortSignal } = {},
 ): RedditProvider {
   const selected =
     env.REDDIT_PROVIDER?.trim().toLocaleLowerCase("en-US") ||
     (isProductionRuntime(env) ? "" : "mock");
   if (!selected) {
     throw new Error(
-      "REDDIT_PROVIDER must explicitly select `mock`, `apify-test`, or an approved live provider.",
+      "REDDIT_PROVIDER must explicitly select `mock`, `apify-test`, `harshmaur`, or an approved live provider.",
     );
   }
   if (selected === "mock") return new MockRedditProvider();
@@ -962,20 +2028,104 @@ export function createRedditProviderFromEnv(
         "The Apify Reddit scraper is test-only. Set APIFY_REDDIT_TEST_MODE=true to opt in explicitly.",
       );
     }
-    const allowedTimeRanges = new Set(["day", "week", "month", "year", "all"] as const);
-    const configuredTimeRange = env.APIFY_REDDIT_TIME_RANGE?.trim().toLowerCase() || "month";
-    if (!allowedTimeRanges.has(configuredTimeRange as "day" | "week" | "month" | "year" | "all")) {
-      throw new Error("APIFY_REDDIT_TIME_RANGE must be day, week, month, year, or all.");
-    }
     return new ApifyRedditTestProvider({
+      runRecovery: observation.runRecovery, signal: observation.signal, onActorStarted: observation.onActorStarted,
+      fetchImpl: observation.fetchImpl,
       actorId: required(env.APIFY_REDDIT_ACTOR_ID, "APIFY_REDDIT_ACTOR_ID"),
       token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
-      maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 40, 1, 100),
+      maximumItems: positiveInteger(env.APIFY_REDDIT_MAX_RESULTS, 250, 1, 400),
       enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 8, 1, 20),
       enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 0, 20),
-      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 260_000, 20_000, 290_000),
-      timeRange: configuredTimeRange as "day" | "week" | "month" | "year" | "all",
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 360_000, 20_000, 900_000),
+      // Every full scan has one product promise: search the previous year.
+      // Do not let a stale VPS setting silently narrow it to a week/month.
+      timeRange: "year",
     });
+  }
+  // Harshmaur is selected explicitly, never by swapping APIFY_REDDIT_ACTOR_ID,
+  // because its input and output schemas differ from Trudax in kind.
+  //
+  // Harshmaur is the production default: it now performs real thread
+  // enrichment (post + comments + nested replies via startUrls +
+  // crawlCommentsPerPost), so no opt-in flag is required to select it in
+  // production. Trudax is wired in only as an automatic fallback for when
+  // Harshmaur *actually fails* -- it is never the primary provider a
+  // production scan is expected to use.
+  if (selected === "harshmaur" || selected === "apify-harshmaur") {
+    const primary = new HarshmaurRedditProvider({
+      runRecovery: observation.runRecovery, signal: observation.signal,
+      fetchImpl: observation.fetchImpl,
+      onActorStarted: observation.onActorStarted,
+      onActorRun: observation.onActorRun,
+      actorId: env.HARSHMAUR_REDDIT_ACTOR_ID?.trim() || "harshmaur/reddit-scraper",
+      token: required(env.APIFY_TOKEN, "APIFY_TOKEN"),
+      // Lowered from 250/12 after production testing showed the actor
+      // applying these limits with far less headroom than the "total
+      // across all inputs" schema description implied -- 250 was
+      // producing hundreds of noisy raw records per scan. 40 total
+      // (20 posts / 20 comments via harshmaurAcquisitionBudget) with
+      // Up to 9 reviewed search phrases is deliberately conservative; raise
+      // once real yield-per-term data justifies it.
+      maximumItems: positiveInteger(env.HARSHMAUR_REDDIT_MAX_RESULTS, 40, 1, 400),
+      maxTerms: positiveInteger(env.HARSHMAUR_REDDIT_MAX_TERMS, 9, 1, 25),
+      // Primary discovery path: Reddit search-page URLs via startUrls +
+      // fastMode:false, found materially more relevant than plain
+      // searchTerms in manual testing. maxTerms above still governs the
+      // "search-terms" fallback mode, kept as an operational escape hatch
+      // via HARSHMAUR_REDDIT_DISCOVERY_MODE rather than removed.
+      // fastMode:false means every post is a real Playwright page load
+      // rather than a fast internal shortcut, so it is much slower per
+      // item than the searchTerms path was. A real production run with
+      // 12 startUrls hit the actor's own 360s timeout partway through
+      // ("ACTOR: The Actor run has reached the timeout of 360 seconds,
+      // aborting it") having processed only ~25 posts. maxQueries is
+      // lowered so a run has fewer pages to navigate, and timeoutMs is
+      // raised to the existing bound's ceiling so a run that is still
+      // making progress is not cut off before it can finish.
+      maxQueries: positiveInteger(env.HARSHMAUR_REDDIT_MAX_QUERIES, 9, 1, 20),
+      discoveryMode: env.HARSHMAUR_REDDIT_DISCOVERY_MODE?.trim() === "search-terms"
+        ? "search-terms"
+        : "direct-url",
+      // One query per dedicated actor run by default: finest retry
+      // granularity (a failing query only ever loses its own results) and
+      // no within-run starvation risk. postsPerQuery is the deliberate
+      // per-query post budget -- a scan's total requested posts scales with
+      // however many queries it runs (queriesPerRun batches x postsPerQuery
+      // x queries-per-batch) rather than one shared total getting divided
+      // thinner as more queries are added.
+      queriesPerRun: positiveInteger(env.HARSHMAUR_REDDIT_QUERIES_PER_RUN, 1, 1, 20),
+      postsPerQuery: positiveInteger(env.HARSHMAUR_REDDIT_POSTS_PER_QUERY, 50, 5, 100),
+      // A production scan with 6 queries was observed spawning ~23 Apify
+      // runs, root-caused to a missing invariant in runActor: a client-side
+      // give-up (timeout, or exhausted status-check retries) started a
+      // fresh run via withRetry without first aborting the run it was
+      // giving up on, so a queued ("READY") run and its replacement both
+      // ended up live at once, compounding with every retry. That is now
+      // guarded by durable run reconciliation: a known run is inspected
+      // and only a confirmed failed terminal state permits replacement.
+      // A best-effort abort or lost start response is not confirmation.
+      // Concurrency here is a per-scan wall-clock
+      // tuning knob, not a safety mechanism, and defaults to the full
+      // query cap so a scan's queries all start together.
+      maxConcurrentDiscoveryRuns: positiveInteger(env.HARSHMAUR_REDDIT_MAX_CONCURRENT_RUNS, 9, 1, 20),
+      timeoutMs: positiveInteger(env.APIFY_REDDIT_TIMEOUT_MS, 600_000, 20_000, 900_000),
+      // 0: the thread-enrichment actor run (fetching each shortlisted
+      // candidate's real comments) is disabled by default. Deep
+      // qualification now judges every candidate on its discovery-time
+      // data alone -- title, body, score -- with no confirmed comment
+      // evidence. A deliberate trade-off, not an oversight: see the doc
+      // comment on HarshmaurRedditProvider.enrich().
+      enrichmentLimit: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_LIMIT, 0, 0, 20),
+      enrichmentComments: positiveInteger(env.APIFY_REDDIT_ENRICHMENT_COMMENTS, 6, 1, 50),
+    });
+    // Previously wrapped in an automatic Trudax fallback for when Harshmaur
+    // failed after retries. Removed by explicit request: silently switching
+    // to a second, materially different-quality Reddit provider mid-scan
+    // was masking real Harshmaur failures rather than surfacing them, so a
+    // failing scan now fails loudly (and gets checkpoint-resumed on retry,
+    // see discover()'s resumeFrom handling) instead of quietly returning
+    // Trudax's lower-quality results without anyone knowing that happened.
+    return primary;
   }
   if (selected === "approved-http") {
     return new ApprovedHttpRedditProvider({
@@ -985,9 +2135,7 @@ export function createRedditProviderFromEnv(
   }
 
   const provider = liveProviders[selected];
-  if (!provider) {
-    throw new Error(`The configured Reddit provider ${selected} is not registered.`);
-  }
+  if (!provider) throw new Error(`The configured Reddit provider ${selected} is not registered.`);
   if (provider.sourceMode !== "live") {
     throw new Error(`The configured provider ${selected} is not a live Reddit API provider.`);
   }

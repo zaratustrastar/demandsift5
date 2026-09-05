@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "provenance": "Original synthetic regression fixtures authored for this repository. No production users, scraped records, credentials, or real model responses. Labels are test inputs, not measured model judgments.",
+  "now": "2026-08-30T12:00:00.000Z",
+  "since": "2025-08-30T12:00:00.000Z",
+  "semanticCases": [
+    {"id":"explicit","title":"Need a client deadline tracker","body":"Our small bookkeeping team misses monthly client deadlines. What are people using to track outstanding documents?","intent":"actively_looking","signal":"explicit_demand","worthReviewing":true,"clean":true},
+    {"id":"indirect","title":"Another late month end","body":"Every month I chase attachments across email threads and lose track of which client still owes a document.","intent":"problem_aware","signal":"pain","worthReviewing":true,"clean":true},
+    {"id":"switching","title":"Leaving LedgerDesk","body":"LedgerDesk keeps losing our recurring checklist updates. We are comparing alternatives before next month.","intent":"switching","signal":"switching","worthReviewing":true,"clean":true},
+    {"id":"market","title":"What client portals get wrong","body":"I reviewed several portals. Permission models still make collaboration between clients and accounting teams awkward.","intent":"informational","signal":"none","worthReviewing":true,"clean":true},
+    {"id":"homonym","title":"Mountain base camp advice","body":"Our hiking basecamp needs a sheltered place to pitch tents before the summit climb.","intent":"irrelevant","signal":"none","worthReviewing":false,"clean":false,"rejection":"known_homonym"},
+    {"id":"zero-audit","title":"Any alternatives for client work?","body":"Looking for another way to collect monthly statements from clients. Our current process is a mess.","intent":"informational","signal":"none","worthReviewing":false,"clean":true}
+  ],
+  "poolSizes": [0, 1, 25, 26, 276, 399, 400, 401, 450]
+}

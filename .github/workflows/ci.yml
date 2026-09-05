@@ -1,0 +1,420 @@
+name: CI
+
+# Feature changes are validated through this PR workflow before VPS deployment.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: demandsift-ci-${{ github.event.pull_request.number || github.ref }}
+  # Never interrupt a Docker release build on the small self-hosted VPS. A
+  # cancelled legacy build can retain its intermediate container and exhaust
+  # disk. The feature-tip guard below still prevents a queued stale candidate
+  # from being deployed.
+  cancel-in-progress: false
+
+jobs:
+  source-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application for server-rendered tests
+        run: npm run build
+
+      - name: Run source-level test suite
+        run: node --test tests/*.test.mjs
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release wrapper syntax
+        run: bash -n deploy/demandsift-release
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+  candidate-deploy:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
+    needs:
+      - source-tests
+      - verify
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Reclaim runner-owned caches before the Docker build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$HOME/.npm/_cacache" "$HOME/.cache"
+          find "$HOME/actions-runner/_diag" -type f -mtime +2 -delete 2>/dev/null || true
+          find "$HOME/actions-runner/_work/_temp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf -- {} + 2>/dev/null || true
+          df -h /
+
+      - name: Build tested candidate images
+        run: sudo -n /usr/local/sbin/demandsift-release build "$EXPECTED_SHA"
+
+      - name: Confirm candidate is still the feature tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test -n "$remote_sha"
+          if [ "$remote_sha" != "$EXPECTED_SHA" ]; then
+            echo "Feature branch advanced during the Docker build; refusing stale deployment." >&2
+            exit 1
+          fi
+
+      - name: Deploy candidate with rollback preserved
+        run: sudo -n /usr/local/sbin/demandsift-release deploy
+
+      - name: Verify healthy release
+        run: sudo -n /usr/local/sbin/demandsift-release inspect
+
+  acceptance-basecamp:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/reddit-intelligence-pipeline'
+    needs:
+      - candidate-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      ACCEPTANCE_COOKIE: ${{ runner.temp }}/demandsift-acceptance-cookie
+    steps:
+      - name: Confirm deployed candidate is still current
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test -n "$remote_sha"
+          if [ "$remote_sha" != "$EXPECTED_SHA" ]; then
+            echo "Feature branch advanced after deployment; skipping stale acceptance scan."
+            exit 78
+          fi
+
+      - name: Run one controlled Basecamp scan against production
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$ACCEPTANCE_COOKIE"
+          created_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          report_json="$(mktemp)"
+          diagnostics_json="$(mktemp)"
+          rm -f "$cookie_jar"
+          trap 'rm -f "$created_json" "$latest_json" "$report_json" "$diagnostics_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://basecamp.com","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          print(scan.get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "acceptance_scan_id=$scan_id"
+
+          queued_polls=0
+          running_polls=0
+          for attempt in $(seq 1 150); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest_json"
+
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            if [ "$status" = "queued" ]; then queued_polls=$((queued_polls + 1)); fi
+            if [ "$status" = "running" ]; then running_polls=$((running_polls + 1)); fi
+            echo "acceptance_poll=$attempt status=$status queued_polls=$queued_polls running_polls=$running_polls"
+
+            if [ "$status" = "complete" ]; then
+              # Probe the presenter first so a report failure yields a sanitized,
+              # actionable reason instead of an opaque HTTP 500.
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+              python3 - "$diagnostics_json" <<'PY'
+          import json, sys
+          aggregate = json.load(open(sys.argv[1]))
+          presentation = aggregate.get("presentation") or {}
+          print("acceptance_presentation_ok=" + str(bool(presentation.get("ok"))).lower())
+          if not presentation.get("ok"):
+              print("presentation_error_type=" + str(presentation.get("errorType") or "Error"))
+              print("presentation_error=" + str(presentation.get("error") or "Unknown presentation failure."))
+              raise SystemExit("Acceptance failed: report presentation could not be built.")
+          PY
+
+              # Exercise the same fully presented report endpoint used by the
+              # browser after polling completes. Keep user content out of CI
+              # logs; only verify the report shape and aggregate counts.
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/api/scans/$scan_id" > "$report_json"
+              python3 - "$report_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          report = payload.get("report") or {}
+          stored = report.get("storedCounts") or {}
+          visible_opportunities = len(report.get("opportunities") or [])
+          visible_replies = len(report.get("replies") or [])
+          if scan.get("status") != "complete":
+              raise SystemExit("Acceptance failed: presented scan is not complete.")
+          if not report.get("profile"):
+              raise SystemExit("Acceptance failed: presented report has no business profile.")
+          if visible_opportunities < 1 or int(stored.get("opportunities") or 0) < 1:
+              raise SystemExit("Acceptance failed: presented report has no qualified opportunity.")
+          if visible_replies < 1 or int(stored.get("replies") or 0) < 1:
+              raise SystemExit("Acceptance failed: presented report has no grounded reply.")
+          print("acceptance_report_rendering=passed")
+          print("visible_opportunities=" + str(visible_opportunities))
+          print("visible_replies=" + str(visible_replies))
+          PY
+
+              python3 - "$diagnostics_json" <<'PY'
+          import json, sys
+          aggregate = json.load(open(sys.argv[1]))
+          scan = aggregate.get("scan") or {}
+          output = aggregate.get("output") or {}
+          diagnostics = aggregate.get("diagnostics") or {}
+          retrieval = aggregate.get("retrieval") or {}
+          decisions = aggregate.get("decisionBreakdown") or {}
+          enrichment_failure = str(diagnostics.get("enrichmentFailureReason") or "").lower()
+          if not enrichment_failure:
+              enrichment_failure_category = "none"
+          elif "timed out" in enrichment_failure or "timeout" in enrichment_failure:
+              enrichment_failure_category = "actor_timeout"
+          elif "mapping_failure" in enrichment_failure:
+              enrichment_failure_category = "actor_mapping_failure"
+          elif "http" in enrichment_failure:
+              enrichment_failure_category = "actor_http_error"
+          else:
+              enrichment_failure_category = "actor_error"
+          print("acceptance_result=complete")
+          print("website=" + str(scan.get("websiteUrl") or ""))
+          print("opportunities=" + str(output.get("opportunities") or 0))
+          print("potential_customers=" + str(output.get("potentialCustomers") or 0))
+          print("insights=" + str(output.get("insights") or 0))
+          print("competitor_signals=" + str(output.get("competitorSignals") or 0))
+          print("replies=" + str(output.get("replies") or 0))
+          safe_funnel = {
+              "retrieved": diagnostics.get("retrieved", 0),
+              "normalized": diagnostics.get("normalized", 0),
+              "deterministicSurvivors": diagnostics.get("deterministicSurvivors", 0),
+              "submittedForTriage": diagnostics.get("submittedForTriage", 0),
+              "triageReturned": diagnostics.get("triageReturned", 0),
+              "worthEnriching": diagnostics.get("worthEnriching", 0),
+              "requestedForEnrichment": diagnostics.get("requestedForEnrichment", 0),
+              "enrichedSuccessfully": diagnostics.get("enrichedSuccessfully", 0),
+              "enrichmentFailures": diagnostics.get("enrichmentFailures", 0),
+              "enrichmentFailureCategory": enrichment_failure_category,
+              "submittedForDeepQualification": diagnostics.get("submittedForDeepQualification", 0),
+              "deepQualificationsReturned": diagnostics.get("deepQualificationsReturned", 0),
+              "potentialCustomerConversations": diagnostics.get("potentialCustomerConversations", 0),
+              "uniquePotentialCustomers": diagnostics.get("uniquePotentialCustomers", 0),
+              "repliesGenerated": diagnostics.get("repliesGenerated", 0),
+              "queryCount": retrieval.get("queryCount", 0),
+              "queryCountsByLane": retrieval.get("queryCountsByLane", {}),
+              "matchedCandidatesByLane": retrieval.get("matchedCandidatesByLane", {}),
+              "worthEnrichingByLane": retrieval.get("worthEnrichingByLane", {}),
+          }
+          print("acceptance_funnel=" + json.dumps(safe_funnel, separators=(",", ":"), sort_keys=True))
+          print("acceptance_triage_breakdown=" + json.dumps(decisions.get("triage") or {}, separators=(",", ":"), sort_keys=True))
+          print("acceptance_deep_breakdown=" + json.dumps(decisions.get("deepQualification") or {}, separators=(",", ":"), sort_keys=True))
+          if int(output.get("potentialCustomers") or 0) < 1:
+              raise SystemExit("Acceptance failed: no qualified potential customer was stored.")
+          if int(output.get("replies") or 0) < 1:
+              raise SystemExit("Acceptance failed: no grounded suggested reply was stored.")
+          PY
+              exit 0
+            fi
+
+            if [ "$status" = "failed" ]; then
+              python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          scan = payload.get("scan") or {}
+          error = payload.get("error") or {}
+          print("acceptance_result=failed")
+          print("scan_error=" + str(scan.get("error") or ""))
+          print("api_error_code=" + str(error.get("code") or ""))
+          print("api_error_message=" + str(error.get("message") or ""))
+          print("progress=" + json.dumps([
+              {"id": x.get("id"), "status": x.get("status")}
+              for x in (scan.get("progress") or [])
+          ], separators=(",", ":")))
+          PY
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "acceptance_result=timeout" >&2
+          exit 1
+
+      # Reuse the accepted business session to prove one real daily monitor run.
+      - name: Prove one opted-in daily monitoring cycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          settings_json="$(mktemp)"
+          enable_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          disable_json="$(mktemp)"
+          payload_json="$(mktemp)"
+          trap 'rm -f "$settings_json" "$enable_json" "$latest_json" "$disable_json" "$payload_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie "$ACCEPTANCE_COOKIE" \
+            "$APP_URL/api/monitoring/settings" > "$settings_json"
+
+          python3 - "$settings_json" "$payload_json" <<'PY'
+          import json, sys
+          source = json.load(open(sys.argv[1]))
+          monitoring = source.get("monitoring") or {}
+          terms = [term for term in (monitoring.get("watchTerms") or []) if term.get("active", True)]
+          if not terms:
+              raise SystemExit("Monitoring acceptance failed: no default active watch terms.")
+          json.dump({"enabled": True, "watchTerms": terms}, open(sys.argv[2], "w"))
+          print("monitor_default_active_terms=" + str(len(terms)))
+          PY
+
+          curl --fail-with-body --silent --show-error \
+            --cookie "$ACCEPTANCE_COOKIE" \
+            -H 'content-type: application/json' \
+            -X PUT \
+            --data-binary "@$payload_json" \
+            "$APP_URL/api/monitoring/settings" > "$enable_json"
+
+          python3 - "$enable_json" <<'PY'
+          import json, sys
+          monitoring = (json.load(open(sys.argv[1])).get("monitoring") or {})
+          if monitoring.get("enabled") is not True:
+              raise SystemExit("Monitoring acceptance failed: opt-in was not persisted.")
+          print("monitor_opt_in=passed")
+          PY
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$ACCEPTANCE_COOKIE" \
+              "$APP_URL/api/monitoring/settings" > "$latest_json"
+
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          run = json.load(open(sys.argv[1])).get("latestRun") or {}
+          print(run.get("status") or "waiting")
+          PY
+          )"
+            echo "monitor_poll=$attempt status=$status"
+            if [ "$status" = "succeeded" ]; then
+              python3 - "$latest_json" <<'PY'
+          import datetime, json, sys
+          payload = json.load(open(sys.argv[1]))
+          monitoring = payload.get("monitoring") or {}
+          run = payload.get("latestRun") or {}
+          active = [term for term in (monitoring.get("watchTerms") or []) if term.get("active", True)]
+          watched = run.get("watchTerms") or []
+          start = datetime.datetime.fromisoformat(str(run.get("windowStartedAt") or "").replace("Z", "+00:00"))
+          end = datetime.datetime.fromisoformat(str(run.get("windowEndedAt") or "").replace("Z", "+00:00"))
+          watermark = datetime.datetime.fromisoformat(str(monitoring.get("lastSuccessfulMonitorAt") or "").replace("Z", "+00:00"))
+          if not run.get("actorRunId"):
+              raise SystemExit("Monitoring acceptance failed: successful run has no Actor run ID.")
+          if len(watched) != len(active):
+              raise SystemExit("Monitoring acceptance failed: one run did not contain all active terms.")
+          if end <= start or watermark != end:
+              raise SystemExit("Monitoring acceptance failed: exact window/watermark invariant was not preserved.")
+          print("monitor_acceptance=passed")
+          print("monitor_one_actor_run=true")
+          print("monitor_watch_terms=" + str(len(watched)))
+          print("monitor_fetched=" + str(int(run.get("fetched") or 0)))
+          print("monitor_normalized=" + str(int(run.get("normalized") or 0)))
+          print("monitor_unseen=" + str(int(run.get("unseen") or 0)))
+          print("monitor_relevant=" + str(int(run.get("relevant") or 0)))
+          print("monitor_opportunities=" + str(int(run.get("opportunities") or 0)))
+          PY
+              break
+            fi
+            if [ "$status" = "failed" ]; then
+              echo "Monitoring acceptance failed: the daily run reached a terminal failure." >&2
+              exit 1
+            fi
+            if [ "$attempt" -eq 180 ]; then
+              echo "Monitoring acceptance failed: daily run timed out." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          python3 - "$latest_json" "$payload_json" <<'PY'
+          import json, sys
+          monitoring = json.load(open(sys.argv[1])).get("monitoring") or {}
+          json.dump({"enabled": False, "watchTerms": monitoring.get("watchTerms") or []}, open(sys.argv[2], "w"))
+          PY
+          curl --fail-with-body --silent --show-error \
+            --cookie "$ACCEPTANCE_COOKIE" \
+            -H 'content-type: application/json' \
+            -X PUT \
+            --data-binary "@$payload_json" \
+            "$APP_URL/api/monitoring/settings" > "$disable_json"
+          python3 - "$disable_json" <<'PY'
+          import json, sys
+          monitoring = (json.load(open(sys.argv[1])).get("monitoring") or {})
+          if monitoring.get("enabled") is not False:
+              raise SystemExit("Monitoring acceptance failed: opt-out was not persisted.")
+          print("monitor_opt_out=passed")
+          PY
+
+      - name: Remove acceptance session
+        if: always()
+        shell: bash
+        run: rm -f "$ACCEPTANCE_COOKIE"

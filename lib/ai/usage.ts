@@ -2,11 +2,16 @@ import type { EntityId, IsoDateTime } from "@/lib/domain/types";
 
 export type AiOperation =
   | "website_analysis"
+  | "website_analysis_fast"
+  | "conversation_triage"
+  | "deep_qualification"
   | "conversation_classification"
   | "opportunity_ranking"
   | "insight_generation"
   | "reply_generation"
-  | "embedding";
+  | "embedding"
+  | "visibility_question_generation"
+  | "visibility_answer_analysis";
 
 export interface TokenUsage {
   inputTokens: number;

@@ -2,6 +2,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { hostname } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,6 +11,7 @@ import { spawn } from "node:child_process";
 import postgres from "postgres";
 
 const workerId = `${hostname()}:${process.pid}`;
+export const REDDIT_MONITOR_MAX_WATCH_TERMS = 5;
 
 const MONITORING_STAGES = [
   {
@@ -21,37 +24,37 @@ const MONITORING_STAGES = [
     id: "understanding",
     label: "Mapping the problems you solve",
     status: "pending",
-    detail: "Building a source-backed product, audience and problem profile.",
+    detail: "Building a source-backed company context pack.",
   },
   {
     id: "discovery",
     label: "Searching recent Reddit conversations",
     status: "pending",
-    detail: "Looking only inside the current seven-day scan window.",
+    detail: "Searching explicit demand, pain, switching, recommendation and brand lanes.",
   },
   {
-    id: "reading",
-    label: "Reading relevant posts and replies",
+    id: "triage",
+    label: "Reading every credible candidate",
     status: "pending",
-    detail: "Checking context, problem fit and source quality.",
+    detail: "Using high-recall AI triage before spending on full thread context.",
   },
   {
-    id: "ranking",
+    id: "enrichment",
+    label: "Opening the strongest conversations",
+    status: "pending",
+    detail: "Fetching useful thread context only for candidates worth deeper review.",
+  },
+  {
+    id: "qualification",
     label: "Identifying potential customers",
     status: "pending",
-    detail: "Removing noise and deduplicating qualified people by Reddit author.",
-  },
-  {
-    id: "competitors",
-    label: "Checking competitor frustrations",
-    status: "pending",
-    detail: "Verifying complaints and alternative-seeking signals from their sources.",
+    detail: "Qualifying first, then ranking and deduplicating people by Reddit author.",
   },
   {
     id: "replies",
-    label: "Ranking the strongest opportunities",
+    label: "Preparing the best next move",
     status: "pending",
-    detail: "Ordering the best fits and preparing source-grounded replies.",
+    detail: "Generating one grounded reply only when the conversation is appropriate to join.",
   },
 ];
 
@@ -60,6 +63,49 @@ function boundedNumber(value, fallback, minimum, maximum) {
   return Number.isFinite(parsed) && parsed > 0
     ? Math.max(minimum, Math.min(parsed, maximum))
     : fallback;
+}
+
+/**
+ * Recurring monitoring is off for the MVP, which is a single user-triggered
+ * 7-day scan. The scheduler machinery is retained (nothing enrols scans into
+ * `runtime_monitoring_schedules` today, so it is dormant either way) but it no
+ * longer starts unless explicitly enabled, so the guarantee is enforced rather
+ * than incidental.
+ */
+export function monitoringSchedulerEnabled(environment = process.env) {
+  return String(environment.MONITORING_SCHEDULER_ENABLED ?? "").trim().toLowerCase() === "true";
+}
+
+/** Daily watch-term monitoring is independent from the legacy full-scan scheduler. */
+export function redditMonitorSchedulerEnabled(environment = process.env) {
+  return String(environment.REDDIT_MONITOR_SCHEDULER_ENABLED ?? "true")
+    .trim()
+    .toLowerCase() !== "false";
+}
+
+export function redditMonitorConfiguration(environment = process.env) {
+  return {
+    schedulerPollMs: boundedNumber(
+      environment.REDDIT_MONITOR_SCHEDULER_POLL_MS,
+      60_000,
+      1_000,
+      900_000,
+    ),
+    firstLookbackHours: boundedNumber(
+      environment.REDDIT_MONITOR_FIRST_LOOKBACK_HOURS,
+      24,
+      1,
+      168,
+    ),
+  };
+}
+
+export function redditMonitorDedupeKey(workspaceId, seedScanId, now) {
+  const milliseconds = validTimestamp(now);
+  if (!workspaceId || !seedScanId || milliseconds === null) {
+    throw new Error("A workspace, seed scan, and valid timestamp are required for Reddit monitoring.");
+  }
+  return `reddit-monitor:${workspaceId}:${seedScanId}:${new Date(milliseconds).toISOString().slice(0, 10)}`;
 }
 
 export function monitoringConfiguration(environment = process.env) {
@@ -547,6 +593,134 @@ export async function scheduleMonitoringScans(
   });
 }
 
+/**
+ * Reserves at most one monitoring Actor run per opted-in business per UTC day.
+ * `last_successful_monitor_at` is deliberately read but never changed here;
+ * only the successful web executor advances the watermark.
+ */
+export async function scheduleRedditMonitorScans(
+  sql,
+  {
+    now = new Date(),
+    configuration = redditMonitorConfiguration(),
+    createRunId = () => `monrun_${randomUUID().replaceAll("-", "")}`,
+  } = {},
+) {
+  const nowMs = validTimestamp(now);
+  if (nowMs === null) throw new Error("The Reddit monitoring scheduler timestamp is invalid.");
+  const scheduledAt = new Date(nowMs);
+  return sql.begin(async (transactionSql) => {
+    const monitors = await transactionSql`
+      SELECT monitor.workspace_id,
+             monitor.seed_scan_id,
+             monitor.last_successful_monitor_at,
+             monitor.watch_terms
+      FROM runtime_reddit_monitors AS monitor
+      JOIN runtime_scans AS seed_scan
+        ON seed_scan.id = monitor.seed_scan_id
+       AND seed_scan.workspace_id = monitor.workspace_id
+       AND seed_scan.status = 'complete'
+      WHERE monitor.enabled = true
+        AND monitor.next_run_at <= ${scheduledAt}
+        AND jsonb_array_length(monitor.watch_terms) > 0
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(monitor.watch_terms) AS term
+          WHERE COALESCE((term ->> 'active')::boolean, true) = true
+            AND length(trim(term ->> 'value')) >= 2
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM background_jobs AS pending_job
+          WHERE pending_job.type = 'reddit_monitor_scan'
+            AND pending_job.payload ->> 'workspaceId' = monitor.workspace_id
+            AND pending_job.payload ->> 'seedScanId' = monitor.seed_scan_id
+            AND pending_job.status IN ('queued', 'running', 'retrying')
+        )
+      ORDER BY monitor.next_run_at, monitor.workspace_id
+      LIMIT 100
+      FOR UPDATE OF monitor SKIP LOCKED
+    `;
+    const scheduled = [];
+    for (const monitor of monitors) {
+      const activeTerms = Array.isArray(monitor.watch_terms)
+        ? monitor.watch_terms
+          .filter((term) => term && term.active !== false && typeof term.value === "string")
+          .map((term) => term.value.trim())
+          .filter(Boolean)
+          .slice(0, REDDIT_MONITOR_MAX_WATCH_TERMS)
+        : [];
+      if (activeTerms.length === 0) continue;
+      const runId = createRunId();
+      const windowStartedAt = monitor.last_successful_monitor_at
+        ? new Date(monitor.last_successful_monitor_at)
+        : new Date(nowMs - configuration.firstLookbackHours * 60 * 60 * 1_000);
+      const dedupeKey = redditMonitorDedupeKey(monitor.workspace_id, monitor.seed_scan_id, scheduledAt);
+      const record = {
+        id: runId,
+        workspaceId: monitor.workspace_id,
+        seedScanId: monitor.seed_scan_id,
+        scanId: null,
+        status: "queued",
+        windowStartedAt: windowStartedAt.toISOString(),
+        windowEndedAt: scheduledAt.toISOString(),
+        actorRunId: null,
+        watchTerms: activeTerms,
+        fetched: 0,
+        normalized: 0,
+        unseen: 0,
+        relevant: 0,
+        opportunities: 0,
+        error: null,
+        createdAt: scheduledAt.toISOString(),
+        updatedAt: scheduledAt.toISOString(),
+      };
+      const jobs = await transactionSql`
+        INSERT INTO background_jobs (
+          type, status, payload, dedupe_key, attempts, max_attempts,
+          run_at, created_at, updated_at
+        ) VALUES (
+          'reddit_monitor_scan',
+          'queued',
+          ${transactionSql.json({ monitorRunId: runId, workspaceId: monitor.workspace_id, seedScanId: monitor.seed_scan_id })},
+          ${dedupeKey},
+          0,
+          1,
+          ${scheduledAt},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (jobs.length === 0) continue;
+      await transactionSql`
+        INSERT INTO runtime_reddit_monitor_runs (
+          id, workspace_id, seed_scan_id, status, window_started_at,
+          window_ended_at, record, created_at, updated_at
+        ) VALUES (
+          ${runId},
+          ${monitor.workspace_id},
+          ${monitor.seed_scan_id},
+          'queued',
+          ${windowStartedAt},
+          ${scheduledAt},
+          ${transactionSql.json(record)},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+      `;
+      scheduled.push({
+        runId,
+        workspaceId: monitor.workspace_id,
+        watchTermCount: activeTerms.length,
+        dedupeKey,
+      });
+    }
+    return { candidateCount: monitors.length, scheduled };
+  });
+}
+
 async function runMonitoringScheduler(sql, signal) {
   const configuration = monitoringConfiguration();
   log("info", "monitor_scheduler_started", {
@@ -575,24 +749,395 @@ async function runMonitoringScheduler(sql, signal) {
   log("info", "monitor_scheduler_stopped");
 }
 
-export async function claimJob(sql, workerIdValue) {
-  const staleSeconds = Number(process.env.BACKGROUND_JOB_STALE_SECONDS ?? 1200);
-  const boundedStaleSeconds = Number.isFinite(staleSeconds)
-    ? Math.max(60, Math.min(staleSeconds, 3_600))
-    : 1200;
+async function runRedditMonitorScheduler(sql, signal) {
+  const configuration = redditMonitorConfiguration();
+  log("info", "reddit_monitor_scheduler_started", { pollMs: configuration.schedulerPollMs });
+  while (!signal.aborted) {
+    try {
+      const result = await scheduleRedditMonitorScans(sql, { configuration });
+      if (result.scheduled.length > 0) {
+        log("info", "reddit_monitor_scheduler_poll_completed", {
+          candidates: result.candidateCount,
+          scheduled: result.scheduled.length,
+          runs: result.scheduled.map((entry) => ({
+            runId: entry.runId,
+            watchTermCount: entry.watchTermCount,
+          })),
+        });
+      }
+    } catch (error) {
+      log("error", "reddit_monitor_scheduler_poll_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "reddit_monitor_scheduler_stopped");
+}
+
+/**
+ * AI Visibility Tracking (MVP) -- a sidecar to the Reddit monitor above,
+ * not built on it: separate tables (runtime_ai_visibility_schedules /
+ * runtime_ai_visibility_scans), separate job type (ai_visibility_scan),
+ * separate scheduler.
+ *
+ * This poller itself defaults to on (`AI_VISIBILITY_SCHEDULER_ENABLED`),
+ * but every per-workspace schedule row is created with `enabled: false`
+ * (see createAiVisibilitySettings in lib/server/ai-visibility-repository.ts)
+ * and scheduleAiVisibilityScans below only ever picks up rows where
+ * `schedule.enabled = true`. So in practice nothing runs automatically
+ * for any workspace until there is a way to flip that flag -- there is no
+ * dashboard control for it yet -- rather than tracking a business that
+ * never opted in.
+ */
+export function aiVisibilitySchedulerEnabled(environment = process.env) {
+  return String(environment.AI_VISIBILITY_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
+export function publicStatsSchedulerEnabled(environment = process.env) {
+  return String(environment.PUBLIC_STATS_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
+export function aiVisibilityConfiguration(environment = process.env) {
+  return {
+    schedulerPollMs: boundedNumber(
+      environment.AI_VISIBILITY_SCHEDULER_POLL_MS,
+      300_000,
+      30_000,
+      3_600_000,
+    ),
+  };
+}
+
+export function publicStatsConfiguration(environment = process.env) {
+  return {
+    // The job itself only ever does real work once a day (see
+    // refreshPublicLandingStatsIfDue's own due-check) -- this just governs
+    // how promptly a poll notices that a day has passed. An hour of slack
+    // on a once-a-day number is unnoticeable, so this defaults far coarser
+    // than the other schedulers' polls.
+    schedulerPollMs: boundedNumber(
+      environment.PUBLIC_STATS_SCHEDULER_POLL_MS,
+      3_600_000,
+      60_000,
+      21_600_000,
+    ),
+  };
+}
+
+/**
+ * Reserves at most one AI visibility Actor run per opted-in workspace per
+ * poll, for every schedule whose next_run_at (a Monday, see nextMonday in
+ * lib/server/ai-visibility-repository.ts) has arrived. The job is inserted
+ * first, same ordering as scheduleMonitoringScans, so a dedupe conflict
+ * never leaves an orphan scan row.
+ */
+export async function scheduleAiVisibilityScans(
+  sql,
+  {
+    now = new Date(),
+    createScanId = () => `aivis_${randomUUID().replaceAll("-", "")}`,
+    maxAttempts = configuredMaxAttempts(),
+  } = {},
+) {
+  const nowMs = validTimestamp(now);
+  if (nowMs === null) throw new Error("The AI visibility scheduler timestamp is invalid.");
+  const scheduledAt = new Date(nowMs);
+
+  return sql.begin(async (transactionSql) => {
+    const schedules = await transactionSql`
+      SELECT schedule.workspace_id, schedule.seed_scan_id
+      FROM runtime_ai_visibility_schedules AS schedule
+      JOIN runtime_scans AS seed_scan
+        ON seed_scan.id = schedule.seed_scan_id
+       AND seed_scan.workspace_id = schedule.workspace_id
+       AND seed_scan.status = 'complete'
+      WHERE schedule.enabled = true
+        AND schedule.next_run_at <= ${scheduledAt}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM background_jobs AS pending_job
+          WHERE pending_job.type = 'ai_visibility_scan'
+            AND pending_job.payload ->> 'workspaceId' = schedule.workspace_id
+            AND pending_job.payload ->> 'seedScanId' = schedule.seed_scan_id
+            AND pending_job.status IN ('queued', 'running', 'retrying')
+        )
+      ORDER BY schedule.next_run_at, schedule.workspace_id
+      LIMIT 100
+      FOR UPDATE OF schedule SKIP LOCKED
+    `;
+
+    const scheduled = [];
+    for (const row of schedules) {
+      const scanId = createScanId();
+      const dedupeKey = `ai-visibility-run:${scanId}`;
+      const record = {
+        id: scanId,
+        workspaceId: row.workspace_id,
+        seedScanId: row.seed_scan_id,
+        status: "queued",
+        questions: [],
+        answers: [],
+        metrics: null,
+        error: null,
+        createdAt: scheduledAt.toISOString(),
+        updatedAt: scheduledAt.toISOString(),
+      };
+      const jobs = await transactionSql`
+        INSERT INTO background_jobs (
+          type, status, payload, dedupe_key, attempts, max_attempts,
+          run_at, created_at, updated_at
+        ) VALUES (
+          'ai_visibility_scan',
+          'queued',
+          ${transactionSql.json({ visibilityScanId: scanId, workspaceId: row.workspace_id, seedScanId: row.seed_scan_id })},
+          ${dedupeKey},
+          0,
+          ${maxAttempts},
+          ${scheduledAt},
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (jobs.length === 0) continue;
+      await transactionSql`
+        INSERT INTO runtime_ai_visibility_scans (
+          id, workspace_id, seed_scan_id, status, questions, answers, metrics,
+          error, created_at, updated_at
+        ) VALUES (
+          ${record.id},
+          ${record.workspaceId},
+          ${record.seedScanId},
+          'queued',
+          ${transactionSql.json(record.questions)},
+          ${transactionSql.json(record.answers)},
+          NULL,
+          NULL,
+          ${scheduledAt},
+          ${scheduledAt}
+        )
+      `;
+      scheduled.push({ scanId: record.id, workspaceId: record.workspaceId, dedupeKey });
+    }
+    return { candidateCount: schedules.length, scheduled };
+  });
+}
+
+async function runAiVisibilityScheduler(sql, signal) {
+  const configuration = aiVisibilityConfiguration();
+  log("info", "ai_visibility_scheduler_started", { pollMs: configuration.schedulerPollMs });
+  while (!signal.aborted) {
+    try {
+      const result = await scheduleAiVisibilityScans(sql);
+      if (result.scheduled.length > 0) {
+        log("info", "ai_visibility_scheduler_poll_completed", {
+          candidates: result.candidateCount,
+          scheduled: result.scheduled.length,
+        });
+      }
+    } catch (error) {
+      log("error", "ai_visibility_scheduler_poll_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "ai_visibility_scheduler_stopped");
+}
+
+/**
+ * Recomputes and caches the real landing-page numbers, but only if a day
+ * has actually passed since the last refresh -- a cheap timestamp read
+ * otherwise, no aggregate query, no write. Exported (like
+ * scheduleAiVisibilityScans above) so it's independently testable.
+ *
+ * Counts only status = 'complete' AND dataMode = 'live' scans:
+ * excluding mock/apify-test scans is the whole point -- a "real" number
+ * seeded from synthetic test data would just be a differently-shaped
+ * version of the fabricated-number problem this feature replaced.
+ */
+export async function refreshPublicLandingStats(sql, { now = new Date() } = {}) {
+  const intervalMs = 24 * 60 * 60 * 1_000;
+  const [current] = await sql`
+    SELECT next_run_at FROM runtime_public_stats WHERE id = 'landing'
+  `;
+  if (current && new Date(current.next_run_at) > now) return false;
+
+  const [aggregate] = await sql`
+    SELECT
+      COUNT(*)::int AS scans_analyzed,
+      COALESCE(SUM((record -> 'result' -> 'diagnostics' ->> 'normalized')::int), 0)::int AS reddit_posts_analyzed
+    FROM runtime_scans
+    WHERE status = 'complete'
+      AND record -> 'result' ->> 'dataMode' = 'live'
+  `;
+  const scansAnalyzed = Number(aggregate?.scans_analyzed ?? 0);
+  const redditPostsAnalyzed = Number(aggregate?.reddit_posts_analyzed ?? 0);
+  const nextRunAt = new Date(now.getTime() + intervalMs);
+
+  await sql`
+    INSERT INTO runtime_public_stats (id, scans_analyzed, reddit_posts_analyzed, next_run_at, created_at, updated_at)
+    VALUES ('landing', ${scansAnalyzed}, ${redditPostsAnalyzed}, ${nextRunAt}, ${now}, ${now})
+    ON CONFLICT (id) DO UPDATE SET
+      scans_analyzed = ${scansAnalyzed},
+      reddit_posts_analyzed = ${redditPostsAnalyzed},
+      next_run_at = ${nextRunAt},
+      updated_at = ${now}
+  `;
+  return true;
+}
+
+async function runPublicStatsScheduler(sql, signal) {
+  const configuration = publicStatsConfiguration();
+  log("info", "public_stats_scheduler_started", { pollMs: configuration.schedulerPollMs });
+  while (!signal.aborted) {
+    try {
+      const refreshed = await refreshPublicLandingStats(sql);
+      if (refreshed) log("info", "public_stats_refreshed", {});
+    } catch (error) {
+      log("error", "public_stats_refresh_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await waitForNextPoll(signal, configuration.schedulerPollMs);
+  }
+  log("info", "public_stats_scheduler_stopped");
+}
+
+export function jobExecutionConfiguration(environment = process.env) {
+  // Ceiling raised from 1_800s (30min) to 5_400s (90min) to match
+  // lib/server/scan-execution.ts's ScanExecutionTimeoutError ceiling
+  // (scanExecutionMaxDurationMs in lib/server/scan-workflow.ts, also
+  // 90min by default). Default value unchanged -- this only takes effect
+  // if BACKGROUND_JOB_TIMEOUT_SECONDS is explicitly configured above the
+  // old 1_800s cap. Before this pair of fixes, a legitimately slow scan
+  // (see docs/scan-speed/baseline.md) could exceed the worker's fixed
+  // 30-minute wait, get marked terminal (scan_execution_timeout is
+  // non-retryable), and keep running orphaned server-side with nothing
+  // ever able to reclaim or observe it again.
+  const timeoutSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_TIMEOUT_SECONDS,
+    1_200,
+    1_200,
+    5_400,
+  );
+  const heartbeatSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_HEARTBEAT_SECONDS,
+    15,
+    5,
+    60,
+  );
+  const configuredStaleSeconds = boundedNumber(
+    environment.BACKGROUND_JOB_LEASE_STALE_SECONDS,
+    90,
+    45,
+    300,
+  );
+  return {
+    timeoutSeconds,
+    heartbeatSeconds,
+    staleSeconds: Math.max(configuredStaleSeconds, heartbeatSeconds * 3),
+  };
+}
+
+export function workerQueueConfiguration(environment = process.env) {
+  const parsedConcurrency = Number(environment.BACKGROUND_WORKER_CONCURRENCY ?? 1);
+  if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1 || parsedConcurrency > 2) {
+    throw new Error("BACKGROUND_WORKER_CONCURRENCY must be 1 or 2.");
+  }
+  const concurrency = parsedConcurrency;
+  const role = String(environment.BACKGROUND_WORKER_ROLE ?? "combined").trim().toLowerCase();
+  if (!["combined", "executor", "scheduler"].includes(role)) {
+    throw new Error("BACKGROUND_WORKER_ROLE must be `combined`, `executor`, or `scheduler`.");
+  }
+  if (role !== "scheduler" && concurrency > 1 && environment.PROVIDER_GLOBAL_CAPS !== "1") {
+    throw new Error("BACKGROUND_WORKER_CONCURRENCY=2 requires PROVIDER_GLOBAL_CAPS=1.");
+  }
+  const parsedAgingSeconds = Number(environment.BACKGROUND_JOB_AGING_SECONDS ?? 300);
+  if (!Number.isInteger(parsedAgingSeconds) || parsedAgingSeconds < 60 || parsedAgingSeconds > 3_600) {
+    throw new Error("BACKGROUND_JOB_AGING_SECONDS must be an integer from 60 to 3600.");
+  }
+  return {
+    concurrency,
+    role,
+    agingSeconds: parsedAgingSeconds,
+  };
+}
+
+export async function refreshJobLease(sql, jobId, workerIdValue, attempt) {
+  if (!Number.isInteger(attempt) || attempt < 1) return false;
+  const rows = await sql`
+    UPDATE background_jobs
+    SET locked_at = now(), updated_at = now()
+    WHERE id = ${jobId}
+      AND status = 'running'
+      AND locked_by = ${workerIdValue}
+      AND attempts = ${attempt}
+    RETURNING id
+  `;
+  return rows.length > 0;
+}
+
+export async function maintainJobLease(sql, job, workerIdValue, signal, heartbeatMs, onLost = () => {}) {
+  while (!signal.aborted) {
+    await waitForNextPoll(signal, heartbeatMs);
+    if (signal.aborted) return;
+    try {
+      const refreshed = await refreshJobLease(sql, job.id, workerIdValue, job.attempts);
+      if (!refreshed) {
+        log("warn", "job_lease_lost", { jobId: job.id });
+        onLost();
+        return;
+      }
+    } catch (error) {
+      log("warn", "job_lease_refresh_failed", {
+        jobId: job.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+export async function claimJob(sql, workerIdValue, options = {}) {
+  const { staleSeconds: boundedStaleSeconds } = jobExecutionConfiguration();
+  const selection = options.selection === "interactive" ? "interactive" : "all";
+  const agingSeconds = Number.isFinite(options.agingSeconds)
+    ? Math.max(60, Math.min(options.agingSeconds, 3_600))
+    : 300;
   const staleBefore = new Date(Date.now() - boundedStaleSeconds * 1_000);
   const rows = await sql`
     WITH candidate AS (
-      SELECT id
-      FROM background_jobs
+      SELECT job.id
+      FROM background_jobs AS job
+      LEFT JOIN LATERAL (
+        SELECT count(*) AS active_count
+        FROM background_jobs AS active_job
+        WHERE active_job.status = 'running'
+          AND active_job.locked_at > ${staleBefore}
+          AND active_job.payload ->> 'workspaceId' = job.payload ->> 'workspaceId'
+      ) AS workspace_load ON true
       WHERE (
-        (status IN ('queued', 'retrying') AND run_at <= now())
-        OR (status = 'running' AND locked_at <= ${staleBefore})
+        (job.status IN ('queued', 'retrying') AND job.run_at <= now())
+        OR (job.status = 'running' AND job.locked_at <= ${staleBefore})
       )
-      AND type = 'scan.run'
+      AND job.type IN ('scan.run', 'scan.analyze', 'reddit_monitor_scan', 'ai_visibility_scan')
+      AND (${selection} = 'all' OR job.type IN ('scan.run', 'scan.analyze'))
       AND attempts < max_attempts
-      ORDER BY run_at ASC, created_at ASC
-      FOR UPDATE SKIP LOCKED
+      ORDER BY
+        CASE
+          WHEN job.status = 'running' THEN -100
+          ELSE greatest(
+            CASE job.type WHEN 'scan.analyze' THEN -1 WHEN 'scan.run' THEN 0 ELSE 4 END
+              - floor(extract(epoch FROM (now() - job.created_at)) / ${agingSeconds}),
+            -2
+          )
+        END ASC,
+        workspace_load.active_count ASC,
+        job.run_at ASC,
+        job.created_at ASC
+      FOR UPDATE OF job SKIP LOCKED
       LIMIT 1
     )
     UPDATE background_jobs AS job
@@ -608,65 +1153,344 @@ export async function claimJob(sql, workerIdValue) {
   return rows[0] ?? null;
 }
 
-async function completeJob(sql, job) {
+export async function completeJob(sql, job, workerIdValue = workerId) {
   await sql`
     UPDATE background_jobs
     SET status = 'succeeded',
         locked_at = NULL,
         locked_by = NULL,
+        last_error = NULL,
         finished_at = now(),
         updated_at = now()
-    WHERE id = ${job.id} AND locked_by = ${workerId}
+    WHERE id = ${job.id} AND locked_by = ${workerIdValue} AND attempts = ${job.attempts} AND status = 'running'
   `;
 }
 
-async function failJob(sql, job, error) {
+const TERMINAL_SCAN_ERROR_CODES = new Set([
+  "scan_review_required",
+  "scan_review_changed",
+  "scan_configuration_invalid",
+  "triage_coverage_incomplete",
+  "website_snapshot_mismatch",
+  "reddit_enrichment_failed",
+  "openai_structured_output_failed",
+  "scan_execution_timeout",
+  "ai_recovery_exhausted",
+  "provider_auth_failed",
+  "provider_invalid_request",
+  "provider_quota_exhausted",
+  "apify_start_ambiguous",
+  "apify_recovery_exhausted",
+  "apify_reconciliation_required",
+]);
+
+function executorErrorCode(responseText) {
+  try {
+    const payload = JSON.parse(responseText);
+    const code = payload?.error?.code;
+    return typeof code === "string" && code.trim() ? code.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export class WorkerExecutorHttpError extends Error {
+  constructor(status, responseText) {
+    super(`Web executor returned HTTP ${status}: ${responseText.slice(0, 1_000)}`);
+    this.name = "WorkerExecutorHttpError";
+    this.status = status;
+    this.code = executorErrorCode(responseText);
+  }
+}
+
+export class WorkerExecutorTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`Web executor timed out after ${timeoutMs}ms.`);
+    this.name = "WorkerExecutorTimeoutError";
+    this.code = "scan_execution_timeout";
+  }
+}
+
+export function assertSuccessfulExecutorPayload(payload) {
+  if (payload?.ok === false && payload?.error) {
+    const status = Number(payload.executorStatus);
+    throw new WorkerExecutorHttpError(
+      Number.isInteger(status) && status >= 400 ? status : 500,
+      JSON.stringify({ error: payload.error }),
+    );
+  }
+  return payload;
+}
+
+/**
+ * A single poll to the web executor can fail for reasons that have nothing
+ * to do with the scan itself -- a dropped connection, a DNS blip, the web
+ * process being briefly slow to answer under load. Prior behavior treated
+ * any such failure as fatal to the whole job attempt: it threw immediately,
+ * the executor lane failed the job, and the queue reclaimed it as a new
+ * attempt. But the scan execution this attempt kicked off is a detached
+ * server-side task (see the route's "release the HTTP request immediately"
+ * comment) -- it keeps running to completion regardless of whether this
+ * client's polling connection survives. A production scan was observed
+ * losing to exactly this race: attempt 1's real discovery work (242s) was
+ * still genuinely in progress when a transient poll failure caused the
+ * worker to give up, and the resulting new attempt claimed scan ownership
+ * out from under it (beginScanRun's newClaim path does not check
+ * liveExecution), so attempt 1's own checkpoint save failed with
+ * scan_ownership_lost the moment it finally tried to record discovery as
+ * complete -- discovery had genuinely finished, but the attempt no longer
+ * owned the scan to say so.
+ *
+ * Tolerating a bounded run of consecutive *transport*-level poll failures
+ * (network/timeout exceptions thrown by poll() itself) closes that trigger
+ * without touching ownership semantics at all: a clean {ok:false} response
+ * from the server (a real, well-formed scan failure) still rejects
+ * immediately via WorkerExecutorHttpError, exactly as before.
+ */
+export async function waitForScanExecution(options) {
+  const startedAt = Date.now();
+  const pollMs = Math.max(250, Math.min(Number(options.pollMs ?? 2_000), 30_000));
+  const maxConsecutiveTransportFailures = Math.max(
+    1,
+    Math.min(Number(options.maxConsecutiveTransportFailures ?? process.env.BACKGROUND_JOB_POLL_MAX_TRANSPORT_FAILURES ?? 3), 10),
+  );
+  let consecutiveTransportFailures = 0;
+  while (!options.signal.aborted) {
+    if (Date.now() - startedAt >= options.timeoutMs) {
+      throw new WorkerExecutorTimeoutError(options.timeoutMs);
+    }
+    let payload;
+    try {
+      payload = assertSuccessfulExecutorPayload(await options.poll());
+    } catch (error) {
+      if (options.signal.aborted || error instanceof WorkerExecutorHttpError) throw error;
+      consecutiveTransportFailures += 1;
+      if (consecutiveTransportFailures > maxConsecutiveTransportFailures) throw error;
+      log("warn", "scan_poll_transport_retry", {
+        attempt: consecutiveTransportFailures,
+        maxAttempts: maxConsecutiveTransportFailures,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      await waitForNextPoll(options.signal, pollMs);
+      continue;
+    }
+    consecutiveTransportFailures = 0;
+    if (payload?.complete === true || payload?.status === "complete") return payload;
+    await waitForNextPoll(options.signal, pollMs);
+  }
+  throw options.signal.reason instanceof Error
+    ? options.signal.reason
+    : new Error("Background scan execution was interrupted.");
+}
+
+export function isRetryableJobError(error) {
+  return !(
+    error &&
+    typeof error === "object" &&
+    typeof error.code === "string" &&
+    TERMINAL_SCAN_ERROR_CODES.has(error.code)
+  );
+}
+
+export function jobFailureDisposition(job, error, now = new Date()) {
   const exhausted = job.attempts >= job.max_attempts;
+  const retryable = isRetryableJobError(error);
+  const terminal = exhausted || !retryable;
   const delaySeconds = Math.min(300, 2 ** job.attempts * 5);
-  const retryAt = new Date(Date.now() + delaySeconds * 1_000);
+  const retryAt = new Date(now.getTime() + delaySeconds * 1_000);
+  return {
+    status: terminal ? "failed" : "retrying",
+    retryable,
+    terminal,
+    exhausted,
+    retryAt,
+    finishedAt: terminal ? now : null,
+  };
+}
+
+export async function failJob(sql, job, error, disposition = jobFailureDisposition(job, error), workerIdValue = workerId) {
+  const message = error instanceof Error ? error.message : String(error);
   await sql`
     UPDATE background_jobs
-    SET status = ${exhausted ? "failed" : "retrying"}::job_status,
-        run_at = ${retryAt},
+    SET status = ${disposition.status}::job_status,
+        run_at = ${disposition.retryAt},
         locked_at = NULL,
         locked_by = NULL,
-        last_error = ${String(error).slice(0, 4_000)},
-        finished_at = ${exhausted ? new Date() : null},
+        last_error = ${message.slice(0, 4_000)},
+        finished_at = ${disposition.finishedAt},
         updated_at = now()
-    WHERE id = ${job.id} AND locked_by = ${workerId}
+    WHERE id = ${job.id} AND locked_by = ${workerIdValue} AND attempts = ${job.attempts} AND status = 'running'
   `;
 }
 
-async function executeScanJob(job, signal) {
+/**
+ * Node's built-in fetch is backed by Undici and can end a long request around
+ * its header timeout even when our AbortSignal allows a longer job. Scan jobs
+ * deliberately use the core HTTP client so BACKGROUND_JOB_TIMEOUT_SECONDS is
+ * the single execution timeout we control.
+ */
+export function postJsonWithLongTimeout(urlValue, options) {
+  const url = new URL(urlValue);
+  const requestFn = url.protocol === "https:" ? httpsRequest : url.protocol === "http:" ? httpRequest : null;
+  if (!requestFn) return Promise.reject(new Error("Worker executor URL must use HTTP or HTTPS."));
+  const body = JSON.stringify(options.body ?? {});
+  const maxResponseBytes = options.maxResponseBytes ?? 1_000_000;
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(error);
+    };
+    const request = requestFn(url, {
+      method: "POST",
+      headers: {
+        ...options.headers,
+        "content-length": Buffer.byteLength(body),
+      },
+      signal: options.signal,
+    }, (response) => {
+      const chunks = [];
+      let bytes = 0;
+      response.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > maxResponseBytes) {
+          response.destroy(new Error("Web executor response exceeded the size limit."));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("error", finishReject);
+      response.once("end", () => {
+        if (settled) return;
+        const text = Buffer.concat(chunks).toString("utf8");
+        const status = response.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          finishReject(new WorkerExecutorHttpError(status, text));
+          return;
+        }
+        let payload;
+        try {
+          payload = text ? JSON.parse(text) : {};
+        } catch {
+          finishReject(new Error("Web executor returned invalid JSON."));
+          return;
+        }
+        settled = true;
+        resolvePromise(payload);
+      });
+    });
+    request.once("error", finishReject);
+    request.setTimeout(options.timeoutMs, () => {
+      request.destroy(new WorkerExecutorTimeoutError(options.timeoutMs));
+    });
+    request.end(body);
+  });
+}
+
+export async function executeScanJob(job, signal, workerIdValue = workerId) {
   const workerSecret = requiredEnvironment("BACKGROUND_WORKER_SECRET");
   if (workerSecret.length < 32) {
     throw new Error("BACKGROUND_WORKER_SECRET must contain at least 32 characters.");
   }
-  const timeoutSeconds = Number(process.env.BACKGROUND_JOB_TIMEOUT_SECONDS ?? 900);
-  const boundedTimeoutSeconds = Number.isFinite(timeoutSeconds)
-    ? Math.max(30, Math.min(timeoutSeconds, 900))
-    : 900;
-  const timeout = AbortSignal.timeout(boundedTimeoutSeconds * 1_000);
+  const { timeoutSeconds: boundedTimeoutSeconds } = jobExecutionConfiguration();
+  const timeoutMs = boundedTimeoutSeconds * 1_000;
+  const timeout = AbortSignal.timeout(timeoutMs);
   const combinedSignal = AbortSignal.any([signal, timeout]);
-  const response = await fetch(`${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${workerSecret}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ workerId }),
-    signal: combinedSignal,
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 1_000);
-    throw new Error(`Web executor returned HTTP ${response.status}: ${detail}`);
+  const executeUrl = `${internalWorkerUrl()}/api/internal/jobs/${encodeURIComponent(job.id)}/execute`;
+  const headers = {
+    authorization: `Bearer ${workerSecret}`,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  try {
+    const started = assertSuccessfulExecutorPayload(await postJsonWithLongTimeout(
+      executeUrl,
+      {
+        headers,
+        body: { workerId: workerIdValue, attempt: job.attempts },
+        signal: combinedSignal,
+        timeoutMs: 30_000,
+        maxResponseBytes: 1_000_000,
+      },
+    ));
+    if (started?.complete === true || started?.status === "complete") return started;
+    return await waitForScanExecution({
+      signal: combinedSignal,
+      timeoutMs,
+      pollMs: Number(process.env.BACKGROUND_JOB_STATUS_POLL_MS ?? 2_000),
+      poll: () => postJsonWithLongTimeout(
+        executeUrl,
+        {
+          headers,
+          body: { workerId: workerIdValue, attempt: job.attempts },
+          signal: combinedSignal,
+          timeoutMs: 30_000,
+          maxResponseBytes: 1_000_000,
+        },
+      ),
+    });
+  } catch (error) {
+    if (timeout.aborted && !signal.aborted) {
+      throw new WorkerExecutorTimeoutError(boundedTimeoutSeconds * 1_000);
+    }
+    throw error;
   }
-  return response.json();
+}
+
+async function runExecutorLane(sql, queueSignal, pollMs, laneId, selection, agingSeconds) {
+  const laneWorkerId = `${workerId}:${laneId}`;
+  while (!queueSignal.aborted) {
+    const job = await claimJob(sql, laneWorkerId, { selection, agingSeconds });
+    if (!job) {
+      await waitForNextPoll(queueSignal, pollMs);
+      continue;
+    }
+    log("info", "job_claimed", {
+      laneId,
+      selection,
+      jobId: job.id,
+      type: job.type,
+      attempt: job.attempts,
+      maxAttempts: job.max_attempts,
+      queueWaitMs: Math.max(0, Date.now() - new Date(job.run_at).getTime()) || 0,
+      ageMs: Math.max(0, Date.now() - new Date(job.created_at).getTime()) || 0,
+    });
+    const executionStarted = performance.now();
+    const leaseController = new AbortController();
+    const leaseSignal = AbortSignal.any([queueSignal, leaseController.signal]);
+    const { heartbeatSeconds } = jobExecutionConfiguration();
+    const leaseTask = maintainJobLease(sql, job, laneWorkerId, leaseSignal, heartbeatSeconds * 1_000,
+      () => leaseController.abort(new Error("Job ownership was lost.")));
+    try {
+      const result = await executeScanJob(job, leaseSignal, laneWorkerId);
+      await completeJob(sql, job, laneWorkerId);
+      log("info", "job_succeeded", { laneId, jobId: job.id, scanId: result.scanId, attempt: job.attempts,
+        durationMs: Math.max(0, performance.now() - executionStarted) });
+    } catch (error) {
+      const disposition = jobFailureDisposition(job, error);
+      await failJob(sql, job, error, disposition, laneWorkerId);
+      log("error", "job_failed", {
+        laneId,
+        jobId: job.id,
+        attempt: job.attempts,
+        retryable: disposition.retryable,
+        terminal: disposition.terminal,
+        durationMs: Math.max(0, performance.now() - executionStarted),
+        category: disposition.retryable ? "retryable_execution_failure" : "terminal_execution_failure",
+      });
+    } finally {
+      leaseController.abort("job finished");
+      await leaseTask;
+    }
+  }
 }
 
 async function runQueueWorker(databaseUrl, signal) {
+  const queue = workerQueueConfiguration();
   const sql = postgres(databaseUrl, {
-    max: 2,
+    max: Math.max(4, queue.concurrency + 3),
     idle_timeout: 20,
     connect_timeout: 10,
     prepare: false,
@@ -675,37 +1499,43 @@ async function runQueueWorker(databaseUrl, signal) {
   const boundedPollMs = Number.isFinite(pollMs) ? Math.max(250, Math.min(pollMs, 30_000)) : 2_000;
   const queueController = new AbortController();
   const queueSignal = AbortSignal.any([signal, queueController.signal]);
-  const scheduler = runMonitoringScheduler(sql, queueSignal);
-  log("info", "queue_worker_started", { pollMs: boundedPollMs });
+  const runsSchedulers = queue.role !== "executor";
+  const runsExecutors = queue.role !== "scheduler";
+  const scheduler = runsSchedulers && monitoringSchedulerEnabled()
+    ? runMonitoringScheduler(sql, queueSignal)
+    : Promise.resolve();
+  const redditMonitorScheduler = runsSchedulers && redditMonitorSchedulerEnabled()
+    ? runRedditMonitorScheduler(sql, queueSignal)
+    : Promise.resolve();
+  const aiVisibilityScheduler = runsSchedulers && aiVisibilitySchedulerEnabled()
+    ? runAiVisibilityScheduler(sql, queueSignal)
+    : Promise.resolve();
+  const publicStatsScheduler = runsSchedulers && publicStatsSchedulerEnabled()
+    ? runPublicStatsScheduler(sql, queueSignal)
+    : Promise.resolve();
+  if (!runsSchedulers || !monitoringSchedulerEnabled()) {
+    log("info", "monitor_scheduler_disabled", { reason: runsSchedulers ? "single_on_demand_scan_mvp" : "worker_role" });
+  }
+  if (!runsSchedulers || !redditMonitorSchedulerEnabled()) log("info", "reddit_monitor_scheduler_disabled");
+  if (!runsSchedulers || !aiVisibilitySchedulerEnabled()) log("info", "ai_visibility_scheduler_disabled");
+  if (!runsSchedulers || !publicStatsSchedulerEnabled()) log("info", "public_stats_scheduler_disabled");
+  log("info", "queue_worker_started", { pollMs: boundedPollMs, role: queue.role,
+    concurrency: runsExecutors ? queue.concurrency : 0, agingSeconds: queue.agingSeconds });
   try {
-    while (!queueSignal.aborted) {
-      const job = await claimJob(sql, workerId);
-      if (!job) {
-        await waitForNextPoll(queueSignal, boundedPollMs);
-        continue;
-      }
-      log("info", "job_claimed", {
-        jobId: job.id,
-        type: job.type,
-        attempt: job.attempts,
-        maxAttempts: job.max_attempts,
-      });
-      try {
-        const result = await executeScanJob(job, queueSignal);
-        await completeJob(sql, job);
-        log("info", "job_succeeded", { jobId: job.id, scanId: result.scanId });
-      } catch (error) {
-        await failJob(sql, job, error instanceof Error ? error.message : String(error));
-        log("error", "job_failed", {
-          jobId: job.id,
-          attempt: job.attempts,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    const lanes = runsExecutors
+      ? Array.from({ length: queue.concurrency }, (_, index) => runExecutorLane(
+          sql,
+          queueSignal,
+          boundedPollMs,
+          `lane-${index + 1}`,
+          queue.concurrency > 1 && index === 0 ? "interactive" : "all",
+          queue.agingSeconds,
+        ))
+      : [waitInStandby(queueSignal)];
+    await Promise.all([...lanes, scheduler, redditMonitorScheduler, aiVisibilityScheduler, publicStatsScheduler]);
   } finally {
     queueController.abort("queue worker stopping");
-    await scheduler;
+    await Promise.all([scheduler, redditMonitorScheduler, aiVisibilityScheduler, publicStatsScheduler]);
     await sql.end({ timeout: 5 });
     log("info", "queue_worker_stopped");
   }

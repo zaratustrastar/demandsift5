@@ -371,7 +371,7 @@ const opportunities: RedditOpportunity[] = [
 const lockedCounts = countLockedResults(lockedResults);
 
 const baseNavigation: NavigationSection[] = [
-  { id: "dashboard", label: "Dashboard" },
+  { id: "dashboard", label: "Overview" },
   {
     id: "opportunities",
     label: "Opportunities",
@@ -389,8 +389,8 @@ const baseNavigation: NavigationSection[] = [
   },
   {
     id: "visibility",
-    label: "Search & AI Visibility",
-    shortLabel: "Search & AI",
+    label: "AI Visibility",
+    shortLabel: "AI Visibility",
     badge: 2 + lockedCounts.visibilityOpportunities,
   },
   {
@@ -399,8 +399,9 @@ const baseNavigation: NavigationSection[] = [
     badge: opportunities.length + lockedCounts.readyReplies,
   },
   { id: "results", label: "Results" },
-  { id: "billing", label: "Billing" },
+  { id: "monitoring", label: "Monitoring config" },
   { id: "settings", label: "Settings" },
+  { id: "billing", label: "Billing" },
 ];
 
 export const redditDemandDemoData: RedditDemandDemoData = {
@@ -584,6 +585,9 @@ export const redditDemandDemoData: RedditDemandDemoData = {
       verifiedWithinDemoFixture: true,
     },
   ],
+  // Demo fixture: themes are aggregated from the fictional corpus above, so the
+  // evidence links resolve to the same fictional conversations.
+  conversationThemes: [],
   insights: [
     {
       id: "insight-ownership-before-automation",

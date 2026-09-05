@@ -32,6 +32,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
+      labels:
+        org.opencontainers.image.revision: ${RELEASE_SHA:-unknown}
     command: ["node", "scripts/background-worker.mjs", "migrate"]
     environment: *app-environment
     depends_on:
@@ -44,6 +46,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.web
+      labels:
+        org.opencontainers.image.revision: ${RELEASE_SHA:-unknown}
+        org.opencontainers.image.created: ${RELEASE_BUILT_AT:-unknown}
     restart: unless-stopped
     init: true
     env_file:
@@ -57,12 +62,21 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # Chromium's headless-render fallback (website-crawler.ts) launches with
+    # --disable-dev-shm-usage, but a too-small /dev/shm is still one of the
+    # most common causes of a silent Chromium crash in Docker. Docker's
+    # default is 64mb; give it real headroom rather than depending solely on
+    # that one flag.
+    shm_size: 512mb
     logging: *default-logging
 
   worker:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
+      labels:
+        org.opencontainers.image.revision: ${RELEASE_SHA:-unknown}
+        org.opencontainers.image.created: ${RELEASE_BUILT_AT:-unknown}
     command: ["node", "scripts/background-worker.mjs", "work"]
     restart: unless-stopped
     init: true
@@ -74,6 +88,14 @@ services:
       BACKGROUND_JOB_POLL_MS: ${BACKGROUND_JOB_POLL_MS:-2000}
       BACKGROUND_JOB_TIMEOUT_SECONDS: ${BACKGROUND_JOB_TIMEOUT_SECONDS:-900}
       BACKGROUND_JOB_STALE_SECONDS: ${BACKGROUND_JOB_STALE_SECONDS:-1200}
+      BACKGROUND_WORKER_CONCURRENCY: ${BACKGROUND_WORKER_CONCURRENCY:-1}
+      BACKGROUND_WORKER_ROLE: ${BACKGROUND_WORKER_ROLE:-combined}
+      BACKGROUND_JOB_AGING_SECONDS: ${BACKGROUND_JOB_AGING_SECONDS:-300}
+      PROVIDER_GLOBAL_CAPS: ${PROVIDER_GLOBAL_CAPS:-0}
+      AI_GLOBAL_REQUEST_CONCURRENCY: ${AI_GLOBAL_REQUEST_CONCURRENCY:-4}
+      APIFY_GLOBAL_ACTOR_CONCURRENCY: ${APIFY_GLOBAL_ACTOR_CONCURRENCY:-9}
+      PROVIDER_CAPACITY_POLL_MS: ${PROVIDER_CAPACITY_POLL_MS:-250}
+      AI_REQUEST_LEASE_SECONDS: ${AI_REQUEST_LEASE_SECONDS:-360}
       MONITOR_SCHEDULER_POLL_MS: ${MONITOR_SCHEDULER_POLL_MS:-60000}
       MONITOR_PASS_INTERVAL_HOURS: ${MONITOR_PASS_INTERVAL_HOURS:-24}
       MONITOR_CORE_INTERVAL_MINUTES: ${MONITOR_CORE_INTERVAL_MINUTES:-360}

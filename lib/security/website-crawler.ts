@@ -11,6 +11,7 @@ const DEFAULT_MAX_PAGES = 6;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_MAX_TOTAL_BYTES = 4_000_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_RENDER_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 4;
 
 const BLOCKED_HOST_SUFFIXES = [
@@ -60,8 +61,10 @@ export interface CrawlWebsiteOptions {
   maxResponseBytes?: number;
   maxTotalBytes?: number;
   timeoutMs?: number;
+  renderTimeoutMs?: number;
   userAgent?: string;
   fetchImpl?: PinnedWebsiteFetch;
+  renderImpl?: HeadlessRenderFn;
   resolver?: HostResolver;
   signal?: AbortSignal;
 }
@@ -478,11 +481,11 @@ async function fetchWithValidatedRedirects(
 }
 
 async function readLimitedText(response: Response, byteLimit: number): Promise<{ text: string; bytes: number }> {
-  const declaredLength = Number.parseInt(response.headers.get("content-length") ?? "0", 10);
-  if (Number.isFinite(declaredLength) && declaredLength > byteLimit) {
-    await response.body?.cancel("Response exceeded crawler byte limit.");
-    throw new Error(`Page exceeds the ${byteLimit}-byte response limit.`);
-  }
+  // Large marketing pages often include several megabytes of hydration data,
+  // images encoded in markup, or localization payloads after the useful public
+  // copy. Read only a bounded prefix instead of rejecting the whole page from
+  // Content-Length. The byte limit remains a hard memory/network boundary: the
+  // stream is cancelled as soon as the prefix is full.
   if (!response.body) return { text: "", bytes: 0 };
 
   const reader = response.body.getReader();
@@ -491,11 +494,16 @@ async function readLimitedText(response: Response, byteLimit: number): Promise<{
   while (true) {
     const result = await reader.read();
     if (result.done) break;
-    bytes += result.value.byteLength;
-    if (bytes > byteLimit) {
+    const remaining = byteLimit - bytes;
+    if (result.value.byteLength >= remaining) {
+      if (remaining > 0) {
+        chunks.push(result.value.slice(0, remaining));
+        bytes += remaining;
+      }
       await reader.cancel("Response exceeded crawler byte limit.");
-      throw new Error(`Page exceeds the ${byteLimit}-byte response limit.`);
+      break;
     }
+    bytes += result.value.byteLength;
     chunks.push(result.value);
   }
   const body = new Uint8Array(bytes);
@@ -642,6 +650,100 @@ function sha256(value: string): string {
 }
 
 /**
+ * A testable rendering boundary, mirroring `PinnedWebsiteFetch`. Production
+ * uses `renderWithHeadlessBrowser` below; custom implementations must not
+ * perform their own DNS resolution and must return the fully rendered HTML.
+ */
+export type HeadlessRenderFn = (
+  url: URL,
+  target: ValidatedWebsiteTarget,
+  options: { timeoutMs: number; userAgent: string },
+) => Promise<string>;
+
+/**
+ * Renders a page with a real (headless) browser so JavaScript-only sites --
+ * whose initial HTML has no readable text until a script fills it in -- can
+ * still be analyzed. This only ever runs as a fallback after the fast static
+ * fetch above already produced too little text, so ordinary server-rendered
+ * pages never pay for it.
+ *
+ * The same SSRF posture as the static fetch path is preserved here: Chromium's
+ * own DNS resolver is overridden with `--host-resolver-rules` so the already
+ * validated (pinned) address is the only one it can ever connect to for this
+ * hostname, and request interception aborts every request to any other host
+ * before Chromium can resolve or connect to it. A JS-only page cannot use this
+ * fallback to make the browser fetch anything the static crawler above
+ * couldn't already fetch itself.
+ */
+async function renderWithHeadlessBrowser(
+  url: URL,
+  target: ValidatedWebsiteTarget,
+  options: { timeoutMs: number; userAgent: string },
+): Promise<string> {
+  const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
+  if (!executablePath) {
+    throw new Error("Headless rendering is not configured on this server.");
+  }
+  const puppeteer = (await import("puppeteer-core")).default;
+
+  const bareHostname = canonicalHostname(target.url.hostname);
+  const pinnedAddress =
+    target.resolvedAddresses.find((entry) => entry.family === 4)?.address ??
+    target.resolvedAddresses[0]?.address;
+  if (!pinnedAddress) {
+    throw new Error("No validated address is available for rendering.");
+  }
+  const hostResolverRules = [
+    `MAP ${bareHostname} ${pinnedAddress}`,
+    `MAP www.${bareHostname} ${pinnedAddress}`,
+  ].join(",");
+
+  const browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      `--host-resolver-rules=${hostResolverRules}`,
+    ],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(options.userAgent);
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      let requestUrl: URL;
+      try {
+        requestUrl = new URL(request.url());
+      } catch {
+        void request.abort();
+        return;
+      }
+      const sameHost =
+        (requestUrl.protocol === "http:" || requestUrl.protocol === "https:") &&
+        equivalentWebsiteHost(requestUrl.hostname, bareHostname);
+      if (sameHost) {
+        void request.continue();
+      } else {
+        void request.abort();
+      }
+    });
+    try {
+      await page.goto(url.toString(), { waitUntil: "networkidle2", timeout: options.timeoutMs });
+    } catch {
+      // A page that never reaches network-idle (long polling, websockets,
+      // analytics beacons) usually has its visible text in the DOM already --
+      // fall through and read whatever rendered instead of failing outright.
+    }
+    return await page.content();
+  } finally {
+    await browser.close();
+  }
+}
+
+/**
  * Crawls a small set of public HTML pages on the submitted host (plus its www
  * counterpart). Redirects and every DNS answer are revalidated for each fetch,
  * then the socket is pinned to those answers so DNS rebinding cannot change the
@@ -663,7 +765,12 @@ export async function crawlWebsite(
     Math.min(options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES, 10_000_000),
   );
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 20_000));
+  const renderTimeoutMs = Math.max(
+    3_000,
+    Math.min(options.renderTimeoutMs ?? DEFAULT_RENDER_TIMEOUT_MS, 25_000),
+  );
   const fetchImpl = options.fetchImpl ?? fetchPinnedWebsiteTarget;
+  const renderImpl = options.renderImpl ?? renderWithHeadlessBrowser;
   const userAgent = options.userAgent ?? "DemandSignalBot/1.0 (website analysis; public pages only)";
   const queue: URL[] = [target.url];
   const queued = new Set([target.url.toString().replace(/\/$/, "")]);
@@ -672,9 +779,16 @@ export async function crawlWebsite(
   let totalBytes = 0;
   let canonicalUrl = target.url.toString();
 
-  while (queue.length > 0 && pages.length < maxPages && totalBytes < maxTotalBytes) {
-    const next = queue.shift();
-    if (!next) break;
+  /**
+   * Fetches and processes exactly one queued URL, mutating the shared
+   * pages/failures/totalBytes/queue/queued state above. A failure here
+   * never throws out of crawlWebsite itself -- it is recorded in
+   * `failures` and the crawl continues, exactly as before this function
+   * was pulled out of an inline loop body. Callers are responsible for
+   * respecting maxPages/maxTotalBytes before invoking this (see below);
+   * this function does not re-check them itself.
+   */
+  async function fetchOnePage(next: URL): Promise<void> {
     try {
       const { response, finalUrl } = await fetchWithValidatedRedirects(next, {
         allowedHostname: target.url.hostname,
@@ -693,11 +807,53 @@ export async function crawlWebsite(
         await response.body?.cancel("Non-HTML response is not crawled.");
         throw new Error("Skipped a non-HTML page.");
       }
+      // Best-effort, not an exact global lock: with concurrent fetches (see
+      // the worker pool below), several pages can each read this snapshot
+      // of the remaining budget before any of them has actually updated
+      // totalBytes, so the true total can overshoot maxTotalBytes by up to
+      // (concurrency - 1) page-reads in the worst case. Concurrency is kept
+      // small (3) specifically to bound that overshoot; maxPages -- the
+      // more consequential budget for downstream AI cost -- is still
+      // enforced exactly (see the `reserved` counter below).
       const remainingBytes = Math.min(maxResponseBytes, maxTotalBytes - totalBytes);
       const loaded = await readLimitedText(response, remainingBytes);
       totalBytes += loaded.bytes;
-      const extracted = extractPage(loaded.text);
-      if (extracted.text.length < 80) throw new Error("Page did not contain enough readable public text.");
+      let pageHtml = loaded.text;
+      let extracted = extractPage(pageHtml);
+      let renderDiagnostic: string | undefined;
+      if (extracted.text.length < 80) {
+        // Static HTML alone was too thin -- likely a JavaScript-only page.
+        // Try rendering it with a headless browser before giving up. Any
+        // failure here (unconfigured server, blocked navigation, browser
+        // crash) leaves the too-thin static result in place below, but the
+        // reason is kept so the eventual error is diagnosable instead of
+        // always reading identically to "no fallback was even attempted."
+        try {
+          const renderTarget = await validatePublicWebsiteUrl(finalUrl, resolver);
+          const renderedHtml = await renderImpl(finalUrl, renderTarget, {
+            timeoutMs: renderTimeoutMs,
+            userAgent,
+          });
+          const rendered = extractPage(renderedHtml);
+          if (rendered.text.length >= 80) {
+            extracted = rendered;
+            pageHtml = renderedHtml;
+          } else {
+            renderDiagnostic = `headless render produced only ${rendered.text.length} readable characters`;
+          }
+        } catch (renderError) {
+          renderDiagnostic = `headless render failed: ${
+            renderError instanceof Error ? renderError.message : "unknown error"
+          }`;
+        }
+      }
+      if (extracted.text.length < 80) {
+        throw new Error(
+          renderDiagnostic
+            ? `Page did not contain enough readable public text (${renderDiagnostic}).`
+            : "Page did not contain enough readable public text.",
+        );
+      }
       const retrievedAt = new Date().toISOString();
       pages.push({
         url: finalUrl.toString(),
@@ -707,9 +863,8 @@ export async function crawlWebsite(
         contentHash: sha256(extracted.text),
         retrievedAt,
       });
-      if (pages.length === 1) canonicalUrl = finalUrl.toString();
 
-      for (const link of extractInternalLinks(loaded.text, finalUrl, target.url.hostname)) {
+      for (const link of extractInternalLinks(pageHtml, finalUrl, target.url.hostname)) {
         const key = link.toString().replace(/\/$/, "");
         if (!queued.has(key) && queued.size < maxPages * 8) {
           queued.add(key);
@@ -723,6 +878,51 @@ export async function crawlWebsite(
       });
     }
   }
+
+  // The submitted URL is always fetched alone first, both because
+  // canonicalUrl must reflect it specifically (not whichever page a
+  // concurrent worker happens to finish first) and because every other
+  // page is only discovered by reading this one's links -- there is
+  // nothing to parallelize until it completes.
+  const first = queue.shift();
+  if (first) {
+    const beforePages = pages.length;
+    await fetchOnePage(first);
+    if (pages.length > beforePages) canonicalUrl = pages[0].url;
+  }
+
+  // Pages 2+ have no such ordering constraint -- once queued, several can
+  // be fetched at once instead of one at a time, which is where most of a
+  // multi-page crawl's wall-clock time previously went (this is the same
+  // crawlWebsite used for both a competitor's site and the primary
+  // business's own, at maxPages: 4). `reserved` tracks fetches currently
+  // in flight so pages.length can never exceed maxPages even though
+  // several workers may be racing to add to it -- a worker only dequeues
+  // a URL once it has "reserved" a slot within the budget.
+  const concurrency = Math.min(3, maxPages);
+  let reserved = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      if (pages.length + reserved >= maxPages || totalBytes >= maxTotalBytes) return;
+      const next = queue.shift();
+      if (!next) {
+        if (reserved === 0) return;
+        // Nothing queued right now, but another worker is still fetching
+        // and may discover new links shortly -- wait briefly rather than
+        // exiting early. Network fetches take orders of magnitude longer
+        // than this poll, so the added latency here is negligible.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+      reserved += 1;
+      try {
+        await fetchOnePage(next);
+      } finally {
+        reserved -= 1;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   if (pages.length === 0) {
     const detail = failures[0]?.reason ?? "No readable public HTML pages were found.";

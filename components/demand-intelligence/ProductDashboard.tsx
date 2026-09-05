@@ -2,17 +2,19 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { REDDIT_MONITOR_LIMITS } from "@/lib/intelligence/reddit-monitor-limits";
+
 import { redditDemandDemoData } from "./demo-data";
 import type {
   BusinessProfile,
-  CompetitorWeakness,
-  DemandInsight,
-  LockedResultCounts,
-  LockedStoredResult,
+  ConversationTheme,
+  NavigationSection,
   NavigationSectionId,
   PricingPlan,
   RedditDemandDemoData,
   RedditOpportunity,
+  RelevantConversation,
+  ScanEvidenceCandidate,
 } from "./types";
 
 import styles from "./ProductDashboard.module.css";
@@ -32,6 +34,82 @@ export type RedditConnectionStatus = {
   username: string | null;
   canConnect: boolean;
   requiresPaidAccess: boolean;
+};
+
+export type RedditMonitoringStatus = {
+  enabled: boolean;
+  watchTerms: Array<{
+    value: string;
+    kind: "brand" | "competitor" | "keyword";
+    active: boolean;
+  }>;
+  lastSuccessfulMonitorAt: string | null;
+  nextRunAt: string;
+};
+
+export type AiVisibilityStatus = {
+  enabled: boolean;
+  lastSuccessfulScanAt: string | null;
+  nextRunAt: string;
+};
+
+/**
+ * One daily monitoring run, for the "recent runs" results list -- a plain
+ * client-side mirror of the fields of lib/server/contracts.ts's
+ * RedditMonitorRunRecord actually needed here, not an import of the server
+ * type itself (this is a "use client" component; see AiVisibilityStatus
+ * above for the same pattern already in use in this file).
+ */
+export type RedditMonitorRunSummary = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  createdAt: string;
+  /** Set once the run's own scan finishes -- lets "View results" jump straight into that scan's report. */
+  scanId: string | null;
+  fetched: number;
+  normalized: number;
+  unseen: number;
+  relevant: number;
+  opportunities: number;
+  error: string | null;
+};
+
+export type AiVisibilityProvider = "chatgpt" | "gemini" | "perplexity";
+
+export type AiVisibilityCitationSummary = {
+  url: string;
+  title: string | null;
+  domain: string;
+};
+
+export type AiVisibilityAnswerSummary = {
+  provider: AiVisibilityProvider;
+  question: string;
+  answerText: string;
+  brandMentioned: boolean;
+  brandRecommended: boolean;
+  citations: AiVisibilityCitationSummary[];
+};
+
+export type AiVisibilityMetricsSummary = {
+  totalAnswers: number;
+  totalMentions: number;
+  mentionRate: number;
+  totalRecommendations: number;
+  recommendationRate: number;
+};
+
+/** One weekly AI visibility scan, for the results view -- see RedditMonitorRunSummary's doc comment for why this is hand-rolled rather than imported. */
+export type AiVisibilityScanSummary = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  createdAt: string;
+  questions: string[];
+  answers: AiVisibilityAnswerSummary[];
+  metrics: AiVisibilityMetricsSummary | null;
+  /** Per-provider Actor failure reason, e.g. an Apify approval requirement -- see providerErrors on AiVisibilityScanRecord. */
+  providerErrors: Record<AiVisibilityProvider, string | null>;
+  error: string | null;
 };
 
 export interface ProductDashboardProps {
@@ -54,41 +132,540 @@ export interface ProductDashboardProps {
   redditConnection?: RedditConnectionStatus;
   onConnectReddit?: () => void;
   onDisconnectReddit?: () => Promise<void> | void;
+  monitoring?: RedditMonitoringStatus | null;
+  onUpdateMonitoring?: (
+    enabled: boolean,
+    watchTerms: RedditMonitoringStatus["watchTerms"],
+  ) => Promise<boolean>;
+  /** Corrects the "what you sell" summary every qualification judgement and
+   * reply draft is grounded in -- see PATCH /api/scans/[scanId]/business-profile. */
+  onUpdateBusinessSummary?: (summary: string) => Promise<boolean>;
+  /** Recent daily monitoring runs, most recent first -- the "where will I see results" answer for Reddit monitoring. */
+  monitorRuns?: RedditMonitorRunSummary[] | null;
+  /** Loads a completed monitoring run's own scan into view, in place, without leaving the dashboard. */
+  onViewMonitorRun?: (scanId: string) => Promise<void> | void;
+  aiVisibility?: AiVisibilityStatus | null;
+  onUpdateAiVisibility?: (enabled: boolean) => Promise<boolean>;
+  /** Recent weekly AI visibility scans, most recent first -- the "where will I see results" answer for AI visibility tracking. */
+  visibilityScans?: AiVisibilityScanSummary[] | null;
+  /**
+   * Drafts a first reply, on demand, for a relevant conversation (or raw
+   * carousel candidate) that does not have one yet -- returns the new
+   * draft content, or null on failure (the caller surfaces the error
+   * message itself, the same way onRegenerateReply does).
+   */
+  onCreateReply?: (conversationId: string, externalId: string) => Promise<string | null>;
   onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
 }
 
+function runStatusLabel(status: "queued" | "running" | "succeeded" | "failed"): string {
+  if (status === "succeeded") return "Succeeded";
+  if (status === "failed") return "Failed";
+  if (status === "running") return "Running";
+  return "Queued";
+}
+
+function RunStatusBadge({ status }: { status: "queued" | "running" | "succeeded" | "failed" }) {
+  const tone =
+    status === "succeeded" ? styles.resultsStatusOk : status === "failed" ? styles.resultsStatusFail : styles.resultsStatusPending;
+  return <span className={`${styles.resultsStatus} ${tone}`}>{runStatusLabel(status)}</span>;
+}
+
+function aiVisibilityProviderLabel(provider: AiVisibilityProvider): string {
+  if (provider === "chatgpt") return "ChatGPT";
+  if (provider === "gemini") return "Gemini";
+  return "Perplexity";
+}
+
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g;
+
+/** Renders plain text with any bare https:// URLs turned into clickable links -- used for Apify's own error messages, which sometimes end with a one-time approval URL. */
+function LinkifiedText({ text }: { text: string }) {
+  const parts = text.split(URL_PATTERN);
+  return (
+    <>
+      {parts.map((part, index) =>
+        URL_PATTERN.test(part) ? (
+          <a key={index} href={part} target="_blank" rel="noreferrer noopener">
+            {part}
+          </a>
+        ) : (
+          <span key={index}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * AI visibility answers come back as raw markdown-ish text straight from
+ * each provider (bold via **, GitHub-style tables via | cells |, numbered
+ * citation markers like [8][15]) -- rendered as a single <p> with
+ * white-space: pre-wrap, that reads as a wall of asterisks and pipes
+ * instead of the structured answer it actually is. No markdown library is
+ * added for this (the codebase has none, and every other block of AI text
+ * in the app is short enough not to need one); this is a small,
+ * dependency-free formatter for exactly the 2 constructs actually observed
+ * in real answers (tables, bold) plus citation markers, not a general
+ * markdown parser.
+ */
+type AnswerBlock = { type: "paragraph"; text: string } | { type: "table"; rows: string[][] };
+
+function isTableSeparatorRow(line: string): boolean {
+  return /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?$/.test(line);
+}
+
+function parseAnswerBlocks(text: string): AnswerBlock[] {
+  const lines = text.split(/\r?\n/);
+  const blocks: AnswerBlock[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (line.trim().startsWith("|")) {
+      const tableLines: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith("|")) {
+        tableLines.push(lines[index].trim());
+        index += 1;
+      }
+      const rows = tableLines
+        .filter((tableLine) => !isTableSeparatorRow(tableLine))
+        .map((tableLine) => tableLine.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()));
+      if (rows.length > 0) blocks.push({ type: "table", rows });
+      continue;
+    }
+    const paragraphLines: string[] = [];
+    while (index < lines.length && lines[index].trim() && !lines[index].trim().startsWith("|")) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+  }
+  return blocks;
+}
+
+const INLINE_MARKDOWN_PATTERN = /\*\*(.+?)\*\*|\[(\d+)\]/g;
+
+function renderInlineAnswerMarkdown(text: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let matchIndex = 0;
+  for (const match of text.matchAll(INLINE_MARKDOWN_PATTERN)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) nodes.push(text.slice(lastIndex, start));
+    if (match[1] !== undefined) {
+      nodes.push(<strong key={`${keyPrefix}-b-${matchIndex}`}>{match[1]}</strong>);
+    } else if (match[2] !== undefined) {
+      nodes.push(
+        <sup key={`${keyPrefix}-c-${matchIndex}`} className={styles.answerCitationMark}>
+          [{match[2]}]
+        </sup>,
+      );
+    }
+    lastIndex = start + match[0].length;
+    matchIndex += 1;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+function FormattedAnswerText({ text }: { text: string }) {
+  const blocks = parseAnswerBlocks(text);
+  return (
+    <div className={styles.answerBody}>
+      {blocks.map((block, blockIndex) =>
+        block.type === "table" ? (
+          <table key={blockIndex} className={styles.answerTable}>
+            <thead>
+              <tr>
+                {block.rows[0]?.map((cell, cellIndex) => (
+                  <th key={cellIndex}>{renderInlineAnswerMarkdown(cell, `${blockIndex}-h-${cellIndex}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.slice(1).map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={cellIndex}>{renderInlineAnswerMarkdown(cell, `${blockIndex}-${rowIndex}-${cellIndex}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p key={blockIndex}>{renderInlineAnswerMarkdown(block.text, `${blockIndex}`)}</p>
+        ),
+      )}
+    </div>
+  );
+}
+
+/**
+ * Corrects the one free-text sentence every qualification judgement and
+ * reply draft is grounded in (see lib/server/presenter.ts's
+ * applyBusinessSummaryOverride). This is the summary itself, not the
+ * derived search terms -- those are already separately editable via the
+ * watch-terms textarea below.
+ */
+function BusinessSummaryEditor({
+  summary,
+  onUpdate,
+}: {
+  summary: string;
+  onUpdate?: (summary: string) => Promise<boolean>;
+}) {
+  const [value, setValue] = useState(summary);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const dirty = value.trim() !== summary.trim();
+
+  const save = async () => {
+    if (!onUpdate || !value.trim() || saving) return;
+    setSaving(true);
+    try {
+      const ok = await onUpdate(value.trim());
+      if (ok) setSavedAt(Date.now());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={`${styles.card} ${styles.monitoringCard}`}>
+      <div>
+        <span className={styles.eyebrow}>What you sell</span>
+        <h2>Correct your business summary</h2>
+        <p>
+          Every relevance judgement and drafted reply is grounded in this one sentence. If it
+          missed something about what you actually sell or who it&apos;s for, fix it here rather
+          than starting a new scan.
+        </p>
+      </div>
+      <label className={styles.monitoringTerms}>
+        <span>One-line summary</span>
+        <textarea
+          value={value}
+          rows={3}
+          disabled={saving}
+          onChange={(event) => setValue(event.currentTarget.value)}
+        />
+      </label>
+      <div className={styles.monitoringFooter}>
+        <small>
+          {savedAt && !dirty
+            ? "Saved. New matches and regenerated replies will use this."
+            : "Only applies going forward -- it does not rewrite anything already found."}
+        </small>
+        <button
+          className={styles.primaryButton}
+          type="button"
+          disabled={saving || !dirty || !value.trim()}
+          onClick={() => void save()}
+        >
+          {saving ? "Saving…" : "Save summary"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function RedditMonitoringPanel({
+  monitoring,
+  onUpdate,
+  runs,
+  onViewRun,
+}: {
+  monitoring: RedditMonitoringStatus | null;
+  onUpdate?: ProductDashboardProps["onUpdateMonitoring"];
+  runs?: RedditMonitorRunSummary[] | null;
+  onViewRun?: ProductDashboardProps["onViewMonitorRun"];
+}) {
+  const [terms, setTerms] = useState(() =>
+    monitoring?.watchTerms
+      .filter((term) => term.active)
+      .slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms)
+      .map((term) => term.value)
+      .join("\n") ?? "",
+  );
+  const [saving, setSaving] = useState(false);
+  const [viewingRunId, setViewingRunId] = useState<string | null>(null);
+  if (!monitoring) return null;
+
+  const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => [...new Set(
+    terms.split(/\r?\n|,/u).map((value) => value.replace(/\s+/gu, " ").trim()).filter(Boolean),
+  )].slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms).map((value) => {
+    const existing = monitoring.watchTerms.find(
+      (term) => term.value.toLocaleLowerCase("en-US") === value.toLocaleLowerCase("en-US"),
+    );
+    return { value, kind: existing?.kind ?? "keyword", active: true };
+  });
+
+  const save = async (enabled: boolean) => {
+    if (!onUpdate) return;
+    setSaving(true);
+    try {
+      await onUpdate(enabled, parsedTerms());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const viewRun = async (scanId: string) => {
+    if (!onViewRun || viewingRunId) return;
+    setViewingRunId(scanId);
+    try {
+      await onViewRun(scanId);
+    } finally {
+      setViewingRunId((current) => (current === scanId ? null : current));
+    }
+  };
+
+  return (
+    <section className={`${styles.card} ${styles.monitoringCard}`}>
+      <div>
+        <span className={styles.eyebrow}>Daily Reddit monitoring</span>
+        <h2>Watch new posts and comments once per day</h2>
+        <p>
+          All active terms are sent together in one daily search. AI checks every unseen match
+          for business relevance. Relevant conversations are kept even when they are not leads;
+          deeper qualification is reserved for the strongest candidates.
+        </p>
+      </div>
+      <label className={styles.monitoringToggle}>
+        <input
+          type="checkbox"
+          checked={monitoring.enabled}
+          disabled={saving}
+          onChange={(event) => void save(event.currentTarget.checked)}
+        />
+        <span>{monitoring.enabled ? "Monitoring on" : "Monitoring off"}</span>
+      </label>
+      <label className={styles.monitoringTerms}>
+        <span>Brand, competitor and keyword watch terms</span>
+        <small>
+          Up to {REDDIT_MONITOR_LIMITS.maxWatchTerms} terms and {REDDIT_MONITOR_LIMITS.maxResultsPerRun} raw results per daily run.
+        </small>
+        <textarea
+          value={terms}
+          rows={Math.min(8, Math.max(4, terms.split("\n").length))}
+          disabled={saving}
+          onChange={(event) => setTerms(event.currentTarget.value)}
+        />
+      </label>
+      <div className={styles.monitoringFooter}>
+        <small>
+          {monitoring.lastSuccessfulMonitorAt
+            ? `Last successful check ${relativeTime(monitoring.lastSuccessfulMonitorAt)}`
+            : "No daily check has completed yet."}
+        </small>
+        <button className={styles.primaryButton} type="button" disabled={saving} onClick={() => void save(monitoring.enabled)}>
+          {saving ? "Saving…" : "Save watch terms"}
+        </button>
+      </div>
+      <div className={styles.resultsBlock}>
+        <h3>Recent runs</h3>
+        {!runs || runs.length === 0 ? (
+          <p className={styles.resultsEmpty}>
+            No runs yet -- once monitoring finds unseen matches, each daily run will appear here with what it found.
+          </p>
+        ) : (
+          <ul className={styles.resultsList}>
+            {runs.map((run) => (
+              <li key={run.id} className={styles.resultsRow}>
+                <div className={styles.resultsRowHead}>
+                  <RunStatusBadge status={run.status} />
+                  <span>{relativeTime(run.createdAt)}</span>
+                </div>
+                <p className={styles.resultsMeta}>
+                  {run.fetched} fetched · {run.normalized} normalized · {run.unseen} unseen · {run.relevant} relevant conversation
+                  {run.relevant === 1 ? "" : "s"} · {run.opportunities} lead{run.opportunities === 1 ? "" : "s"}
+                </p>
+                {run.error && (
+                  <p className={styles.resultsError}>
+                    <LinkifiedText text={run.error} />
+                  </p>
+                )}
+                {run.scanId && onViewRun && (
+                  <button
+                    className={styles.textButton}
+                    type="button"
+                    disabled={viewingRunId === run.scanId}
+                    onClick={() => void viewRun(run.scanId as string)}
+                  >
+                    {viewingRunId === run.scanId ? "Loading…" : "View results"} <Icon name="arrow" size={12} />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AiVisibilityPanel({
+  status,
+  onUpdate,
+  scans,
+}: {
+  status: AiVisibilityStatus | null;
+  onUpdate?: ProductDashboardProps["onUpdateAiVisibility"];
+  scans?: AiVisibilityScanSummary[] | null;
+}) {
+  const [saving, setSaving] = useState(false);
+  if (!status) return null;
+
+  const save = async (enabled: boolean) => {
+    if (!onUpdate) return;
+    setSaving(true);
+    try {
+      await onUpdate(enabled);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const latest = scans?.[0] ?? null;
+  const providerErrors = latest
+    ? (Object.entries(latest.providerErrors) as Array<[AiVisibilityProvider, string | null]>).filter(
+        ([, message]) => Boolean(message),
+      )
+    : [];
+
+  return (
+    <section className={`${styles.card} ${styles.monitoringCard}`}>
+      <div>
+        <span className={styles.eyebrow}>AI visibility tracking</span>
+        <h2>See how ChatGPT, Gemini and Perplexity answer about you</h2>
+        <p>
+          Once a week, the same questions are put to ChatGPT, Gemini and Perplexity to check whether
+          your business is mentioned or recommended, and which sources they cite.
+        </p>
+      </div>
+      <label className={styles.monitoringToggle}>
+        <input
+          type="checkbox"
+          checked={status.enabled}
+          disabled={saving}
+          onChange={(event) => void save(event.currentTarget.checked)}
+        />
+        <span>{status.enabled ? "Tracking on" : "Tracking off"}</span>
+      </label>
+      <div className={styles.monitoringFooter}>
+        <small>
+          {status.lastSuccessfulScanAt
+            ? `Last successful check ${relativeTime(status.lastSuccessfulScanAt)}`
+            : "No weekly check has completed yet."}
+        </small>
+      </div>
+      <div className={styles.resultsBlock}>
+        <h3>Latest results</h3>
+        {!latest ? (
+          <p className={styles.resultsEmpty}>
+            No weekly check has completed yet. Once one runs, ChatGPT, Gemini and Perplexity&rsquo;s answers will appear here.
+          </p>
+        ) : (
+          <>
+            <div className={styles.resultsRowHead}>
+              <RunStatusBadge status={latest.status} />
+              <span>{relativeTime(latest.createdAt)}</span>
+            </div>
+            {latest.metrics && (
+              <p className={styles.resultsMeta}>
+                Mentioned in {latest.metrics.totalMentions} of {latest.metrics.totalAnswers} answers (
+                {Math.round(latest.metrics.mentionRate * 100)}%) · Recommended {latest.metrics.totalRecommendations} time
+                {latest.metrics.totalRecommendations === 1 ? "" : "s"}
+              </p>
+            )}
+            {latest.error && (
+              <p className={styles.resultsError}>
+                <LinkifiedText text={latest.error} />
+              </p>
+            )}
+            {providerErrors.map(([provider, message]) => (
+              <p key={provider} className={styles.resultsError}>
+                <strong>{aiVisibilityProviderLabel(provider)}: </strong>
+                <LinkifiedText text={message as string} />
+              </p>
+            ))}
+            {latest.answers.length > 0 && (
+              <ul className={styles.resultsList}>
+                {latest.answers.map((answer, index) => (
+                  <li key={`${answer.provider}-${index}`} className={styles.resultsRow}>
+                    <div className={styles.resultsRowHead}>
+                      <span className={styles.resultsProvider}>{aiVisibilityProviderLabel(answer.provider)}</span>
+                      {answer.brandMentioned && (
+                        <span className={`${styles.resultsStatus} ${styles.resultsStatusOk}`}>
+                          {answer.brandRecommended ? "Recommended" : "Mentioned"}
+                        </span>
+                      )}
+                    </div>
+                    <p className={styles.resultsMeta}>{answer.question}</p>
+                    {answer.answerText ? (
+                      <details className={styles.resultsAnswer}>
+                        <summary>View answer{answer.citations.length > 0 ? ` (${answer.citations.length} source${answer.citations.length === 1 ? "" : "s"})` : ""}</summary>
+                        <FormattedAnswerText text={answer.answerText} />
+                        {answer.citations.length > 0 && (
+                          <ul className={styles.resultsCitations}>
+                            {answer.citations.map((citation) => (
+                              <li key={citation.url}>
+                                <a href={citation.url} target="_blank" rel="noreferrer noopener">
+                                  {citation.title || citation.domain}
+                                </a>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </details>
+                    ) : (
+                      <p className={styles.resultsEmpty}>No answer was returned for this question.</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 type IconName =
-  | NavigationSectionId
   | "arrow"
+  | "arrowLeft"
   | "check"
   | "copy"
   | "edit"
   | "external"
-  | "lock"
   | "logo"
   | "refresh"
-  | "sparkles";
+  | "star";
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
-  const glyphs: Record<IconName, string> = {
-    dashboard: "▦",
-    opportunities: "◈",
-    insights: "↗",
-    competitors: "△",
-    visibility: "◎",
-    replies: "◌",
-    results: "⌁",
-    billing: "▭",
-    settings: "⚙",
-    arrow: "→",
-    check: "✓",
-    copy: "⧉",
-    edit: "✎",
-    external: "↗",
-    lock: "▣",
-    logo: "✓",
-    refresh: "↻",
-    sparkles: "✦",
+  if (name === "logo") {
+    return (
+      <img
+        src="/logos/scooptr-mark.png"
+        alt=""
+        style={{ height: size, width: "auto", display: "inline-block", flexShrink: 0 }}
+      />
+    );
+  }
+  const glyphs: Record<Exclude<IconName, "logo">, string> = {
+    arrow: "\u2192",
+    arrowLeft: "\u2190",
+    check: "\u2713",
+    copy: "\u29c9",
+    edit: "\u270e",
+    external: "\u2197",
+    refresh: "\u21bb",
+    star: "\u2605",
   };
 
   return (
@@ -100,15 +677,6 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
       {glyphs[name]}
     </span>
   );
-}
-
-function formatPrice(plan: PricingPlan) {
-  if (plan.priceInCents === 0) return "Free";
-  return `$${plan.priceInCents / 100}`;
-}
-
-function intentLabel(intent: RedditOpportunity["classification"]["buyerIntent"]) {
-  return intent === "high" ? "High buyer intent" : `${intent[0].toUpperCase()}${intent.slice(1)} intent`;
 }
 
 function potentialIntentLabel(intent: RedditOpportunity["potentialCustomerIntent"]) {
@@ -167,12 +735,6 @@ function TrackedSection({
   }, [event, onView]);
 
   return <div ref={target}>{children}</div>;
-}
-
-function accessLabel(accessLevel: AccessLevel) {
-  if (accessLevel === "core") return "Core plan";
-  if (accessLevel === "pass") return "7-day pass";
-  return "Free scan";
 }
 
 async function copyBrowserText(value: string): Promise<boolean> {
@@ -299,26 +861,6 @@ export function BusinessProfilePanel({
   );
 }
 
-function MetricCard({
-  label,
-  value,
-  note,
-  tone = "neutral",
-}: {
-  label: string;
-  value: number | string;
-  note: string;
-  tone?: "neutral" | "mint" | "violet" | "amber";
-}) {
-  return (
-    <article className={`${styles.metricCard} ${styles[`metric_${tone}`]}`}>
-      <span className={styles.metricLabel}>{label}</span>
-      <strong>{value}</strong>
-      <span className={styles.metricNote}>{note}</span>
-    </article>
-  );
-}
-
 export function OpportunityCard({
   opportunity,
   onOpenReply,
@@ -406,259 +948,268 @@ export function OpportunityCard({
   );
 }
 
-export function DemandInsightCard({ insight }: { insight: DemandInsight }) {
+function intelligenceLabel(value: string): string {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+export function RelevantConversationCard({
+  conversation,
+}: {
+  conversation: RelevantConversation;
+}) {
+  const [showReply, setShowReply] = useState(false);
+  const signalLabels = [...new Set([
+    ...conversation.demandSignals,
+    ...conversation.tags,
+  ])].slice(0, 5);
+  const hasReply = Boolean(conversation.reply?.draft.trim());
+
   return (
-    <article className={styles.insightCard}>
-      <div className={styles.insightIcon}>
-        <Icon name="insights" size={19} />
-      </div>
-      <div className={styles.insightBody}>
-        <div className={styles.sectionHeadingRow}>
+    <article className={styles.opportunityCard}>
+      <div className={styles.opportunityTopline}>
+        <div className={styles.sourceIdentity}>
+          <span className={styles.redditMark}>r/</span>
           <div>
-            <span className={styles.eyebrow}>{insight.eyebrow}</span>
-            <h3>{insight.title}</h3>
+            <strong>{conversation.authorLabel.replace(/^u\//i, "")}</strong>
+            <span>
+              {relativeTime(conversation.capturedAt)} · {conversation.subreddit} · Public conversation
+            </span>
           </div>
-          <span className={styles.confidencePill}>
-            {insight.signalStrength} signal
-          </span>
         </div>
-        <p className={styles.cardSummary}>{insight.summary}</p>
-        <div className={styles.evidenceGrid}>
-          {insight.evidence.map((evidence) => (
-            <blockquote key={evidence.provenanceId}>
-              <span>{evidence.sourceLabel}</span>
-              <p>{evidence.quote}</p>
-              <cite>{evidence.sourceLabel}</cite>
-            </blockquote>
+        <span className={`${styles.intentPill} ${styles.intentMedium}`}>
+          Research signal — not a lead
+        </span>
+      </div>
+
+      <h3>{conversation.title}</h3>
+      <div className={styles.mockExcerpt}>
+        <span>Why it matters</span>
+        <p>{conversation.summary}</p>
+      </div>
+      {signalLabels.length > 0 && (
+        <div className={styles.opportunityMeta}>
+          {signalLabels.map((signal) => (
+            <span key={signal}>{intelligenceLabel(signal)}</span>
           ))}
+          {conversation.competitorName && (
+            <span>Competitor: {conversation.competitorName}</span>
+          )}
         </div>
-        <div className={styles.actionStrip}>
-          <Icon name="arrow" size={15} />
+      )}
+      {hasReply && showReply && (
+        <div className={styles.mockExcerpt}>
+          <span>Suggested reply</span>
+          <p>{conversation.reply?.draft}</p>
+        </div>
+      )}
+      <div className={styles.opportunityAction}>
+        <div>
+          <span className={styles.fieldLabel}>Recommended use</span>
           <p>
-            <strong>What to do:</strong> {insight.recommendedAction}
+            {hasReply
+              ? "Use this source to understand demand, objections or alternatives. It is not counted as a potential customer, but a reply-suitable draft is available below."
+              : "Use this source to understand demand, objections or alternatives. It is not counted as a potential customer and has no generated reply."}
           </p>
         </div>
+        <div className={styles.opportunityButtons}>
+          {conversation.permalink && !conversation.isMock && (
+            <a
+              className={styles.secondaryButton}
+              href={conversation.permalink}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              View Reddit conversation <Icon name="external" size={14} />
+            </a>
+          )}
+          {hasReply && (
+            <button
+              className={styles.secondaryButton}
+              type="button"
+              onClick={() => setShowReply((value) => !value)}
+            >
+              {showReply ? "Hide suggested reply" : "Suggested reply ready"} <Icon name="arrow" size={15} />
+            </button>
+          )}
+        </div>
       </div>
     </article>
   );
 }
 
-export function CompetitorWeaknessCard({
-  weakness,
+/**
+ * The carousel's single-card presentation of a RelevantConversation --
+ * mirrors CarouselOpportunityCard's topline (reliability badge, "Most
+ * reliable" star) so a relevant-but-not-lead conversation reads as one more
+ * card in the same swipeable browser, not a visually distinct fallback.
+ * Actions stay conversation's own (a static pre-drafted reply revealed
+ * in-card), not the full generate/edit/publish flow opportunities get.
+ */
+function CarouselRelevantCard({
+  conversation,
+  isRevealed,
+  onToggleReply,
+  createdDraft,
+  isCreatingReply,
+  onCreateReply,
 }: {
-  weakness: CompetitorWeakness;
+  conversation: RelevantConversation;
+  isRevealed: boolean;
+  onToggleReply: () => void;
+  /** A reply drafted on demand this session via "Create reply" -- kept in
+   * the parent's local state rather than the report, since it exists purely
+   * client-side until the user copies or publishes it. */
+  createdDraft?: string;
+  isCreatingReply: boolean;
+  onCreateReply: () => void;
 }) {
-  const evidence = weakness.evidence[0];
-  if (!weakness.verified || !weakness.competitorName || !evidence) {
-    return (
-      <article className={`${styles.card} ${styles.competitorCard}`}>
-        <div className={styles.competitorBadge}>
-          <Icon name="competitors" size={18} />
-          No verified competitor signal
-        </div>
-        <h3>No verified competitor weakness in this scan</h3>
-        <p>
-          No qualified conversation contained a source-backed competitor complaint
-          or comparison, so Threadline has not inferred one.
-        </p>
-        <div className={styles.actionStrip}>
-          <Icon name="check" size={15} />
-          <p>Keep monitoring for an explicit comparison or complaint.</p>
-        </div>
-        <p className={styles.provenanceFootnote}>
-          No competitor identity, weakness, count or evidence is shown without a
-          qualified source.
-        </p>
-      </article>
-    );
-  }
+  const signalLabels = [...new Set([
+    ...conversation.demandSignals,
+    ...conversation.tags,
+  ])].slice(0, 5);
+  const draft = conversation.reply?.draft ?? createdDraft;
+  const hasReply = Boolean(draft?.trim());
 
   return (
-    <article className={`${styles.card} ${styles.competitorCard}`}>
-      <div className={styles.competitorBadge}>
-        <Icon name="competitors" size={18} />
-        Competitor opening
-      </div>
-      <h3>{weakness.headline}</h3>
-      <p>{weakness.summary}</p>
-      <blockquote className={styles.competitorQuote}>
-        <span>
-          {weakness.competitorIsFictionalDemo
-            ? "Mock conversation signal"
-            : "Public conversation signal"}
-        </span>
-        {evidence.quote}
-        <cite>{evidence.sourceLabel}</cite>
-      </blockquote>
-      <div className={styles.actionStrip}>
-        <Icon name="arrow" size={15} />
-        <p>
-          <strong>Opportunity:</strong> {weakness.recommendedAction}
-        </p>
-      </div>
-      <p className={styles.provenanceFootnote}>
-        {weakness.competitorIsFictionalDemo
-          ? `${weakness.competitorName} appears only in labeled mock-provider evidence. This is one directional signal, not a broad market claim.`
-          : "This is one source-backed directional signal, not a claim about broad market sentiment."}
-      </p>
-    </article>
-  );
-}
-
-export function LockedResultsPanel({
-  counts,
-  onUnlock,
-  context = "scan",
-}: {
-  counts: LockedResultCounts;
-  onUnlock?: () => void;
-  context?: "scan" | "section";
-}) {
-  const leadResult = counts.opportunities
-    ? { count: counts.opportunities, label: "provider opportunities" }
-    : counts.insights
-      ? { count: counts.insights, label: "demand insights" }
-      : counts.competitorSignals
-        ? { count: counts.competitorSignals, label: "competitor signals" }
-        : {
-            count: counts.visibilityOpportunities,
-            label: "visibility opportunities",
-          };
-  const rows = [
-    {
-      label: "Qualified opportunities",
-      count: counts.opportunities,
-      width: "84%",
-    },
-    { label: "Demand insights", count: counts.insights, width: "68%" },
-    {
-      label: "Competitor signals",
-      count: counts.competitorSignals,
-      width: "76%",
-    },
-    {
-      label: "Search & AI Visibility Opportunities",
-      count: counts.visibilityOpportunities,
-      width: "61%",
-    },
-  ].filter((row) => row.count > 0);
-
-  return (
-    <section className={styles.lockedPanel}>
-      <div className={styles.lockedGlow} />
-      <div className={styles.lockedHeader}>
-        <span className={styles.lockIcon}>
-          <Icon name="lock" size={17} />
-        </span>
-        <div>
-          <span className={styles.eyebrow}>
-            {context === "scan" ? "Your scan found more" : "More stored findings"}
-          </span>
-          <h3>
-            {leadResult.count} additional {leadResult.label} are already stored
-          </h3>
-        </div>
-      </div>
-      <p className={styles.lockedIntro}>
-        These counts come directly from stored provider records. Details stay
-        blurred in the free scan; mock-provider records remain clearly labeled
-        and do not represent live Reddit data.
-      </p>
-      <div className={styles.blurredList}>
-        {rows.map((row) => (
-          <div key={row.label} className={styles.blurredRow}>
-            <span className={styles.blurredIcon} />
-            <div>
-              <span style={{ width: row.width }} />
-              <small>{row.label}</small>
-            </div>
-            <strong>+{row.count}</strong>
+    <article className={styles.opportunityCard}>
+      <div className={styles.opportunityTopline}>
+        <div className={styles.sourceIdentity}>
+          <span className={styles.redditMark}>r/</span>
+          <div>
+            <strong>{conversation.authorLabel.replace(/^u\//i, "")}</strong>
+            <span>
+              {relativeTime(conversation.capturedAt)} &middot; {conversation.subreddit} &middot; Public conversation
+            </span>
           </div>
-        ))}
+        </div>
       </div>
-      <div className={styles.lockedFooter}>
-        <p>
-          Plus <strong>{counts.readyReplies} additional ready replies</strong> and
-          seven days of monitoring with the Full Access Pass.
-        </p>
-        {onUnlock && (
-          <button className={styles.primaryButton} type="button" onClick={onUnlock}>
-            Unlock for $12 <Icon name="arrow" size={15} />
+
+      <h3>{conversation.title}</h3>
+      <div className={styles.mockExcerpt}>
+        <span>Why it matters</span>
+        <p>{conversation.summary}</p>
+      </div>
+      {signalLabels.length > 0 && (
+        <div className={styles.opportunityMeta}>
+          {signalLabels.map((signal) => (
+            <span key={signal}>{intelligenceLabel(signal)}</span>
+          ))}
+          {conversation.competitorName && (
+            <span>Competitor: {conversation.competitorName}</span>
+          )}
+        </div>
+      )}
+      {hasReply && isRevealed && (
+        <div className={styles.mockExcerpt}>
+          <span>Suggested reply</span>
+          <p>{draft}</p>
+        </div>
+      )}
+
+      <div className={styles.carouselActions}>
+        {hasReply ? (
+          <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
+            <Icon name="refresh" size={14} />
+            {isRevealed ? "Hide suggested reply" : "Suggested reply ready"}
+          </button>
+        ) : (
+          <button
+            className={styles.primaryButton}
+            type="button"
+            disabled={isCreatingReply}
+            onClick={onCreateReply}
+          >
+            <Icon name="refresh" size={14} />
+            {isCreatingReply ? "Creating reply…" : "Create reply"}
           </button>
         )}
+        {conversation.permalink && !conversation.isMock && (
+          <a
+            className={styles.secondaryButton}
+            href={conversation.permalink}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            View Reddit conversation <Icon name="external" size={14} />
+          </a>
+        )}
       </div>
-    </section>
+    </article>
   );
 }
 
-function MarketScanLockedPanel({
-  total,
-  visible,
-  records,
-  counts,
-  onUnlock,
+/**
+ * A recurring struggle or request, with its supporting conversations behind a
+ * "Show evidence" toggle.
+ *
+ * Every aggregated count in the report has to be inspectable: the number shown
+ * is the number of conversations listed, so a reader can always check the claim
+ * rather than trust it.
+ */
+function ThemeSection({
+  kind,
+  eyebrow,
+  heading,
+  themes,
 }: {
-  total: number;
-  visible: number;
-  records: LockedStoredResult[];
-  counts: LockedResultCounts;
-  onUnlock?: () => void;
+  kind: "struggle" | "request";
+  eyebrow: string;
+  heading: string;
+  themes: ConversationTheme[];
 }) {
-  const additional = Math.max(0, total - visible);
-  const proofRows = [
-    additional > 0 ? `+${additional} potential customer opportunities` : "",
-    counts.readyReplies > 0 ? `+${counts.readyReplies} suggested replies` : "",
-    counts.competitorSignals > 0 ? `+${counts.competitorSignals} competitor weaknesses` : "",
-    counts.insights > 0 ? `+${counts.insights} recurring customer problems` : "",
-  ].filter(Boolean);
+  const [openThemeId, setOpenThemeId] = useState<string | null>(null);
+  const visible = (themes ?? []).filter((theme) => theme.kind === kind);
+  if (visible.length === 0) return null;
 
   return (
-    <section className={`${styles.lockedPanel} ${styles.marketLockedPanel}`}>
-      <div className={styles.lockedGlow} />
-      <div className={styles.marketLockedHeader}>
+    <section className={styles.dashboardSection}>
+      <div className={styles.sectionHeadingRow}>
         <div>
-          <span className={styles.eyebrow}>The rest of your scan is ready</span>
-          <h3>
-            {total > 0
-              ? <>You&apos;ve seen {visible} of {total} potential customer opportunities.</>
-              : "More source-backed Market Scan findings are ready."}
-          </h3>
-          <p>These previews correspond to real stored records; their identifying details remain locked.</p>
+          <span className={styles.eyebrow}>{eyebrow}</span>
+          <h2>{heading}</h2>
         </div>
-        <span className={styles.lockIcon}><Icon name="lock" size={17} /></span>
       </div>
-      {records.length > 0 && (
-        <div className={styles.lockedOpportunityGrid} aria-label="Locked stored opportunity previews">
-          {records.slice(0, 3).map((record) => (
-            <article className={styles.lockedOpportunityCard} key={record.id}>
-              <div>
-                <span>{potentialIntentLabel(record.potentialCustomerIntent)}</span>
-                <small>{relativeTime(record.capturedAt)} · {record.subreddit} · {record.conversationType}</small>
+      <div className={styles.insightColumn}>
+        {visible.map((theme) => {
+          const open = openThemeId === theme.id;
+          return (
+            <article className={styles.themeCard} key={theme.id}>
+              <div className={styles.themeHead}>
+                <h3>{theme.label}</h3>
+                <span className={styles.themeCount}>
+                  {theme.conversationCount} conversation
+                  {theme.conversationCount === 1 ? "" : "s"}
+                </span>
               </div>
-              <i /><i /><i />
-              <footer>
-                <span>{record.supportingSignalCount ?? 1} source-backed signal{(record.supportingSignalCount ?? 1) === 1 ? "" : "s"}</span>
-                <b>Reply ready</b>
-              </footer>
+              <button
+                className={styles.themeToggle}
+                type="button"
+                aria-expanded={open}
+                onClick={() => setOpenThemeId(open ? null : theme.id)}
+              >
+                {open ? "Hide evidence" : "Show evidence"}
+              </button>
+              {open && (
+                <ul className={styles.themeEvidence}>
+                  {theme.evidence.map((item) => (
+                    <li key={item.sourceId}>
+                      {item.permalink ? (
+                        <a href={item.permalink} target="_blank" rel="noreferrer noopener">
+                          {item.title}
+                        </a>
+                      ) : (
+                        <span>{item.title}</span>
+                      )}
+                      <em>r/{item.subreddit}</em>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </article>
-          ))}
-        </div>
-      )}
-      {proofRows.length > 0 && (
-        <div className={styles.lockedProofRow}>
-          {proofRows.map((row) => <span key={row}>{row}</span>)}
-        </div>
-      )}
-      <div className={styles.marketLockedCta}>
-        <div>
-          <strong>Full access for 7 days</strong>
-          <span>One-time payment · No automatic renewal · Tax calculated at checkout</span>
-        </div>
-        {onUnlock && (
-          <button className={styles.primaryButton} type="button" onClick={onUnlock}>
-            {total > 0 ? `See all ${total} opportunities — $12` : "Unlock full report — $12"} <Icon name="arrow" size={15} />
-          </button>
-        )}
+          );
+        })}
       </div>
     </section>
   );
@@ -701,11 +1252,15 @@ function ReplyComposer({
       <div className={styles.replyHeader}>
         <div>
           <span className={styles.eyebrow}>Grounded suggested reply</span>
-          <h2>Answer first. Be useful. Disclose the connection.</h2>
+          <h2>
+            {opportunity.disclosureRequired
+              ? "Answer first. Be useful. Disclose the connection."
+              : "Answer first. Be useful. Keep promotion out."}
+          </h2>
         </div>
         <span className={styles.sourcePill}>
           <Icon name="check" size={14} />
-          {opportunity.reply.verifiedClaims.length} claims source-checked
+          Grounded in verified website facts
         </span>
       </div>
 
@@ -740,9 +1295,15 @@ function ReplyComposer({
         <span>
           <Icon name="check" size={13} /> Uses source-backed website facts only
         </span>
-        <span>
-          <Icon name="check" size={13} /> Includes disclosure
-        </span>
+        {opportunity.disclosureRequired ? (
+          <span>
+            <Icon name="check" size={13} /> Includes required disclosure
+          </span>
+        ) : (
+          <span>
+            <Icon name="check" size={13} /> Keeps the product out unless it helps
+          </span>
+        )}
         <span>
           <Icon name="check" size={13} /> Makes no experience claim
         </span>
@@ -805,78 +1366,272 @@ function ReplyComposer({
   );
 }
 
-function SectionIntro({
-  eyebrow,
-  title,
-  description,
-  action,
+/**
+ * Built entirely from the same classification fields the ranking and reply
+ * pipeline already produce (buyerIntent, conversationType, communityRisk,
+ * competitorComplaint, potentialCustomerIntent) -- no new signal data is
+ * introduced, these are just formatted as a compact chip row instead of the
+ * full sentences shown elsewhere on the card.
+ */
+function reliabilitySignalTags(opportunity: RedditOpportunity): string[] {
+  const tags: string[] = [];
+  if (opportunity.potentialCustomerIntent) {
+    tags.push(potentialIntentLabel(opportunity.potentialCustomerIntent));
+  }
+  tags.push(`${intelligenceLabel(opportunity.classification.buyerIntent)} intent`);
+  tags.push(intelligenceLabel(opportunity.conversationType));
+  if (opportunity.classification.competitorComplaint) {
+    tags.push("Competitor complaint");
+  }
+  tags.push(`${intelligenceLabel(opportunity.classification.communityRisk)} community risk`);
+  return [...new Set(tags)].slice(0, 5);
+}
+
+/**
+ * The single card shown by OpportunityCarousel. Same underlying fields as
+ * OpportunityCard (relevanceScore, matchReasons, permalink, reply) -- this
+ * is a presentation variant for the single-card carousel, not a new data
+ * shape.
+ */
+function CarouselOpportunityCard({
+  opportunity,
+  isRevealed,
+  onToggleReply,
 }: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  action?: React.ReactNode;
+  opportunity: RedditOpportunity;
+  isRevealed: boolean;
+  onToggleReply: () => void;
 }) {
+  const tags = reliabilitySignalTags(opportunity);
+  const whyItMatters = opportunity.matchReasons[0] ?? opportunity.classification.customerProblem;
+
   return (
-    <header className={styles.pageIntro}>
-      <div>
-        <span className={styles.eyebrow}>{eyebrow}</span>
-        <h1>{title}</h1>
-        <p>{description}</p>
+    <article className={styles.opportunityCard}>
+      <div className={styles.sourceIdentity}>
+        <span className={styles.redditMark}>u/</span>
+        <div>
+          <strong>{opportunity.authorLabel.replace(/^u\//i, "")}</strong>
+          <span>
+            {opportunity.subreddit} &middot;{" "}
+            {relativeTime(opportunity.sourceCreatedAt ?? opportunity.capturedAt)} &middot; Public{" "}
+            {opportunity.conversationType}
+          </span>
+        </div>
       </div>
-      {action}
-    </header>
+
+      <h3>{opportunity.title}</h3>
+
+      <div className={styles.mockExcerpt}>
+        <span>Why it matters</span>
+        <p>{whyItMatters}</p>
+      </div>
+
+      {tags.length > 0 && (
+        <div className={styles.opportunityMeta}>
+          {tags.map((tag) => (
+            <span key={tag}>{tag}</span>
+          ))}
+        </div>
+      )}
+
+      <div className={styles.carouselActions}>
+        <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
+          <Icon name="refresh" size={14} />
+          {isRevealed ? "Hide reply" : "Generate reply"}
+        </button>
+        {opportunity.permalink && !opportunity.isMock && (
+          <a
+            className={styles.secondaryButton}
+            href={opportunity.permalink}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View Reddit conversation <Icon name="external" size={14} />
+          </a>
+        )}
+      </div>
+    </article>
   );
 }
 
-function PricingCard({
-  plan,
-  featured,
-  onCheckout,
+/**
+ * A Tinder-style, single-card horizontal browser over the same
+ * relevance-ranked opportunities list OpportunityCard used to render as a
+ * stack. Ordering, reply generation and Reddit links are untouched -- only
+ * one conversation is ever on screen at a time, and the user can move
+ * freely in either direction with the arrow buttons, the dots, or the
+ * left/right arrow keys.
+ */
+/**
+ * One card of the unified carousel: either a qualified opportunity (lead) or
+ * a relevant-but-not-lead conversation. Merging both into a single sorted
+ * list is what lets "ordered by AI reliability, highest first" mean one
+ * ranking axis across everything that passed filtering, instead of two
+ * separately-ranked lists shown in two different places.
+ */
+/**
+ * Reshapes a raw ScanEvidenceCandidate (everything the lightweight AI
+ * shortlisted, whether or not it went on to a published lead or relevant
+ * conversation) into a RelevantConversation so it renders through the exact
+ * same carousel card. No reply is attached -- these never became a backend
+ * opportunity/reply record, so there is a discovery signal to show but
+ * nothing to generate or publish yet. Tags stay honest about how far this
+ * particular candidate actually got in the pipeline.
+ */
+function candidateAsRelevantConversation(candidate: ScanEvidenceCandidate): RelevantConversation {
+  const deep = candidate.deepQualification;
+  const tags = [
+    ...(deep?.intelligenceTags ?? []),
+    deep ? "AI reviewed" : "Lightweight signal only",
+    candidate.fullContextVerified ? "Full thread verified" : "Not yet verified",
+  ];
+  return {
+    id: `evidence:${candidate.externalId}`,
+    externalId: candidate.externalId,
+    provider: "reddit",
+    isMock: false,
+    title: candidate.title || "Reddit comment",
+    summary: deep?.whyItMatters || candidate.triage.reason || candidate.excerpt,
+    subreddit: candidate.subreddit,
+    authorLabel: candidate.author ?? "Reddit user",
+    capturedAt: candidate.sourceCreatedAt,
+    permalink: candidate.permalink,
+    tags,
+    demandSignals: deep?.demandSignals ?? (candidate.triage.demandSignal ? [candidate.triage.demandSignal] : []),
+    competitorName: null,
+    provenanceIds: [],
+    reliabilityScore: candidate.reliabilityScore,
+  };
+}
+
+type CarouselItem =
+  | { kind: "opportunity"; id: string; reliability: number; opportunity: RedditOpportunity }
+  | { kind: "relevant"; id: string; reliability: number; conversation: RelevantConversation };
+
+function OpportunityCarousel({
+  items,
+  drafts,
+  editingReplyId,
+  copiedReplyId,
+  publishedOpportunityIds,
+  onDraftChange,
+  onToggleEdit,
+  onRegenerate,
+  onCopy,
+  onPublish,
+  redditConnection,
+  onFunnelEvent,
+  createdReplies,
+  creatingReplyId,
+  onCreateReply,
 }: {
-  plan: PricingPlan;
-  featured?: boolean;
-  onCheckout?: (planId: CheckoutPlanId) => void;
+  items: CarouselItem[];
+  drafts: Record<string, string>;
+  editingReplyId: string | null;
+  copiedReplyId: string | null;
+  publishedOpportunityIds: string[];
+  onDraftChange: (opportunityId: string, value: string) => void;
+  onToggleEdit: (opportunityId: string) => void;
+  onRegenerate: (opportunity: RedditOpportunity) => void;
+  onCopy: (opportunityId: string) => void;
+  onPublish: (opportunity: RedditOpportunity) => void;
+  redditConnection: RedditConnectionStatus;
+  onFunnelEvent?: (name: FunnelEventName) => Promise<void> | void;
+  createdReplies: Record<string, string>;
+  creatingReplyId: string | null;
+  onCreateReply: (conversation: RelevantConversation) => void;
 }) {
-  const isPaid = plan.id !== "market-scan";
-  const checkoutId = plan.id === "core" ? "core" : "full-access-pass";
+  const [index, setIndex] = useState(0);
+  const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
+  const total = items.length;
+
+  // Derived rather than stored: if the underlying list ever changes size
+  // (e.g. a fresh scan result swaps in a shorter list) the position clamps
+  // back into range on the next render without a setState-in-effect, and
+  // without touching the list or its order.
+  const safeIndex = total === 0 ? 0 : Math.min(index, total - 1);
+  const item = items[safeIndex];
+  if (!item) return null;
+
+  const goTo = (nextIndex: number) => setIndex(((nextIndex % total) + total) % total);
+  const toggleReply = (itemId: string) => {
+    setRevealedReplyIds((current) => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  };
+  const isRevealed = revealedReplyIds.has(item.id);
 
   return (
-    <article
-      className={`${styles.pricingCard} ${featured ? styles.pricingFeatured : ""}`}
+    <div
+      className={styles.carousel}
+      role="group"
+      aria-roledescription="carousel"
+      aria-label="Reddit posts found, ordered by AI reliability, highest first"
     >
-      {featured && <span className={styles.featuredLabel}>Launch offer</span>}
-      <span className={styles.eyebrow}>{plan.cadence}</span>
-      <h3>{plan.name}</h3>
-      <div className={styles.priceLine}>
-        <strong>{formatPrice(plan)}</strong>
-        {plan.cadence === "monthly" && <span>/ month</span>}
-        {plan.durationDays && <span>for {plan.durationDays} days</span>}
-      </div>
-      <p>{plan.description}</p>
-      <ul className={styles.planFeatures}>
-        {plan.features.map((feature) => (
-          <li key={feature}>
-            <Icon name="check" size={14} /> {feature}
-          </li>
-        ))}
-      </ul>
-      <button
-        className={featured ? styles.primaryButton : styles.secondaryButtonWide}
-        type="button"
-        disabled={!isPaid}
-        onClick={() => isPaid && onCheckout?.(checkoutId)}
-      >
-        {plan.id === "market-scan" ? "Current access" : `Choose ${plan.name}`}
-        {isPaid && <Icon name="arrow" size={15} />}
-      </button>
-      <small>{plan.checkoutNote}</small>
-      {plan.requiresVerifiedWebhook && (
-        <span className={styles.webhookNote}>
-          <Icon name="lock" size={12} /> Access begins only after a verified Stripe
-          webhook.
-        </span>
+      {item.kind === "opportunity" ? (
+        <CarouselOpportunityCard
+          opportunity={item.opportunity}
+          isRevealed={isRevealed}
+          onToggleReply={() => toggleReply(item.id)}
+        />
+      ) : (
+        <CarouselRelevantCard
+          conversation={item.conversation}
+          isRevealed={isRevealed}
+          onToggleReply={() => toggleReply(item.id)}
+          createdDraft={createdReplies[item.conversation.id]}
+          isCreatingReply={creatingReplyId === item.conversation.id}
+          onCreateReply={() => onCreateReply(item.conversation)}
+        />
       )}
-    </article>
+
+      {isRevealed && item.kind === "opportunity" && (
+        <TrackedSection event="suggested_reply_viewed" onView={onFunnelEvent}>
+          <ReplyComposer
+            opportunity={item.opportunity}
+            value={drafts[item.opportunity.id] ?? item.opportunity.reply.draft}
+            isEditing={editingReplyId === item.opportunity.id}
+            isCopied={copiedReplyId === item.opportunity.id}
+            isPublished={publishedOpportunityIds.includes(item.opportunity.id)}
+            onChange={(value) => onDraftChange(item.opportunity.id, value)}
+            onEdit={() => onToggleEdit(item.opportunity.id)}
+            onRegenerate={() => onRegenerate(item.opportunity)}
+            onCopy={() => onCopy(item.opportunity.id)}
+            onPublish={() => onPublish(item.opportunity)}
+            redditConnection={redditConnection}
+          />
+        </TrackedSection>
+      )}
+
+      <div className={styles.carouselNav}>
+        <button
+          type="button"
+          className={styles.carouselArrow}
+          onClick={() => goTo(safeIndex - 1)}
+          aria-label="Previous conversation"
+        >
+          <Icon name="arrowLeft" size={20} />
+        </button>
+        <span className={styles.carouselPosition}>
+          {safeIndex + 1} of {total}
+        </span>
+        <button
+          type="button"
+          className={styles.carouselArrow}
+          onClick={() => goTo(safeIndex + 1)}
+          aria-label="Next conversation"
+        >
+          <Icon name="arrow" size={20} />
+        </button>
+      </div>
+
+      <p className={styles.carouselCaption}>
+        Ordered by AI reliability, highest first. Later conversations may be less reliable.
+      </p>
+    </div>
   );
 }
 
@@ -884,14 +1639,12 @@ export function ProductDashboard({
   data: fixtureData = redditDemandDemoData,
   scanResult,
   analyzedDomain,
-  initialSection = "dashboard",
+  initialSection,
   accessLevel = "free",
   onNewScan,
   onCheckout,
   onRegenerateReply,
   onPublishOpportunity,
-  onRecordClick,
-  onRecordConversion,
   redditConnection = {
     configured: false,
     connected: false,
@@ -901,9 +1654,35 @@ export function ProductDashboard({
   },
   onConnectReddit,
   onDisconnectReddit,
+  monitoring = null,
+  onUpdateMonitoring,
+  onUpdateBusinessSummary,
+  monitorRuns = null,
+  onViewMonitorRun,
+  aiVisibility = null,
+  onUpdateAiVisibility,
+  visibilityScans = null,
+  onCreateReply,
   onFunnelEvent,
 }: ProductDashboardProps) {
   const data = scanResult ?? fixtureData;
+  const [activeSection, setActiveSection] = useState<NavigationSectionId>(
+    initialSection ?? "dashboard",
+  );
+  // Opportunities and Competitors are the two screens that fill in on their
+  // own as monitoring runs -- grouped under one collapsible "Inbox" header,
+  // open by default. AI Citations/Live feed from the original design don't
+  // exist yet (no pipeline behind them), so this stays a two-item group
+  // rather than the full four-item one until those are real.
+  const [inboxOpen, setInboxOpen] = useState(true);
+  // Shown once per session over the Overview tab while no plan is active.
+  // Deliberately does NOT claim the dashboard is empty -- the free scan's
+  // real results are already shown here, which is true in this product
+  // even before payment. What's actually off is ongoing monitoring, so
+  // that's the honest premise (matches the sidebar's existing "Monitoring
+  // is off" card copy, just with more room to make the case).
+  const [valuePropDismissed, setValuePropDismissed] = useState(false);
+  const relevantConversations = useMemo(() => data.relevantConversations ?? [], [data.relevantConversations]);
   const normalizedAnalyzedDomain = analyzedDomain
     ?.replace(/^https?:\/\//, "")
     .replace(/\/$/, "")
@@ -914,43 +1693,32 @@ export function ProductDashboard({
       normalizedAnalyzedDomain !== data.business.hostname.toLowerCase(),
   );
   const fixtureDisclosure = isFixtureFallbackForSubmittedDomain
-    ? `${data.fixtureDisclosure} The facts below were not produced from ${analyzedDomain}; Relaywise is a clearly separated fallback fixture while the real scan result is unavailable.`
+    ? `${data.fixtureDisclosure} The facts below were not produced from ${analyzedDomain}; the labeled fixture is a clearly separated fallback while the real scan result is unavailable.`
     : data.fixtureDisclosure;
-  const usesFictionalBusiness = data.business.isFictionalDemoBusiness;
-  const usesMockProvider = data.opportunities.some((opportunity) => opportunity.isMock);
-  const usesApifyTestProvider = data.opportunities.some(
-    (opportunity) => opportunity.provider === "apify-reddit-test",
-  );
-  const [activeSection, setActiveSection] =
-    useState<NavigationSectionId>(initialSection);
-  const [selectedOpportunityId, setSelectedOpportunityId] = useState(
-    data.opportunities[0]?.id ?? "",
+  const usesMockProvider =
+    data.opportunities.some((opportunity) => opportunity.isMock) ||
+    relevantConversations.some((conversation) => conversation.isMock);
+
+  // Ranked once by the same deterministic relevance score the qualification
+  // pipeline already computed, so "top 3" here matches what was actually
+  // measured rather than display order.
+  const rankedOpportunities = useMemo(
+    () =>
+      [...data.opportunities].sort(
+        (a, b) => b.classification.relevanceScore - a.classification.relevanceScore,
+      ),
+    [data.opportunities],
   );
   const [editingReplyId, setEditingReplyId] = useState<string | null>(null);
   const [copiedReplyId, setCopiedReplyId] = useState<string | null>(null);
   const [publishedIds, setPublishedIds] = useState<string[]>([]);
-  const [recordedClicks, setRecordedClicks] = useState(0);
-  const [recordedConversions, setRecordedConversions] = useState(0);
-  const [regenerationIndex, setRegenerationIndex] = useState<
-    Record<string, number>
-  >({});
+  const [regenerationIndex, setRegenerationIndex] = useState<Record<string, number>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>(() =>
     Object.fromEntries(
-      data.opportunities.map((opportunity) => [
-        opportunity.id,
-        opportunity.reply.draft,
-      ]),
+      data.opportunities.map((opportunity) => [opportunity.id, opportunity.reply.draft]),
     ),
   );
 
-  const hasFullAccess = accessLevel !== "free";
-  const availableReplyOpportunities = hasFullAccess
-    ? data.opportunities
-    : data.opportunities.slice(0, 1);
-  const selectedOpportunity =
-    availableReplyOpportunities.find(
-      (opportunity) => opportunity.id === selectedOpportunityId,
-    ) ?? availableReplyOpportunities[0];
   const serverPublishedIds = useMemo(
     () =>
       data.opportunities
@@ -963,44 +1731,51 @@ export function ProductDashboard({
     [serverPublishedIds, publishedIds],
   );
 
-  const metrics = useMemo(
-    () => ({
-      ...data.metrics,
-      publishedReplies: Math.max(
-        data.metrics.publishedReplies,
-        publishedOpportunityIds.length,
-      ),
-      trackedClicks: data.metrics.trackedClicks + recordedClicks,
-      trackedConversions: data.metrics.trackedConversions + recordedConversions,
-    }),
-    [data.metrics, publishedOpportunityIds.length, recordedClicks, recordedConversions],
-  );
-  const potentialCustomers = data.potentialCustomers ?? {
-    total: usesMockProvider ? 0 : data.metrics.qualifiedOpportunities,
-    conversationCount: usesMockProvider ? 0 : data.metrics.qualifiedOpportunities,
-    windowDays: 7,
-    windowStartedAt: data.generatedAt,
-    windowEndedAt: data.generatedAt,
-    breakdown: {
-      highIntent: usesMockProvider ? 0 : data.metrics.highIntentOpportunities,
-      competitorSwitching: 0,
-      problemAware: usesMockProvider
-        ? 0
-        : Math.max(0, data.metrics.qualifiedOpportunities - data.metrics.highIntentOpportunities),
-    },
-    newSincePreviousDemandDrop: usesMockProvider ? 0 : data.metrics.qualifiedOpportunities,
+  // Purely client-side: a reply drafted this session via "Create reply" for
+  // a relevant conversation (or raw carousel candidate) that had none. Not
+  // persisted into `data` -- the next fetched report will carry the real
+  // stored version once the backend has it.
+  const [createdReplies, setCreatedReplies] = useState<Record<string, string>>({});
+  const [creatingReplyId, setCreatingReplyId] = useState<string | null>(null);
+  const [disconnectingReddit, setDisconnectingReddit] = useState(false);
+
+  // The Replies tab previously only read `rankedOpportunities` (server-
+  // persisted opportunities), so a reply generated this session via
+  // "Create reply" on a relevant-but-not-yet-an-opportunity conversation
+  // never appeared there or counted toward "drafted" -- it only lives in
+  // `createdReplies`, keyed by conversation id, until the next full data
+  // refetch. Build lightweight display cards for those so they show up
+  // immediately, without waiting on a refetch.
+  //
+  // Deliberately reads from `carouselItems` (defined below), not the raw
+  // `relevantConversations` variable: the carousel's "relevant" items are
+  // relevantConversations PLUS every scanEvidence.candidates entry folded
+  // in via candidateAsRelevantConversation. A reply can be created from
+  // either source, so filtering only relevantConversations silently missed
+  // any conversation.id that only existed via that second, candidate-based
+  // path -- exactly the gap that made this fix appear broken in practice.
+
+  const disconnectReddit = async () => {
+    if (!onDisconnectReddit || disconnectingReddit) return;
+    setDisconnectingReddit(true);
+    try {
+      await onDisconnectReddit();
+    } finally {
+      setDisconnectingReddit(false);
+    }
   };
 
-  const openReply = (opportunityId: string) => {
-    const isAvailable = availableReplyOpportunities.some(
-      (opportunity) => opportunity.id === opportunityId,
-    );
-    if (!isAvailable) {
-      setActiveSection("billing");
-      return;
+  const createReply = async (conversation: RelevantConversation) => {
+    if (!onCreateReply || creatingReplyId) return;
+    setCreatingReplyId(conversation.id);
+    try {
+      const content = await onCreateReply(conversation.id, conversation.externalId);
+      if (content) {
+        setCreatedReplies((current) => ({ ...current, [conversation.id]: content }));
+      }
+    } finally {
+      setCreatingReplyId((current) => (current === conversation.id ? null : current));
     }
-    setSelectedOpportunityId(opportunityId);
-    setActiveSection("replies");
   };
 
   const regenerateReply = async (opportunity: RedditOpportunity) => {
@@ -1042,854 +1817,853 @@ export function ProductDashboard({
     setPublishedIds((current) => [...current, opportunity.id]);
   };
 
-  const unlock = () => {
-    void onFunnelEvent?.("unlock_cta_clicked");
-    onCheckout?.("full-access-pass");
-    setActiveSection("billing");
-  };
-
-  const recordConversion = async () => {
-    const opportunityId = publishedOpportunityIds[0];
-    if (!opportunityId) return;
-    const accepted = await onRecordConversion?.(opportunityId);
-    if (accepted !== false) setRecordedConversions((current) => current + 1);
-  };
-
-  const recordClick = async () => {
-    const opportunityId = publishedOpportunityIds[0];
-    if (!opportunityId) return;
-    const accepted = await onRecordClick?.(opportunityId);
-    if (accepted !== false) setRecordedClicks((current) => current + 1);
-  };
-
-  const renderMarketScan = () => {
-    const visibleOpportunities = potentialCustomers.total > 0
-      ? data.opportunities.slice(0, 3)
-      : [];
-    const previewReply = potentialCustomers.total > 0
-      ? availableReplyOpportunities[0]
-      : undefined;
-    const strongestFallback = data.competitorWeaknesses.some((item) => item.verified)
-      ? "A source-backed competitor mention is available below."
-      : data.insights.length > 0
-        ? `${data.insights.length} recurring demand insight${data.insights.length === 1 ? " is" : "s are"} available below.`
-        : data.visibilityOpportunities.length > 0
-          ? `${data.visibilityOpportunities.length} Search & AI Visibility Opportunit${data.visibilityOpportunities.length === 1 ? "y is" : "ies are"} available below.`
-          : "No weaker mention was promoted into a potential-customer claim.";
-    const hasLockedValue = !usesMockProvider && (
-      data.lockedCounts.opportunities > 0 ||
-      data.lockedCounts.readyReplies > 0 ||
-      data.lockedCounts.competitorSignals > 0 ||
-      data.lockedCounts.insights > 0
+  // One ranking axis across everything that passed filtering -- a lead and a
+  // relevant-but-not-lead conversation are both "AI reliability checked,
+  // source linked," so they browse as one swipeable carousel instead of a
+  // carousel for leads plus a separate static list underneath it. Beyond
+  // those two, every remaining candidate the lightweight AI shortlisted
+  // (triage.worthEnriching) is folded in too, reshaped into the same card
+  // via candidateAsRelevantConversation -- this is the dashboard's one and
+  // only results view now; there is no separate technical scan-trace list.
+  const carouselItems = useMemo<CarouselItem[]>(() => {
+    const opportunityItems: CarouselItem[] = rankedOpportunities.map((opportunity) => ({
+      kind: "opportunity",
+      id: opportunity.id,
+      reliability: opportunity.classification.relevanceScore,
+      opportunity,
+    }));
+    const relevantItems: CarouselItem[] = relevantConversations.map((conversation) => ({
+      kind: "relevant",
+      id: conversation.id,
+      reliability: conversation.reliabilityScore,
+      conversation,
+    }));
+    // A candidate already represented as an opportunity or a relevant
+    // conversation (same public Reddit URL) must not appear a second time
+    // as a lighter, reply-less card.
+    const representedPermalinks = new Set(
+      [...rankedOpportunities, ...relevantConversations]
+        .map((item) => item.permalink)
+        .filter((permalink): permalink is string => Boolean(permalink)),
     );
+    const candidateItems: CarouselItem[] = (data.scanEvidence?.candidates ?? [])
+      .filter((candidate) => candidate.triage.worthEnriching)
+      .filter((candidate) => !(candidate.permalink && representedPermalinks.has(candidate.permalink)))
+      .map((candidate) => {
+        const conversation = candidateAsRelevantConversation(candidate);
+        const item: CarouselItem = {
+          kind: "relevant",
+          id: conversation.id,
+          reliability: conversation.reliabilityScore,
+          conversation,
+        };
+        return item;
+      });
+    return [...opportunityItems, ...relevantItems, ...candidateItems].sort(
+      (a, b) => b.reliability - a.reliability,
+    );
+  }, [rankedOpportunities, relevantConversations, data.scanEvidence]);
+
+  const sessionOnlyDraftedConversations = useMemo(
+    () =>
+      carouselItems
+        .filter((item): item is Extract<CarouselItem, { kind: "relevant" }> => item.kind === "relevant")
+        .map((item) => item.conversation)
+        .filter((conversation) => Boolean(createdReplies[conversation.id]?.trim()))
+        .map((conversation) => ({
+          id: conversation.id,
+          subreddit: conversation.subreddit,
+          title: conversation.title,
+          draftText: createdReplies[conversation.id],
+        })),
+    [carouselItems, createdReplies],
+  );
+
+  const hasAnyRelevantContent = carouselItems.length > 0;
+
+  const navSections = data.navigation ?? [];
+  const activeNavItem = navSections.find((item) => item.id === activeSection);
+  const sectionSubtitles: Record<NavigationSectionId, string> = {
+    dashboard: "The strongest market signals from this scan.",
+    opportunities: "One at a time, strongest match first.",
+    insights: "Patterns across everything we've read.",
+    competitors: "Reddit mentions of you and the tools you compete with.",
+    visibility: "Whether assistants name you, and what they read.",
+    replies: "Drafts, posted replies and what they did.",
+    results: "Anything stored beyond what's already shown elsewhere in this scan.",
+    monitoring: "Daily Reddit monitoring, watch terms and your Reddit connection.",
+    settings: "Your business profile, competitors and Reddit connection.",
+    billing: "Your plan and how to change it.",
+  };
+  const goToSection = (id: NavigationSectionId) => () => setActiveSection(id);
+  const isFree = accessLevel === "free";
+
+  const topCarouselItems = carouselItems.slice(0, 3);
+  // Lead with the value the scan actually produced. "Qualified opportunity"
+  // is a deliberately strict subset, so making a zero in that subset the
+  // overview headline hid the useful conversations, replies, and market
+  // evidence already present in the same report. Positive-only cards keep
+  // the overview truthful without advertising an internal funnel rejection.
+  const overviewMetrics = [
+    {
+      label: "Promising conversations",
+      value: carouselItems.length,
+      note: "Relevant matches, ranked by AI",
+    },
+    {
+      label: "High-intent matches",
+      value: data.metrics.highIntentOpportunities,
+      note: "Worth replying to first",
+    },
+    {
+      label: "Replies ready",
+      value: data.metrics.readyReplies,
+      note: `Ready to review${data.metrics.publishedReplies > 0 ? `, ${data.metrics.publishedReplies} posted` : " and use"}`,
+    },
+    {
+      label: "Market insights",
+      value: data.insights.length + data.conversationThemes.length,
+      note: "Demand patterns uncovered",
+    },
+    {
+      label: "Competitor signals",
+      value: data.metrics.competitorSignals,
+      note: "Mentioned in relevant results",
+    },
+    {
+      label: "Reddit posts reviewed",
+      value: data.scanEvidence?.diagnostics.normalized ?? 0,
+      note: "Checked for relevance and intent",
+    },
+    {
+      label: "Search phrases tested",
+      value: data.scanEvidence?.searchPlan.length ?? 0,
+      note: "Using your approved wording",
+    },
+    {
+      label: "Website pages analyzed",
+      value: data.business.analyzedPageCount,
+      note: "Used to understand product fit",
+    },
+  ].filter((metric) => metric.value > 0).slice(0, 4);
+
+  if (activeSection === "billing") {
+    const planIdForAccessLevel: Record<AccessLevel, PricingPlan["id"]> = {
+      free: "market-scan",
+      pass: "full-access-pass",
+      core: "core",
+    };
+    const currentPlan =
+      data.pricing.find((plan) => plan.id === planIdForAccessLevel[accessLevel]) ??
+      data.pricing[0];
+    const formatPrice = (plan: PricingPlan) =>
+      plan.priceInCents === 0 ? "$0" : `$${(plan.priceInCents / 100).toFixed(0)}`;
+    const upgradePlans = isFree ? data.pricing.filter((plan) => plan.id !== "market-scan") : [];
 
     return (
-      <div className={styles.marketScanReport}>
-        <TrackedSection event="potential_customer_count_revealed" onView={onFunnelEvent}>
-          <section className={`${styles.card} ${styles.customerHero}`}>
-            <span className={styles.eyebrow}>Your personalized Market Scan</span>
-            {potentialCustomers.total > 0 ? (
-              <>
-                <h1><strong>{potentialCustomers.total}</strong> {potentialCustomers.total === 1 ? "person" : "people"} may need what you&apos;re building.</h1>
-                <p>
-                  Found across <b>{potentialCustomers.conversationCount}</b> source-backed Reddit conversation{potentialCustomers.conversationCount === 1 ? "" : "s"} in the last {potentialCustomers.windowDays} days.
-                </p>
-              </>
-            ) : (
-              <>
-                <h1>No strong potential-customer signals found in this scan.</h1>
-                <p>{strongestFallback}</p>
-              </>
-            )}
-            <div className={styles.customerHeroFoot}>
-              <span><Icon name="check" size={13} /> Unique Reddit authors only</span>
-              <span><Icon name="check" size={13} /> Recent public sources</span>
-              <span><Icon name="check" size={13} /> Low-confidence matches excluded</span>
-            </div>
-          </section>
-        </TrackedSection>
+      <>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+          rel="stylesheet"
+        />
+        <div className={styles.billingStandalone}>
+          <header className={styles.billingHeader}>
+            <button type="button" className={styles.billingHeaderLogo} onClick={goToSection("dashboard")}>
+              <Icon name="logo" size={26} />
+              Scooptr
+            </button>
+            <button type="button" className={styles.billingBackLink} onClick={goToSection("dashboard")}>
+              &larr; Back to dashboard
+            </button>
+            <span className={styles.billingHeaderSpacer} />
+            <span className={styles.billingUserChip}>{data.business.hostname}</span>
+          </header>
 
-        {potentialCustomers.total > 0 && (
-          <section className={styles.intentBreakdown} aria-label="Potential customer intent breakdown">
-            <article>
-              <strong>{potentialCustomers.breakdown.highIntent}</strong>
-              <span>Actively looking for or comparing a solution</span>
-            </article>
-            <article>
-              <strong>{potentialCustomers.breakdown.competitorSwitching}</strong>
-              <span>Frustrated with or switching from alternatives</span>
-            </article>
-            <article>
-              <strong>{potentialCustomers.breakdown.problemAware}</strong>
-              <span>Experiencing problems {data.business.name} solves</span>
-            </article>
-          </section>
-        )}
-
-        <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
-          <section className={styles.dashboardSection}>
-            <div className={styles.sectionHeadingRow}>
-              <div>
-                <span className={styles.eyebrow}>People and intent</span>
-                <h2>{visibleOpportunities.length > 0 ? "The strongest potential-customer opportunities" : "No qualified people to preview"}</h2>
-              </div>
-              <span className={styles.qualityNote}>One opportunity per unique author</span>
+          <div className={styles.billingContent}>
+            <div>
+              <h1>Billing</h1>
+              <p className={styles.appHeaderSub}>Your plan and how to change it.</p>
             </div>
-            <div className={styles.opportunityStack}>
-              {visibleOpportunities.map((opportunity) => (
-                <OpportunityCard key={opportunity.id} opportunity={opportunity} onOpenReply={openReply} />
-              ))}
-              {visibleOpportunities.length === 0 && (
-                <section className={`${styles.card} ${styles.emptyResults}`}>
-                  <span className={styles.emptyResultsIcon}><Icon name="opportunities" size={23} /></span>
-                  <h2>No weak matches were substituted</h2>
-                  <p>The scan found no recent, source-backed author with enough problem, recommendation, comparison or competitor-switching evidence to qualify.</p>
-                </section>
-              )}
-            </div>
-          </section>
-        </TrackedSection>
 
-        {previewReply && (
-          <TrackedSection event="suggested_reply_viewed" onView={onFunnelEvent}>
-            <section className={styles.dashboardSection}>
-              <div className={styles.sectionHeadingRow}>
-                <div>
-                  <span className={styles.eyebrow}>One complete suggested reply</span>
-                  <h2>Answer the person first, then add useful context</h2>
+            <div className={styles.lightSection}>
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardEyebrow}>current plan</span>
+                <span className={styles.simpleCardTitle}>{currentPlan.name}</span>
+                <p className={styles.simpleCardBody}>{currentPlan.description}</p>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {currentPlan.features.map((feature) => (
+                    <span
+                      key={feature}
+                      className={styles.todayTag}
+                      style={{ background: "var(--green-soft)", color: "var(--green-dark)" }}
+                    >
+                      {feature}
+                    </span>
+                  ))}
                 </div>
-                <span className={styles.qualityNote}>Grounded in verified website facts</span>
+                <span className={styles.simpleCardMeta}>{currentPlan.checkoutNote}</span>
               </div>
-              <ReplyComposer
-                opportunity={previewReply}
-                value={drafts[previewReply.id] ?? previewReply.reply.draft}
-                isEditing={editingReplyId === previewReply.id}
-                isCopied={copiedReplyId === previewReply.id}
-                isPublished={publishedOpportunityIds.includes(previewReply.id)}
-                onChange={(value) => setDrafts((current) => ({ ...current, [previewReply.id]: value }))}
-                onEdit={() => setEditingReplyId((current) => current === previewReply.id ? null : previewReply.id)}
-                onRegenerate={() => void regenerateReply(previewReply)}
-                onCopy={() => void copyReply(previewReply.id)}
-                onPublish={() => void publishReply(previewReply)}
-                redditConnection={redditConnection}
-              />
-            </section>
-          </TrackedSection>
-        )}
 
-        <section className={styles.dashboardSection}>
-          <div className={styles.sectionHeadingRow}>
-            <div>
-              <span className={styles.eyebrow}>Why these people were matched</span>
-              <h2>Business understanding</h2>
-            </div>
-          </div>
-          <BusinessProfilePanel profile={data.business} />
-        </section>
-
-        <section className={styles.dashboardSection}>
-          <div className={styles.sectionHeadingRow}>
-            <div>
-              <span className={styles.eyebrow}>Where alternatives leave room</span>
-              <h2>Competitor weaknesses</h2>
-            </div>
-          </div>
-          {data.competitorWeaknesses.map((weakness) => (
-            <CompetitorWeaknessCard key={weakness.id} weakness={weakness} />
-          ))}
-        </section>
-
-        {data.insights.length > 0 && (
-          <section className={styles.dashboardSection}>
-            <div className={styles.sectionHeadingRow}>
-              <div>
-                <span className={styles.eyebrow}>Recurring customer demand</span>
-                <h2>What people repeatedly need help with</h2>
-              </div>
-            </div>
-            <div className={styles.insightColumn}>
-              {data.insights.map((insight) => <DemandInsightCard key={insight.id} insight={insight} />)}
-            </div>
-          </section>
-        )}
-
-        {data.visibilityOpportunities.length > 0 && (
-          <section className={styles.dashboardSection}>
-            <div className={styles.sectionHeadingRow}>
-              <div>
-                <span className={styles.eyebrow}>Questions worth answering clearly</span>
-                <h2>Search & AI Visibility Opportunities</h2>
-              </div>
-            </div>
-            <div className={styles.visibilityGrid}>
-              {data.visibilityOpportunities.map((item, index) => (
-                <article key={item.id} className={`${styles.card} ${styles.visibilityCard}`}>
-                  <span className={styles.visibilityNumber}>0{index + 1}</span>
-                  <h3>{item.title}</h3>
-                  <p>{item.summary}</p>
-                  <div className={styles.actionStrip}><Icon name="arrow" size={15} /><p>{item.recommendedAction}</p></div>
-                  <small>{item.verificationNote}</small>
-                </article>
+              {upgradePlans.map((plan) => (
+                <div key={plan.id} className={styles.simpleCard}>
+                  <span className={styles.simpleCardEyebrow}>
+                    {formatPrice(plan)}
+                    {plan.cadence === "monthly" ? "/month" : plan.cadence === "one-time" ? ` one-time \u00b7 ${plan.durationDays ?? 7} days` : ""}
+                  </span>
+                  <span className={styles.simpleCardTitle}>{plan.name}</span>
+                  <p className={styles.simpleCardBody}>{plan.description}</p>
+                  {onCheckout && (plan.id === "full-access-pass" || plan.id === "core") && (
+                    <button
+                      type="button"
+                      className={styles.blueCta}
+                      style={{ alignSelf: "flex-start" }}
+                      onClick={() => onCheckout(plan.id as CheckoutPlanId)}
+                    >
+                      Choose {plan.name}
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
-          </section>
-        )}
-
-        {hasLockedValue && (
-          <TrackedSection event="locked_results_viewed" onView={onFunnelEvent}>
-            <MarketScanLockedPanel
-              total={potentialCustomers.total}
-              visible={visibleOpportunities.length}
-              records={data.lockedResults}
-              counts={data.lockedCounts}
-              onUnlock={unlock}
-            />
-          </TrackedSection>
-        )}
-      </div>
+          </div>
+        </div>
+      </>
     );
-  };
-
-  const renderDashboard = () => (
-    <>
-      <SectionIntro
-        eyebrow="Today’s demand brief"
-        title="The conversations worth joining—without the noise."
-        description={
-          usesFictionalBusiness
-            ? "This labeled sample shows how the strongest demand signals would be prioritized for a business."
-            : usesMockProvider
-              ? "Mock-provider conversations are ranked against problems verified on the submitted website, ready to be replaced by approved live Reddit data."
-              : usesApifyTestProvider
-                ? "Real public Reddit records from the Apify test source were qualified against the submitted website. This is MVP test data, not an approved production Reddit API integration."
-                : "Potential customers are already describing relevant problems. Here are the strongest source-backed places the business can help."
-        }
-        action={
-          <button
-            className={styles.secondaryButton}
-            type="button"
-            onClick={() => setActiveSection("opportunities")}
-          >
-            View all opportunities <Icon name="arrow" size={15} />
-          </button>
-        }
-      />
-
-      <div className={styles.metricsGrid}>
-        <MetricCard
-          label="Qualified opportunities"
-          value={metrics.qualifiedOpportunities}
-          note={`${metrics.highIntentOpportunities} show high buyer intent`}
-          tone="mint"
-        />
-        <MetricCard
-          label="Replies ready"
-          value={metrics.readyReplies}
-          note={
-            usesFictionalBusiness
-              ? "Grounded in labeled demo-site facts"
-              : "Grounded in submitted website facts"
-          }
-          tone="violet"
-        />
-        <MetricCard
-          label="Competitor signals"
-          value={metrics.competitorSignals}
-          note={
-            usesMockProvider
-              ? "Directional mock-provider evidence"
-              : usesApifyTestProvider
-                ? "Directional Apify test evidence"
-                : "Directional approved-provider evidence"
-          }
-          tone="amber"
-        />
-        <MetricCard
-          label="Published replies"
-          value={metrics.publishedReplies}
-          note={metrics.publishedReplies ? "Recorded for this workspace" : "No activity recorded yet"}
-        />
-      </div>
-
-      <BusinessProfilePanel profile={data.business} />
-
-      <section className={styles.dashboardSection}>
-        <div className={styles.sectionHeadingRow}>
-          <div>
-            <span className={styles.eyebrow}>Best current opportunities</span>
-            <h2>
-              {data.opportunities.length > 0
-                ? "Useful conversations to prioritize"
-                : "No conversation passed the qualification threshold"}
-            </h2>
-          </div>
-          <span className={styles.qualityNote}>Noise and duplicates removed</span>
-        </div>
-        <div className={styles.opportunityStack}>
-          {data.opportunities.slice(0, 3).map((opportunity) => (
-            <OpportunityCard
-              key={opportunity.id}
-              opportunity={opportunity}
-              onOpenReply={openReply}
-            />
-          ))}
-          {data.opportunities.length === 0 && (
-            <section className={`${styles.card} ${styles.emptyResults}`}>
-              <span className={styles.emptyResultsIcon}>
-                <Icon name="opportunities" size={23} />
-              </span>
-              <h2>No weak matches were substituted</h2>
-              <p>
-                The provider records did not contain enough verified business relevance and
-                customer-demand evidence. Future monitoring can add results when a stronger
-                conversation appears.
-              </p>
-            </section>
-          )}
-        </div>
-      </section>
-
-      {availableReplyOpportunities[0] && (
-        <section className={styles.dashboardSection}>
-          <div className={styles.sectionHeadingRow}>
-            <div>
-              <span className={styles.eyebrow}>Suggested reply ready</span>
-              <h2>Answer first, then add useful context</h2>
-            </div>
-            <span className={styles.qualityNote}>Grounded in verified website facts</span>
-          </div>
-          <ReplyComposer
-            opportunity={availableReplyOpportunities[0]}
-            value={
-              drafts[availableReplyOpportunities[0].id] ??
-              availableReplyOpportunities[0].reply.draft
-            }
-            isEditing={editingReplyId === availableReplyOpportunities[0].id}
-            isCopied={copiedReplyId === availableReplyOpportunities[0].id}
-            isPublished={publishedOpportunityIds.includes(availableReplyOpportunities[0].id)}
-            onChange={(value) =>
-              setDrafts((current) => ({
-                ...current,
-                [availableReplyOpportunities[0].id]: value,
-              }))
-            }
-            onEdit={() =>
-              setEditingReplyId((current) =>
-                current === availableReplyOpportunities[0].id
-                  ? null
-                  : availableReplyOpportunities[0].id,
-              )
-            }
-            onRegenerate={() => void regenerateReply(availableReplyOpportunities[0])}
-            onCopy={() => void copyReply(availableReplyOpportunities[0].id)}
-            onPublish={() => void publishReply(availableReplyOpportunities[0])}
-            redditConnection={redditConnection}
-          />
-        </section>
-      )}
-
-      <div className={styles.twoColumnGrid}>
-        <div className={styles.insightColumn}>
-          {data.insights.slice(0, 2).map((insight) => (
-            <DemandInsightCard key={insight.id} insight={insight} />
-          ))}
-        </div>
-        <CompetitorWeaknessCard weakness={data.competitorWeaknesses[0]} />
-      </div>
-
-      {!hasFullAccess && (
-        <LockedResultsPanel counts={data.lockedCounts} onUnlock={unlock} />
-      )}
-    </>
-  );
-
-  const renderOpportunities = () => (
-    <>
-      <SectionIntro
-        eyebrow="Qualified conversations"
-        title="Opportunities"
-        description="Only conversations with a clear audience, problem or buying signal make this list. Technical query data and raw mentions stay hidden."
-      />
-      <div className={styles.filterRow}>
-        <span className={styles.activeFilter}>Best match</span>
-        <span>Buyer intent</span>
-        <span>Low community risk</span>
-        <span>Competitor signal</span>
-      </div>
-      <div className={styles.opportunityStack}>
-        {data.opportunities.map((opportunity) => (
-          <OpportunityCard
-            key={opportunity.id}
-            opportunity={opportunity}
-            onOpenReply={openReply}
-          />
-        ))}
-        {data.opportunities.length === 0 && (
-          <section className={`${styles.card} ${styles.emptyResults}`}>
-            <span className={styles.emptyResultsIcon}>
-              <Icon name="opportunities" size={23} />
-            </span>
-            <h2>No qualified opportunities in this scan</h2>
-            <p>
-              Results are withheld when relevance or demand evidence is too weak. Raw mentions
-              and low-confidence matches are never promoted into this list.
-            </p>
-          </section>
-        )}
-      </div>
-      {!hasFullAccess && (
-        <LockedResultsPanel
-          counts={data.lockedCounts}
-          context="section"
-          onUnlock={unlock}
-        />
-      )}
-    </>
-  );
-
-  const renderInsights = () => (
-    <>
-      <SectionIntro
-        eyebrow={usesMockProvider ? "Demand patterns to validate" : "What customers are telling you"}
-        title="Demand insights"
-        description={
-          usesMockProvider
-            ? "Themes from qualified mock-provider conversations, clearly separated from live market evidence."
-            : "Evidence-backed themes from qualified conversations, connected to a practical positioning or content action."
-        }
-      />
-      <div className={styles.insightStack}>
-        {data.insights.map((insight) => (
-          <DemandInsightCard key={insight.id} insight={insight} />
-        ))}
-      </div>
-      {!hasFullAccess && (
-        <LockedResultsPanel
-          counts={{
-            ...data.lockedCounts,
-            opportunities: 0,
-            competitorSignals: 0,
-            visibilityOpportunities: 0,
-          }}
-          context="section"
-          onUnlock={unlock}
-        />
-      )}
-    </>
-  );
-
-  const renderCompetitors = () => (
-    <>
-      <SectionIntro
-        eyebrow="Where alternatives leave room"
-        title="Competitor intelligence"
-        description="Specific, carefully scoped signals—not a claim about broad market sentiment."
-      />
-      {data.competitorWeaknesses.map((weakness) => (
-        <CompetitorWeaknessCard key={weakness.id} weakness={weakness} />
-      ))}
-      {!hasFullAccess && (
-        <LockedResultsPanel
-          counts={{
-            ...data.lockedCounts,
-            opportunities: 0,
-            insights: 0,
-            visibilityOpportunities: 0,
-          }}
-          context="section"
-          onUnlock={unlock}
-        />
-      )}
-    </>
-  );
-
-  const renderVisibility = () => (
-    <>
-      <SectionIntro
-        eyebrow="Content gaps grounded in demand"
-        title="Search & AI Visibility Opportunities"
-        description="Useful questions the business can answer more clearly. No traffic, ranking or AI-citation claims are made without an external data provider."
-      />
-      <div className={styles.visibilityGrid}>
-        {data.visibilityOpportunities.map((item, index) => (
-          <article key={item.id} className={`${styles.card} ${styles.visibilityCard}`}>
-            <span className={styles.visibilityNumber}>0{index + 1}</span>
-            <h3>{item.title}</h3>
-            <p>{item.summary}</p>
-            <div className={styles.actionStrip}>
-              <Icon name="arrow" size={15} />
-              <p>{item.recommendedAction}</p>
-            </div>
-            <small>{item.verificationNote}</small>
-          </article>
-        ))}
-      </div>
-      {!hasFullAccess && (
-        <LockedResultsPanel
-          counts={{
-            ...data.lockedCounts,
-            opportunities: 0,
-            insights: 0,
-            competitorSignals: 0,
-          }}
-          context="section"
-          onUnlock={unlock}
-        />
-      )}
-    </>
-  );
-
-  const renderReplies = () => (
-    <>
-      <SectionIntro
-        eyebrow="Ready for your review"
-        title="Suggested replies"
-        description="Every draft answers the conversation first, makes only source-backed product claims and discloses the business connection when relevant."
-      />
-      <div className={styles.replyWorkspace}>
-        <aside className={styles.replyQueue} aria-label="Suggested reply queue">
-          {availableReplyOpportunities.map((opportunity) => (
-            <button
-              key={opportunity.id}
-              className={
-                selectedOpportunity?.id === opportunity.id
-                  ? styles.replyQueueActive
-                  : ""
-              }
-              type="button"
-              onClick={() => setSelectedOpportunityId(opportunity.id)}
-            >
-              <span>{opportunity.subreddit}</span>
-              <strong>{opportunity.title}</strong>
-              <small>{intentLabel(opportunity.classification.buyerIntent)}</small>
-            </button>
-          ))}
-          {!hasFullAccess && (
-            <button
-              className={styles.replyQueueLocked}
-              type="button"
-              onClick={unlock}
-            >
-              <Icon name="lock" size={15} />
-              <strong>{data.lockedCounts.readyReplies} more reply drafts</strong>
-              <small>Unlock all stored replies</small>
-            </button>
-          )}
-        </aside>
-        {selectedOpportunity && (
-          <ReplyComposer
-            opportunity={selectedOpportunity}
-            value={drafts[selectedOpportunity.id] ?? selectedOpportunity.reply.draft}
-            isEditing={editingReplyId === selectedOpportunity.id}
-            isCopied={copiedReplyId === selectedOpportunity.id}
-            isPublished={publishedOpportunityIds.includes(selectedOpportunity.id)}
-            onChange={(value) =>
-              setDrafts((current) => ({
-                ...current,
-                [selectedOpportunity.id]: value,
-              }))
-            }
-            onEdit={() =>
-              setEditingReplyId((current) =>
-                current === selectedOpportunity.id ? null : selectedOpportunity.id,
-              )
-            }
-            onRegenerate={() => void regenerateReply(selectedOpportunity)}
-            onCopy={() => copyReply(selectedOpportunity.id)}
-            onPublish={() => void publishReply(selectedOpportunity)}
-            redditConnection={redditConnection}
-          />
-        )}
-      </div>
-    </>
-  );
-
-  const renderResults = () => (
-    <>
-      <SectionIntro
-        eyebrow="Participation outcomes"
-        title="Results"
-        description="Basic activity and conversion tracking for replies you record as published."
-      />
-      <div className={styles.metricsGridThree}>
-        <MetricCard
-          label="Published replies"
-          value={metrics.publishedReplies}
-          note="Recorded actions"
-          tone="mint"
-        />
-        <MetricCard
-          label="Tracked clicks"
-          value={metrics.trackedClicks}
-          note={metrics.trackedClicks ? "Verified workspace events" : "No verified clicks yet"}
-          tone="violet"
-        />
-        <MetricCard
-          label="Tracked conversions"
-          value={metrics.trackedConversions}
-          note={metrics.trackedConversions ? "Verified workspace events" : "No verified conversions yet"}
-          tone="amber"
-        />
-      </div>
-      <section className={`${styles.card} ${styles.emptyResults}`}>
-        <span className={styles.emptyResultsIcon}>
-          <Icon name="results" size={23} />
-        </span>
-        {publishedOpportunityIds.length === 0 ? (
-          <>
-            <h2>Your first verified result will appear here</h2>
-            <p>
-              Publish a useful reply, record its source and use a tracked link when it
-              genuinely helps. Tracking starts at zero rather than inventing activity.
-            </p>
-            <button
-              className={styles.secondaryButton}
-              type="button"
-              onClick={() => setActiveSection("replies")}
-            >
-              Review ready replies <Icon name="arrow" size={15} />
-            </button>
-          </>
-        ) : accessLevel === "core" ? (
-          <>
-            <h2>Published reply recorded</h2>
-            <p>Record only a click or customer outcome you can verify; attribution is never inferred.</p>
-            <div className={styles.resultActions}>
-              <button className={styles.secondaryButton} type="button" onClick={() => void recordClick()}>
-                Record click <Icon name="arrow" size={15} />
-              </button>
-              <button className={styles.primaryButton} type="button" onClick={() => void recordConversion()}>
-                Record conversion <Icon name="arrow" size={15} />
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <h2>Published reply recorded</h2>
-            <p>Basic click and conversion tracking is available on Core after an explicit purchase.</p>
-            <button className={styles.secondaryButton} type="button" onClick={() => setActiveSection("billing")}>
-              View Core <Icon name="arrow" size={15} />
-            </button>
-          </>
-        )}
-      </section>
-    </>
-  );
-
-  const renderBilling = () => (
-    <>
-      <SectionIntro
-        eyebrow="Simple launch pricing"
-        title="Choose access that matches the work"
-        description="No surprise fees, no automatic upgrade from the free scan and no access derived from a frontend redirect."
-      />
-      <div className={styles.pricingGrid}>
-        {data.pricing.map((plan) => (
-          <PricingCard
-            key={plan.id}
-            plan={plan}
-            featured={plan.id === "full-access-pass"}
-            onCheckout={onCheckout}
-          />
-        ))}
-      </div>
-      <p className={styles.billingFootnote}>
-        Prices exclude VAT where applicable. Tax is calculated at Stripe Checkout.
-        Stripe processing fees are not added as a separate customer charge.
-      </p>
-    </>
-  );
-
-  const renderSettings = () => (
-    <>
-      <SectionIntro
-        eyebrow="One business, clear controls"
-        title="Settings"
-        description="Ordinary users see only the controls needed to keep monitoring relevant. Models, raw classifications and technical search details remain hidden."
-      />
-      <div className={styles.settingsGrid}>
-        <section className={`${styles.card} ${styles.settingsCard}`}>
-          <h3>Business</h3>
-          <label>
-            Website
-            <input value={data.business.url} readOnly />
-          </label>
-          <label>
-            Report name
-            <input value={data.business.name} readOnly />
-          </label>
-          <small>
-            {usesFictionalBusiness
-              ? "Demo fields are read-only because the fixture is fictional."
-              : "Profile fields are read-only after the source-backed analysis."}
-          </small>
-        </section>
-        <section className={`${styles.card} ${styles.settingsCard}`}>
-          <h3>Monitoring</h3>
-          <label className={styles.switchRow}>
-            <span>
-              <strong>High-quality opportunities only</strong>
-              <small>Hide weak matches and duplicate conversations.</small>
-            </span>
-            <input type="checkbox" checked readOnly aria-label="High quality only" />
-          </label>
-          <label className={styles.switchRow}>
-            <span>
-              <strong>Weekly summary</strong>
-              <small>Only meaningful changes, not a raw mention digest.</small>
-            </span>
-            <input type="checkbox" checked readOnly aria-label="Weekly summary" />
-          </label>
-        </section>
-        <section className={`${styles.card} ${styles.settingsCard}`}>
-          <h3>Reddit publishing</h3>
-          <p>
-            <strong>
-              {redditConnection.connected
-                ? `Connected as u/${redditConnection.username}`
-                : redditConnection.configured
-                  ? "Reddit is ready to connect."
-                  : "Direct Reddit connection is not configured."}
-            </strong>
-          </p>
-          <small>
-            {redditConnection.connected
-              ? "Threadline requests identity and reply permission only. Every reply still requires an explicit click."
-              : redditConnection.requiresPaidAccess
-                ? "Unlock the Full Access Pass or Core first. Until then, Copy & open Reddit works for real source-linked opportunities."
-                : redditConnection.configured
-                  ? "Connect once, then post a reviewed reply to its exact source conversation."
-                  : "Copy & open Reddit remains available for source-linked opportunities without OAuth."}
-          </small>
-          <div className={styles.settingsActions}>
-            {redditConnection.connected ? (
-              <button
-                className={styles.secondaryButton}
-                type="button"
-                onClick={() => void onDisconnectReddit?.()}
-              >
-                Disconnect Reddit
-              </button>
-            ) : (
-              <button
-                className={styles.primaryButton}
-                type="button"
-                disabled={!redditConnection.canConnect}
-                onClick={onConnectReddit}
-              >
-                Connect Reddit <Icon name="external" size={14} />
-              </button>
-            )}
-          </div>
-        </section>
-      </div>
-    </>
-  );
-
-  let content: React.ReactNode;
-  if (activeSection === "dashboard") content = hasFullAccess ? renderDashboard() : renderMarketScan();
-  else if (activeSection === "opportunities") content = renderOpportunities();
-  else if (activeSection === "insights") content = renderInsights();
-  else if (activeSection === "competitors") content = renderCompetitors();
-  else if (activeSection === "visibility") content = renderVisibility();
-  else if (activeSection === "replies") content = renderReplies();
-  else if (activeSection === "results") content = renderResults();
-  else if (activeSection === "billing") content = renderBilling();
-  else content = renderSettings();
+  }
 
   return (
-    <div className={styles.productShell}>
-      <aside className={styles.sidebar}>
-        <div className={styles.brand}>
-          <span className={styles.brandMark}>
-            <Icon name="logo" size={22} />
-          </span>
-          <div>
-            <strong>Threadline</strong>
-            <span>Demand intelligence</span>
-          </div>
-        </div>
-
-        <div className={styles.workspaceSwitcher}>
-          <span className={styles.workspaceAvatar} aria-hidden="true">
-            {data.business.name.slice(0, 1).toUpperCase() || "T"}
-          </span>
-          <div>
-            <strong>{data.business.name}</strong>
-            <span>{data.business.hostname}</span>
-          </div>
-          <Icon name="arrow" size={14} />
-        </div>
-
-        <nav className={styles.navigation} aria-label="Primary navigation">
-          {data.navigation.map((section) => (
+    <>
+      {/* Design handoff (design_handoff_scooptr) specifies Instrument Sans
+       * and IBM Plex Mono; loaded here (rather than globally) so the rest
+       * of the product experience keeps its existing fonts -- same
+       * per-surface scoping used on the landing page. */}
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      <link
+        href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet"
+      />
+      {activeSection === "dashboard" && isFree && onCheckout && !valuePropDismissed && (
+        <div className={styles.valuePropOverlay}>
+          <div className={styles.valuePropModal}>
             <button
-              key={section.id}
-              className={activeSection === section.id ? styles.navActive : ""}
               type="button"
-              onClick={() => setActiveSection(section.id)}
+              className={styles.valuePropClose}
+              onClick={() => setValuePropDismissed(true)}
+              aria-label="Dismiss"
             >
-              <Icon name={section.id} size={17} />
-              <span>{section.label}</span>
-              {section.badge !== undefined && <small>{section.badge}</small>}
+              &times;
             </button>
-          ))}
+            <span className={styles.valuePropEyebrow}>{data.business.hostname}</span>
+            <h2>Monitoring isn&apos;t running on {data.business.hostname} yet</h2>
+            <p>
+              What you&apos;re looking at is a one-time snapshot from your free scan. New
+              conversations show up on Reddit every day, and none of them get read until a plan
+              is active.
+            </p>
+            <div className={styles.valuePropCards}>
+              <div className={styles.valuePropCard}>
+                <strong>Be first in the thread</strong>
+                <p>
+                  People post exactly this problem on Reddit every day. Whoever replies first
+                  with something useful usually gets named.
+                </p>
+              </div>
+              <div className={styles.valuePropCard}>
+                <strong>Replies keep working after you write them</strong>
+                <p>
+                  Reddit threads rank in Google search results for years. One good reply keeps
+                  sending people your way long after you post it.
+                </p>
+              </div>
+              <div className={styles.valuePropCard}>
+                <strong>Show up when people ask AI instead</strong>
+                <p>
+                  ChatGPT and Perplexity often quote Reddit threads when someone asks what tool
+                  to use for something.
+                </p>
+              </div>
+            </div>
+            <button type="button" className={styles.blueCta} onClick={goToSection("billing")}>
+              Start finding customers &rarr;
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className={styles.appShell}>
+      <aside className={styles.scSidebar}>
+        <div className={styles.scSidebarLogo}>
+          <span className={styles.scSidebarLogoMark}>
+            <Icon name="logo" size={28} />
+          </span>
+          <span className={styles.scSidebarLogoText}>Scooptr</span>
+        </div>
+
+        <div className={styles.scSidebarBusiness}>
+          <span className={styles.scSidebarBusinessAvatar}>
+            {data.business.hostname.slice(0, 2).toUpperCase()}
+          </span>
+          <span className={styles.scSidebarBusinessLabel}>{data.business.hostname}</span>
+        </div>
+
+        <nav className={styles.scSidebarNav}>
+          {(() => {
+            const inboxIds: NavigationSectionId[] = ["opportunities", "competitors"];
+            const inboxItems = navSections.filter((item) => inboxIds.includes(item.id));
+            const inboxBadgeTotal = inboxItems.reduce((sum, item) => sum + (item.badge ?? 0), 0);
+            const inboxActive = inboxIds.includes(activeSection);
+            const navItemButton = (item: NavigationSection, indented?: boolean) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={goToSection(item.id)}
+                className={`${styles.scSidebarNavItem} ${indented ? styles.scSidebarNavItemIndented : ""} ${
+                  item.id === activeSection ? styles.scSidebarNavItemActive : ""
+                }`}
+              >
+                <span>{item.label}</span>
+                {item.badge ? <span className={styles.scSidebarNavBadge}>{item.badge}</span> : null}
+              </button>
+            );
+            return navSections.map((item) => {
+              if (inboxIds.includes(item.id)) {
+                if (item.id !== "opportunities") return null;
+                return (
+                  <div className={styles.scSidebarInboxGroup} key="inbox-group">
+                    <button
+                      type="button"
+                      className={`${styles.scSidebarNavItem} ${styles.scSidebarInboxHeader} ${
+                        inboxActive ? styles.scSidebarNavItemActive : ""
+                      }`}
+                      onClick={() => setInboxOpen((open) => !open)}
+                    >
+                      <span>Inbox</span>
+                      {inboxBadgeTotal > 0 && <span className={styles.scSidebarNavBadge}>{inboxBadgeTotal}</span>}
+                      <span className={styles.scSidebarInboxChevron} aria-hidden="true">
+                        {inboxOpen ? "⌄" : "⌃"}
+                      </span>
+                    </button>
+                    {inboxOpen && (
+                      <div className={styles.scSidebarInboxChildren}>
+                        {inboxItems.map((child) => navItemButton(child, true))}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              return navItemButton(item);
+            });
+          })()}
         </nav>
 
-        <div className={styles.sidebarFooter}>
-          <span className={styles.accessBadge}>{accessLabel(accessLevel)}</span>
-          <p>
-            {accessLevel === "free"
-              ? "Unlock all stored findings for seven days."
-              : "Access is active for this workspace."}
-          </p>
-          {accessLevel === "free" && (
-            <button type="button" onClick={unlock}>
-              {potentialCustomers.total > 0
-                ? `See all ${potentialCustomers.total} opportunities — $12`
-                : "Unlock full report — $12"} <Icon name="arrow" size={14} />
-            </button>
-          )}
-        </div>
+        {isFree && onCheckout && (
+          <div className={styles.scSidebarSpacer}>
+            <div className={styles.sideCard}>
+              <strong>Monitoring is off</strong>
+              <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                Your scan was a snapshot. New conversations appear every day &mdash; you&apos;re
+                not seeing them yet.
+              </p>
+              <button
+                type="button"
+                className={styles.blueCta}
+                onClick={() => onCheckout("core")}
+              >
+                Upgrade access
+              </button>
+            </div>
+          </div>
+        )}
       </aside>
 
-      <div className={styles.mainColumn}>
-        <div className={styles.topbar}>
-          <MockProviderNotice
-            label={data.fixtureLabel}
-            disclosure={fixtureDisclosure}
-            compact
-          />
-          <div className={styles.topbarActions}>
+      <div className={styles.appMain}>
+        <header className={styles.appHeader}>
+          <div className={styles.appHeaderTitleGroup}>
+            <h1 className={styles.appHeaderTitle}>{activeNavItem?.label ?? "Overview"}</h1>
+            <p className={styles.appHeaderSub}>{sectionSubtitles[activeSection]}</p>
+          </div>
+          <div className={styles.appHeaderActions}>
+            {isFree && <span className={styles.planPill}>free scan</span>}
             {onNewScan && (
-              <button
-                className={styles.newScanButton}
-                type="button"
-                onClick={onNewScan}
-              >
+              <button className={styles.textButton} type="button" onClick={onNewScan}>
                 New scan
               </button>
             )}
-            <span className={styles.lastScan}>
-              {usesFictionalBusiness ? "Demo scan complete" : "Market Scan complete"}
-            </span>
-            <span className={styles.userAvatar} title="Private workspace" aria-label="Private workspace session">TL</span>
+            {isFree && onCheckout && (
+              <button type="button" className={styles.darkCta} onClick={() => onCheckout("core")}>
+                Upgrade
+              </button>
+            )}
           </div>
-        </div>
-        <main className={styles.content}>
-          {(hasFullAccess || activeSection !== "dashboard") && (
+        </header>
+
+        <div className={styles.appContent}>
+          {(usesMockProvider || isFixtureFallbackForSubmittedDomain) && (
             <MockProviderNotice
               label={
-                isFixtureFallbackForSubmittedDomain
-                  ? `Fictional fallback fixture — not ${analyzedDomain}`
-                  : data.fixtureLabel
+                usesMockProvider
+                  ? "Some results use labeled demo/mock data"
+                  : "Fallback demo fixture shown"
               }
               disclosure={fixtureDisclosure}
             />
           )}
-          {content}
-        </main>
+
+          {activeSection === "dashboard" && (
+            <div className={styles.overviewGrid}>
+              <div className={styles.metricsRow}>
+                {overviewMetrics.map((metric) => (
+                  <div className={styles.scMetricCard} key={metric.label}>
+                    <span className={styles.scMetricLabel}>{metric.label}</span>
+                    <span className={styles.scMetricValue}>{metric.value}</span>
+                    <span className={styles.scMetricNote}>{metric.note}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className={styles.overviewColumns}>
+                <div className={styles.overviewMain}>
+                  <div className={styles.todayCard}>
+                    <div className={styles.todayCardHead}>
+                      <div className={styles.todayCardHeadText}>
+                        <strong>Worth your time today</strong>
+                        <span>Ordered by AI reliability, highest first</span>
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.ghostButton}
+                        onClick={goToSection("opportunities")}
+                      >
+                        See all
+                      </button>
+                    </div>
+                    {topCarouselItems.length === 0 ? (
+                      <p className={styles.todayEmpty}>
+                        Nothing cleared qualification this run.
+                      </p>
+                    ) : (
+                      topCarouselItems.map((item) => {
+                        const title = item.kind === "opportunity" ? item.opportunity.title : item.conversation.title;
+                        const subreddit = item.kind === "opportunity" ? item.opportunity.subreddit : item.conversation.subreddit;
+                        const why =
+                          item.kind === "opportunity"
+                            ? item.opportunity.classification.customerProblem
+                            : item.conversation.summary;
+                        return (
+                          <div key={item.id} className={styles.todayItem}>
+                            <div className={styles.todayItemBody}>
+                              <div className={styles.todayItemMeta}>
+                                <span>{subreddit}</span>
+                                <span
+                                  className={styles.todayTag}
+                                  style={{ background: "var(--amber-soft)", color: "var(--amber)" }}
+                                >
+                                  {item.kind === "opportunity" ? "opportunity" : "relevant"}
+                                </span>
+                              </div>
+                              <span className={styles.todayTitle}>{title}</span>
+                              <span className={styles.todayWhy}>{why}</span>
+                            </div>
+                            <button
+                              type="button"
+                              className={styles.ghostButton}
+                              onClick={goToSection("opportunities")}
+                            >
+                              Review
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                <div className={styles.overviewSide}>
+                  <RedditMonitoringPanel
+                    key={monitoring
+                      ? `${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
+                      : "monitoring-unavailable"}
+                    monitoring={monitoring}
+                    onUpdate={onUpdateMonitoring}
+                    runs={monitorRuns}
+                    onViewRun={onViewMonitorRun}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === "opportunities" && (
+            <div className={styles.opportunitiesScreen}>
+              <section className={styles.dashboardSection} style={{ margin: 0 }}>
+                {!hasAnyRelevantContent ? (
+                  <section className={`${styles.card} ${styles.emptyResults}`}>
+                    <h2>No relevant Reddit posts or comments were found in this scan.</h2>
+                    <p>Nothing cleared qualification this run; nothing was substituted to fill the space.</p>
+                  </section>
+                ) : (
+                  carouselItems.length > 0 && (
+                    <TrackedSection event="opportunity_preview_viewed" onView={onFunnelEvent}>
+                      <div className={styles.sectionHeadingRow}>
+                        <div>
+                          <h2>Reddit posts found:</h2>
+                        </div>
+                        <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
+                      </div>
+                      <OpportunityCarousel
+                        items={carouselItems}
+                        drafts={drafts}
+                        editingReplyId={editingReplyId}
+                        copiedReplyId={copiedReplyId}
+                        publishedOpportunityIds={publishedOpportunityIds}
+                        onDraftChange={(opportunityId, value) =>
+                          setDrafts((current) => ({ ...current, [opportunityId]: value }))
+                        }
+                        onToggleEdit={(opportunityId) =>
+                          setEditingReplyId((current) => (current === opportunityId ? null : opportunityId))
+                        }
+                        onRegenerate={(opportunity) => void regenerateReply(opportunity)}
+                        onCopy={(opportunityId) => void copyReply(opportunityId)}
+                        onPublish={(opportunity) => void publishReply(opportunity)}
+                        redditConnection={redditConnection}
+                        onFunnelEvent={onFunnelEvent}
+                        createdReplies={createdReplies}
+                        creatingReplyId={creatingReplyId}
+                        onCreateReply={(conversation) => void createReply(conversation)}
+                      />
+                    </TrackedSection>
+                  )
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeSection === "insights" && (
+            <div className={styles.lightSection}>
+              <ThemeSection
+                kind="struggle"
+                eyebrow="Recurring pain"
+                heading="What customers are struggling with"
+                themes={data.conversationThemes}
+              />
+              <ThemeSection
+                kind="request"
+                eyebrow="Recurring requests"
+                heading="What they are asking for"
+                themes={data.conversationThemes}
+              />
+              {data.insights.length > 0 &&
+                data.insights.map((insight) => (
+                  <div key={insight.id} className={styles.simpleCard}>
+                    <span className={styles.simpleCardEyebrow}>{insight.eyebrow}</span>
+                    <span className={styles.simpleCardTitle}>{insight.title}</span>
+                    <p className={styles.simpleCardBody}>{insight.summary}</p>
+                    <span className={styles.simpleCardMeta}>{insight.recommendedAction}</span>
+                  </div>
+                ))}
+              {isFree && onCheckout && data.lockedCounts.insights > 0 && (
+                <div className={styles.simpleEmpty}>
+                  <div className={styles.emptyIcon} />
+                  <strong>
+                    {data.lockedCounts.insights} more insight{data.lockedCounts.insights === 1 ? "" : "s"} stored
+                  </strong>
+                  <p>
+                    Patterns need volume. After daily monitoring runs for a while, this is where the
+                    recurring problems and requests show up &mdash; with the conversations that prove them.
+                  </p>
+                  <button type="button" className={styles.blueCta} onClick={() => onCheckout("core")}>
+                    Turn on monitoring
+                  </button>
+                  <span className={styles.emptyFoot}>needs about a week of data</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeSection === "visibility" && (
+            <div className={styles.lightSection}>
+              <AiVisibilityPanel
+                key={aiVisibility ? `${aiVisibility.enabled}:${aiVisibility.nextRunAt}` : "ai-visibility-unavailable"}
+                status={aiVisibility}
+                onUpdate={onUpdateAiVisibility}
+                scans={visibilityScans}
+              />
+            </div>
+          )}
+
+          {activeSection === "competitors" && (
+            <div className={styles.lightSection}>
+              {data.competitorWeaknesses.length === 0 ? (
+                <div className={styles.simpleEmpty}>
+                  <div className={styles.emptyIcon} />
+                  <strong>No competitor signals yet</strong>
+                  <p>
+                    We didn&apos;t find any complaints about named competitors in this scan. Once
+                    monitoring is on, we&apos;ll surface it the moment someone asks for an alternative.
+                  </p>
+                </div>
+              ) : (
+                data.competitorWeaknesses.map((weakness) => (
+                  <div key={weakness.id} className={styles.simpleCard}>
+                    <span className={styles.simpleCardEyebrow}>
+                      {weakness.competitorName ?? "Unnamed competitor"}
+                    </span>
+                    <span className={styles.simpleCardTitle}>{weakness.headline}</span>
+                    <p className={styles.simpleCardBody}>{weakness.summary}</p>
+                    <span className={styles.simpleCardMeta}>{weakness.recommendedAction}</span>
+                  </div>
+                ))
+              )}
+              {isFree && onCheckout && data.lockedCounts.competitorSignals > 0 && (
+                <div className={styles.simpleEmpty}>
+                  <div className={styles.emptyIcon} />
+                  <strong>
+                    {data.lockedCounts.competitorSignals} more competitor signal
+                    {data.lockedCounts.competitorSignals === 1 ? "" : "s"} stored
+                  </strong>
+                  <p>
+                    Found and stored from this scan. Turn on monitoring to keep watching for new ones
+                    every day instead of just this one snapshot.
+                  </p>
+                  <button type="button" className={styles.blueCta} onClick={() => onCheckout("core")}>
+                    Turn on monitoring
+                  </button>
+                  <span className={styles.emptyFoot}>from this scan</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeSection === "replies" && (
+            <div className={styles.lightSection}>
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardTitle}>
+                  {publishedOpportunityIds.length} posted &middot;{" "}
+                  {rankedOpportunities.length + sessionOnlyDraftedConversations.length} drafted
+                </span>
+                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                  Nothing is ever posted without you reading it first.
+                </p>
+              </div>
+              {sessionOnlyDraftedConversations.map((conversation) => (
+                <div key={conversation.id} className={styles.simpleCard}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                    <span className={styles.simpleCardEyebrow}>{conversation.subreddit}</span>
+                    <span className={styles.todayTag} style={{ background: "#f4f4f5", color: "#52525b" }}>
+                      draft
+                    </span>
+                  </div>
+                  <span className={styles.simpleCardTitle}>{conversation.title}</span>
+                  <p className={styles.simpleCardBody}>{conversation.draftText}</p>
+                  <button
+                    type="button"
+                    className={styles.ghostButton}
+                    onClick={goToSection("opportunities")}
+                    style={{ alignSelf: "flex-start" }}
+                  >
+                    Open in Opportunities
+                  </button>
+                </div>
+              ))}
+              {rankedOpportunities.map((opportunity) => {
+                const isPublished = publishedOpportunityIds.includes(opportunity.id);
+                return (
+                  <div key={opportunity.id} className={styles.simpleCard}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                      <span className={styles.simpleCardEyebrow}>{opportunity.subreddit}</span>
+                      <span
+                        className={styles.todayTag}
+                        style={
+                          isPublished
+                            ? { background: "var(--green-soft)", color: "var(--green-dark)" }
+                            : { background: "#f4f4f5", color: "#52525b" }
+                        }
+                      >
+                        {isPublished ? "posted" : "draft"}
+                      </span>
+                    </div>
+                    <span className={styles.simpleCardTitle}>{opportunity.title}</span>
+                    <p className={styles.simpleCardBody}>
+                      {drafts[opportunity.id] ?? opportunity.reply.draft}
+                    </p>
+                    <button
+                      type="button"
+                      className={styles.ghostButton}
+                      onClick={goToSection("opportunities")}
+                      style={{ alignSelf: "flex-start" }}
+                    >
+                      Open in Opportunities
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {activeSection === "results" && (
+            <div className={styles.lightSection}>
+              {data.lockedCounts ? (() => {
+                // These are counts of ADDITIONAL, currently-hidden findings
+                // beyond what's already shown elsewhere in the dashboard --
+                // not a total of everything the scan found. When nothing is
+                // held back (e.g. full access, or a small scan with nothing
+                // left over), every field here is legitimately zero. The old
+                // headline claimed this was the scan's full total, so a
+                // zero read as "the scan found nothing at all." Label what's
+                // actually being measured, and give the zero case its own
+                // honest copy instead of a misleading all-zero total.
+                const totalLocked =
+                  data.lockedCounts.opportunities +
+                  data.lockedCounts.insights +
+                  data.lockedCounts.competitorSignals +
+                  data.lockedCounts.visibilityOpportunities +
+                  data.lockedCounts.readyReplies;
+                if (totalLocked === 0) {
+                  return (
+                    <div className={styles.simpleCard}>
+                      <span className={styles.simpleCardTitle}>Nothing else is hidden</span>
+                      <p className={styles.simpleCardBody}>
+                        Everything this scan found is already visible in Opportunities,
+                        Insights, Competitors, and Replies.
+                      </p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className={styles.simpleCard}>
+                    <span className={styles.simpleCardTitle}>More is stored than shown here</span>
+                    <p className={styles.simpleCardBody}>
+                      {data.lockedCounts.opportunities} opportunities &middot;{" "}
+                      {data.lockedCounts.insights} insights &middot;{" "}
+                      {data.lockedCounts.competitorSignals} competitor signals &middot;{" "}
+                      {data.lockedCounts.visibilityOpportunities} visibility opportunities &middot;{" "}
+                      {data.lockedCounts.readyReplies} ready replies
+                    </p>
+                    {isFree && (
+                      <span className={styles.simpleCardMeta}>
+                        Some of this is stored but not shown on the free scan.
+                      </span>
+                    )}
+                  </div>
+                );
+              })() : (
+                <div className={styles.simpleEmpty}>
+                  <strong>Nothing stored yet</strong>
+                  <p>Results from this scan will appear here once they&apos;re available.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeSection === "monitoring" && (
+            <div className={styles.lightSection}>
+              <BusinessSummaryEditor
+                summary={data.business.oneLineSummary}
+                onUpdate={onUpdateBusinessSummary}
+              />
+
+              <RedditMonitoringPanel
+                key={monitoring
+                  ? `config:${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
+                  : "monitoring-config-unavailable"}
+                monitoring={monitoring}
+                onUpdate={onUpdateMonitoring}
+                runs={monitorRuns}
+                onViewRun={onViewMonitorRun}
+              />
+
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardTitle}>Reddit account</span>
+                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                  {redditConnection.connected
+                    ? `Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`
+                    : "Connect it to post replies from here. Without it you copy and paste \u2014 the drafts work either way."}
+                </p>
+                {redditConnection.connected ? (
+                  <button
+                    type="button"
+                    className={styles.ghostButton}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => void disconnectReddit()}
+                    disabled={disconnectingReddit}
+                  >
+                    {disconnectingReddit ? "Disconnecting\u2026" : "Disconnect Reddit"}
+                  </button>
+                ) : redditConnection.canConnect ? (
+                  <button
+                    type="button"
+                    className={styles.darkCta}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={onConnectReddit}
+                  >
+                    Connect Reddit
+                  </button>
+                ) : redditConnection.requiresPaidAccess ? (
+                  <span className={styles.simpleCardMeta}>Posting to Reddit requires a paid plan.</span>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {activeSection === "settings" && (
+            <div className={styles.lightSection}>
+              <BusinessProfilePanel profile={data.business} />
+
+              <div className={styles.simpleCard}>
+                <span className={styles.simpleCardTitle}>Reddit account</span>
+                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                  {redditConnection.connected
+                    ? `Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`
+                    : "Connect it to post replies from here. Without it you copy and paste \u2014 the drafts work either way."}
+                </p>
+                {redditConnection.connected ? (
+                  <button
+                    type="button"
+                    className={styles.ghostButton}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => void disconnectReddit()}
+                    disabled={disconnectingReddit}
+                  >
+                    {disconnectingReddit ? "Disconnecting\u2026" : "Disconnect Reddit"}
+                  </button>
+                ) : redditConnection.canConnect ? (
+                  <button
+                    type="button"
+                    className={styles.darkCta}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={onConnectReddit}
+                  >
+                    Connect Reddit
+                  </button>
+                ) : redditConnection.requiresPaidAccess ? (
+                  <span className={styles.simpleCardMeta}>Posting to Reddit requires a paid plan.</span>
+                ) : null}
+              </div>
+
+              {data.business.competitors.length > 0 && (
+                <div className={styles.simpleCard}>
+                  <span className={styles.simpleCardTitle}>Competitors identified</span>
+                  <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                    Tools we watch for alongside your own keywords, found from your website.
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                    {data.business.competitors.map((competitor) => (
+                      <span key={competitor} className={styles.todayTag} style={{ background: "#f4f4f5", color: "#3f3f46" }}>
+                        {competitor}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

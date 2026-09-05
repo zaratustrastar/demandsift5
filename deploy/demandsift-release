@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+unset COMPOSE_FILE COMPOSE_PROJECT_NAME DOCKER_CONTEXT DOCKER_HOST
+
+readonly SOURCE_REPOSITORY=/opt/demandsift5-pr1
+readonly PRODUCTION_ROOT=/opt/demandsift5
+readonly ENV_FILE="$PRODUCTION_ROOT/deploy/vps.env"
+readonly COMPOSE_FILE_PATH="$PRODUCTION_ROOT/deploy/compose.vps.yaml"
+readonly PROJECT=demandsift2
+readonly FEATURE_REF=refs/heads/feature/reddit-intelligence-pipeline
+readonly STATE_DIRECTORY=/var/lib/demandsift-release
+readonly REPOSITORY="$STATE_DIRECTORY/repository"
+readonly CANDIDATE_STATE="$STATE_DIRECTORY/candidate"
+readonly DEPLOYED_STATE="$STATE_DIRECTORY/deployed"
+readonly RELEASE_LOCK="$STATE_DIRECTORY/release.lock"
+
+fail() {
+  echo "demandsift-release: $*" >&2
+  exit 1
+}
+
+acquire_release_lock() {
+  install -d -m 0700 -o root -g root "$STATE_DIRECTORY"
+  exec 9>"$RELEASE_LOCK"
+  /usr/bin/flock --nonblock 9 || fail "another release operation is already running"
+}
+
+source_git() {
+  /usr/bin/git -c safe.directory="$SOURCE_REPOSITORY" -C "$SOURCE_REPOSITORY" "$@"
+}
+
+ensure_release_checkout() {
+  [ -e "$SOURCE_REPOSITORY/.git" ] || fail "missing source checkout"
+  install -d -m 0700 -o root -g root "$STATE_DIRECTORY"
+  if [ ! -e "$REPOSITORY/.git" ]; then
+    [ ! -e "$REPOSITORY" ] || fail "release checkout path exists but is not a Git worktree"
+    source_git worktree add --detach "$REPOSITORY" HEAD >/dev/null
+  fi
+  # The dedicated release checkout is a linked worktree, so .git is a file.
+  [ -e "$REPOSITORY/.git" ] || fail "missing release checkout"
+}
+
+require_fixed_layout() {
+  ensure_release_checkout
+  [ -f "$ENV_FILE" ] || fail "missing production environment file"
+  [ -f "$COMPOSE_FILE_PATH" ] || fail "missing production Compose file"
+}
+
+compose() {
+  /usr/bin/docker compose \
+    -p "$PROJECT" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE_PATH" \
+    "$@"
+}
+
+git_at_release() {
+  /usr/bin/git -c safe.directory="$REPOSITORY" -C "$REPOSITORY" "$@"
+}
+
+reclaim_build_space() {
+  local container command project image
+
+  # A cancelled legacy Docker build can leave its failed RUN container behind,
+  # pinning every intermediate layer. Remove only stopped, non-Compose
+  # containers whose command is the DemandSift web build; production Compose
+  # containers (including the exited migration job) are never selected.
+  while IFS= read -r container; do
+    [ -n "$container" ] || continue
+    project=$(/usr/bin/docker inspect --format '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}' "$container" 2>/dev/null || true)
+    [ -z "$project" ] || continue
+    command=$(/usr/bin/docker inspect --format '{{json .Config.Cmd}}' "$container" 2>/dev/null || true)
+    case "$command" in
+      *"npm run build:node"*) /usr/bin/docker container rm "$container" >/dev/null 2>&1 || true ;;
+    esac
+  done < <(/usr/bin/docker container ls --all --quiet --filter status=exited)
+
+  while IFS= read -r image; do
+    case "$image" in
+      demandsift2-web:candidate-*|demandsift2-worker:candidate-*)
+        /usr/bin/docker image rm "$image" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < <(/usr/bin/docker image ls --format '{{.Repository}}:{{.Tag}}')
+
+  # Candidate, latest, rollback, and running images remain referenced. Only
+  # dangling images and unused builder cache are reclaimed; volumes and
+  # containers are deliberately outside this cleanup boundary.
+  /usr/bin/docker image prune --force >/dev/null
+  /usr/bin/docker builder prune --all --force >/dev/null
+}
+
+reclaim_release() {
+  [ "$#" -eq 0 ] || fail "reclaim accepts no arguments"
+  require_fixed_layout
+  reclaim_build_space
+  /usr/bin/df -h / | /usr/bin/tail -n 1
+}
+
+read_candidate_state() {
+  [ -f "$CANDIDATE_STATE" ] || fail "no tested candidate image is staged"
+  # This file is created only by this root-owned script from validated values.
+  # shellcheck disable=SC1090
+  source "$CANDIDATE_STATE"
+  [[ ${CANDIDATE_SHA:-} =~ ^[0-9a-f]{40}$ ]] || fail "invalid candidate state"
+  [[ ${CANDIDATE_WEB:-} =~ ^demandsift2-web:candidate-[0-9a-f]{12}$ ]] || fail "invalid web candidate state"
+  [[ ${CANDIDATE_WORKER:-} =~ ^demandsift2-worker:candidate-[0-9a-f]{12}$ ]] || fail "invalid worker candidate state"
+}
+
+inspect_release() {
+  require_fixed_layout
+  echo "source_checkout=$SOURCE_REPOSITORY"
+  echo "release_checkout=$REPOSITORY"
+  git_at_release status --short --branch
+  git_at_release log -1 --format='release_head=%H subject=%s'
+  /usr/bin/docker ps --format 'container={{.Names}} status={{.Status}} project={{.Label "com.docker.compose.project"}} service={{.Label "com.docker.compose.service"}}'
+  compose ps
+}
+
+diagnose_release() {
+  [ "$#" -eq 1 ] || fail "diagnose requires exactly one scan ID"
+  local scan_id=$1
+  [[ $scan_id =~ ^scan_[0-9a-z]{16,80}$ ]] || fail "invalid scan ID"
+  require_fixed_layout
+
+  # Emit only aggregate pipeline diagnostics for the requested scan. This
+  # deliberately excludes source text, authors, permalinks, environment values,
+  # API credentials, and unrelated workspace/customer records.
+  compose exec -T database sh -c '
+    exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --no-align --tuples-only --field-separator="|" -v scan_id="$1"
+  ' sh "$scan_id" <<'SQL'
+SELECT
+  id,
+  status,
+  COALESCE(record #>> '{result,retrievalDiagnostics,queryCount}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,fetchedCandidates}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,normalizedCandidates}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,locallyMatchedCandidates}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForTriage}', '0'),
+  COALESCE(record #>> '{result,diagnostics,triageReturned}', '0'),
+  COALESCE(record #>> '{result,diagnostics,worthEnriching}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,enrichmentAttempts}', '0'),
+  COALESCE(record #>> '{result,retrievalDiagnostics,enrichedConversations}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForDeepQualification}', '0'),
+  COALESCE(record #>> '{result,diagnostics,potentialCustomerConversations}', '0'),
+  COALESCE(record #>> '{result,diagnostics,uniquePotentialCustomers}', '0'),
+  COALESCE(record #>> '{result,diagnostics,repliesGenerated}', '0')
+FROM runtime_scans
+WHERE id = :'scan_id';
+SQL
+}
+
+scan_status_release() {
+  [ "$#" -eq 1 ] || fail "scan-status requires exactly one scan ID"
+  local scan_id=$1
+  [[ $scan_id =~ ^scan_[0-9a-z]{16,80}$ ]] || fail "invalid scan ID"
+  require_fixed_layout
+
+  # Read only status, stage states, and aggregate counters. No source content,
+  # authors, permalinks, customer text, or environment values leave the VPS.
+  compose exec -T database sh -c '
+    exec psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --no-align --tuples-only --field-separator="|" -v scan_id="$1"
+  ' sh "$scan_id" <<'SQL'
+SELECT
+  id,
+  status,
+  COALESCE(record->>'error', ''),
+  COALESCE(record #>> '{result,retrievalDiagnostics,fetchedCandidates}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForTriage}', '0'),
+  COALESCE(record #>> '{result,diagnostics,requestedForEnrichment}', '0'),
+  COALESCE(record #>> '{result,diagnostics,submittedForDeepQualification}', '0'),
+  COALESCE(record #>> '{result,diagnostics,uniquePotentialCustomers}', '0'),
+  COALESCE(record #>> '{result,diagnostics,repliesGenerated}', '0')
+FROM runtime_scans
+WHERE id = :'scan_id';
+
+SELECT stage->>'id', stage->>'status'
+FROM runtime_scans
+CROSS JOIN LATERAL jsonb_array_elements(record->'progress') AS stage
+WHERE id = :'scan_id';
+SQL
+}
+
+build_candidate() {
+  [ "$#" -eq 1 ] || fail "build requires exactly one commit SHA"
+  local expected_sha=$1
+  [[ $expected_sha =~ ^[0-9a-f]{40}$ ]] || fail "commit SHA must be 40 lowercase hexadecimal characters"
+  require_fixed_layout
+
+  [ -z "$(git_at_release status --porcelain --untracked-files=no)" ] || fail "release checkout has tracked local changes"
+  git_at_release fetch --no-tags origin "$FEATURE_REF"
+  local fetched_sha
+  fetched_sha=$(git_at_release rev-parse FETCH_HEAD)
+  [ "$fetched_sha" = "$expected_sha" ] || fail "requested commit is not the current feature branch tip"
+  git_at_release checkout --detach "$fetched_sha"
+
+  reclaim_build_space
+
+  local short_sha=${fetched_sha:0:12}
+  local web_image="demandsift2-web:candidate-$short_sha"
+  local worker_image="demandsift2-worker:candidate-$short_sha"
+
+  /usr/bin/docker build --pull --force-rm -f "$REPOSITORY/deploy/Dockerfile.web" -t "$web_image" "$REPOSITORY"
+  /usr/bin/docker build --pull --force-rm -f "$REPOSITORY/deploy/Dockerfile.worker" -t "$worker_image" "$REPOSITORY"
+
+  /usr/bin/docker run --rm --network none --entrypoint node "$web_image" \
+    -e 'const fs=require("node:fs"); for (const file of ["dist/standalone/server.js","dist/standalone/package.json"]) { if (!fs.existsSync(file)) process.exit(1); }'
+  /usr/bin/docker run --rm --network none --entrypoint node "$worker_image" \
+    --check scripts/background-worker.mjs
+
+  {
+    printf 'CANDIDATE_SHA=%s\n' "$fetched_sha"
+    printf 'CANDIDATE_WEB=%s\n' "$web_image"
+    printf 'CANDIDATE_WORKER=%s\n' "$worker_image"
+  } > "$CANDIDATE_STATE"
+  chmod 0600 "$CANDIDATE_STATE"
+  echo "candidate_sha=$fetched_sha"
+  echo "candidate_images_tested=true"
+}
+
+running_image_reference() {
+  local container=$1 image_id image_name
+  image_id=$(/usr/bin/docker inspect --format '{{.Image}}' "$container")
+  if /usr/bin/docker image inspect "$image_id" >/dev/null 2>&1; then
+    printf '%s\n' "$image_id"
+    return
+  fi
+
+  # A legacy cleanup may have removed the image record while the container is
+  # still running. Compose's named image is captured in the container config
+  # and remains safe to tag before candidate aliases are activated.
+  image_name=$(/usr/bin/docker inspect --format '{{.Config.Image}}' "$container")
+  /usr/bin/docker image inspect "$image_name" >/dev/null 2>&1 \
+    || fail "running container $container has no taggable image reference"
+  printf '%s\n' "$image_name"
+}
+
+tag_running_for_rollback() {
+  local web_image worker_image migrate_image
+  web_image=$(running_image_reference demandsift2-web-1)
+  worker_image=$(running_image_reference demandsift2-worker-1)
+  migrate_image=$(running_image_reference demandsift2-migrate-1)
+  /usr/bin/docker image tag "$web_image" demandsift2-web:rollback
+  /usr/bin/docker image tag "$worker_image" demandsift2-worker:rollback
+  /usr/bin/docker image tag "$migrate_image" demandsift2-migrate:rollback
+}
+
+activate_rollback_images() {
+  /usr/bin/docker image inspect demandsift2-web:rollback >/dev/null
+  /usr/bin/docker image inspect demandsift2-worker:rollback >/dev/null
+  /usr/bin/docker image inspect demandsift2-migrate:rollback >/dev/null
+  /usr/bin/docker image tag demandsift2-web:rollback demandsift2-web:latest
+  /usr/bin/docker image tag demandsift2-worker:rollback demandsift2-worker:latest
+  /usr/bin/docker image tag demandsift2-migrate:rollback demandsift2-migrate:latest
+  compose up -d --no-build --remove-orphans
+}
+
+wait_for_release() {
+  local attempt web_health worker_status
+  for attempt in $(seq 1 60); do
+    web_health=$(/usr/bin/docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' demandsift2-web-1 2>/dev/null || true)
+    worker_status=$(/usr/bin/docker inspect --format '{{.State.Status}}' demandsift2-worker-1 2>/dev/null || true)
+    if [ "$web_health" = healthy ] && [ "$worker_status" = running ]; then
+      /usr/bin/curl --fail --silent --show-error --max-time 10 http://127.0.0.1/ >/dev/null
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+deploy_candidate() {
+  [ "$#" -eq 0 ] || fail "deploy accepts no arguments"
+  require_fixed_layout
+  read_candidate_state
+  tag_running_for_rollback
+
+  /usr/bin/docker image tag "$CANDIDATE_WEB" demandsift2-web:latest
+  /usr/bin/docker image tag "$CANDIDATE_WORKER" demandsift2-worker:latest
+  /usr/bin/docker image tag "$CANDIDATE_WORKER" demandsift2-migrate:latest
+
+  if ! compose up -d --no-build --remove-orphans || ! wait_for_release; then
+    echo "candidate deployment failed; restoring rollback images" >&2
+    activate_rollback_images
+    wait_for_release || true
+    fail "candidate did not become healthy"
+  fi
+
+  printf 'DEPLOYED_SHA=%s\n' "$CANDIDATE_SHA" > "$DEPLOYED_STATE"
+  chmod 0600 "$DEPLOYED_STATE"
+  echo "deployed_sha=$CANDIDATE_SHA"
+  compose ps
+}
+
+rollback_release() {
+  [ "$#" -eq 0 ] || fail "rollback accepts no arguments"
+  require_fixed_layout
+  activate_rollback_images
+  wait_for_release || fail "rollback images did not become healthy"
+  echo "rollback_healthy=true"
+  compose ps
+}
+
+command_name=${1:-}
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+acquire_release_lock
+
+case "$command_name" in
+  inspect) inspect_release "$@" ;;
+  diagnose) diagnose_release "$@" ;;
+  scan-status) scan_status_release "$@" ;;
+  build) build_candidate "$@" ;;
+  deploy) deploy_candidate "$@" ;;
+  reclaim) reclaim_release "$@" ;;
+  rollback) rollback_release "$@" ;;
+  *) fail "allowed commands: inspect, diagnose <scan-id>, scan-status <scan-id>, build <feature-tip-sha>, deploy, reclaim, rollback" ;;
+esac

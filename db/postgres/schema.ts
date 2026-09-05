@@ -20,12 +20,15 @@ import { sql } from "drizzle-orm";
 
 import type { OpportunityClassification } from "@/lib/domain/types";
 import type {
+  AiVisibilityAnswer,
   CheckoutRecord,
   ConversionRecord,
   EntitlementRecord,
   FunnelEventRecord,
   RedditConnectionRecord,
   RedditPublicationRecord,
+  RedditMonitorRunRecord,
+  RedditMonitorSettingsRecord,
   ReplyRecord,
   ScanRecord,
 } from "@/lib/server/contracts";
@@ -427,9 +430,20 @@ export const runtimeWorkspaces = pgTable("runtime_workspaces", {
   id: varchar("id", { length: 96 }).primaryKey(),
   tokenHash: varchar("token_hash", { length: 64 }).notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  /**
+   * Set once a signed-in user claims this workspace (see
+   * lib/server/google-oauth.ts's callback handler). Nullable: most
+   * workspaces are still anonymous, pre-signup. Deliberately points at
+   * `users` (see 0001) rather than the older `workspaces`/`workspace_members`
+   * tables -- see 0010's migration comment for why.
+   */
+  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt,
   updatedAt,
-}, (table) => [index("runtime_workspaces_expires_idx").on(table.expiresAt)]);
+}, (table) => [
+  index("runtime_workspaces_expires_idx").on(table.expiresAt),
+  index("runtime_workspaces_user_idx").on(table.userId),
+]);
 
 export const runtimeScans = pgTable("runtime_scans", {
   id: varchar("id", { length: 96 }).primaryKey(),
@@ -479,6 +493,8 @@ export const runtimeCheckouts = pgTable("runtime_checkouts", {
 export const runtimeMonitoringSchedules = pgTable("runtime_monitoring_schedules", {
   workspaceId: varchar("workspace_id", { length: 96 }).primaryKey().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
   seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  // "" for a context-mode business (see runtime_scans.website_url) -- kept
+  // NOT NULL, but no longer forced non-empty; see migration 0008.
   websiteUrl: text("website_url").notNull(),
   plan: varchar("plan", { length: 24 }).notNull(),
   cadenceSeconds: integer("cadence_seconds").notNull(),
@@ -490,9 +506,133 @@ export const runtimeMonitoringSchedules = pgTable("runtime_monitoring_schedules"
 }, (table) => [
   check("runtime_monitoring_schedules_plan_check", sql`${table.plan} in ('pass', 'core')`),
   check("runtime_monitoring_schedules_cadence_check", sql`${table.cadenceSeconds} > 0`),
-  check("runtime_monitoring_schedules_website_check", sql`length(trim(${table.websiteUrl})) > 0`),
   index("runtime_monitoring_schedules_due_idx").on(table.enabled, table.nextRunAt),
 ]);
+
+export const runtimeRedditMonitors = pgTable("runtime_reddit_monitors", {
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  websiteUrl: text("website_url").notNull(),
+  enabled: boolean("enabled").default(false).notNull(),
+  watchTerms: jsonb("watch_terms").$type<RedditMonitorSettingsRecord["watchTerms"]>().default([]).notNull(),
+  lastSuccessfulMonitorAt: timestamp("last_successful_monitor_at", { withTimezone: true }),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }).defaultNow().notNull(),
+  lastRunId: varchar("last_run_id", { length: 96 }),
+  createdAt,
+  updatedAt,
+}, (table) => [
+  // Composite, not workspaceId alone: a workspace can run scans for
+  // several different businesses over time (see migration 0013), and each
+  // needs its own monitor settings -- a workspace-only key meant whichever
+  // business last configured monitoring silently overwrote every other
+  // business's settings and results in the same workspace.
+  primaryKey({ columns: [table.workspaceId, table.seedScanId] }),
+  check("runtime_reddit_monitors_terms_check", sql`jsonb_typeof(${table.watchTerms}) = 'array'`),
+  check("runtime_reddit_monitors_website_check", sql`length(trim(${table.websiteUrl})) > 0`),
+  index("runtime_reddit_monitors_due_idx").on(table.enabled, table.nextRunAt),
+]);
+
+export const runtimeRedditMonitorRuns = pgTable("runtime_reddit_monitor_runs", {
+  id: varchar("id", { length: 96 }).primaryKey(),
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  scanId: varchar("scan_id", { length: 96 }).references(() => runtimeScans.id, { onDelete: "set null" }),
+  status: varchar("status", { length: 24 }).notNull(),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+  windowEndedAt: timestamp("window_ended_at", { withTimezone: true }).notNull(),
+  actorRunId: varchar("actor_run_id", { length: 160 }),
+  record: jsonb("record").$type<RedditMonitorRunRecord>().notNull(),
+  error: text("error"),
+  createdAt,
+  updatedAt,
+}, (table) => [
+  check("runtime_reddit_monitor_runs_status_check", sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+  check("runtime_reddit_monitor_runs_window_check", sql`${table.windowEndedAt} >= ${table.windowStartedAt}`),
+  index("runtime_reddit_monitor_runs_workspace_created_idx").on(table.workspaceId, table.createdAt),
+]);
+
+export const runtimeRedditMonitorMatches = pgTable("runtime_reddit_monitor_matches", {
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  provider: varchar("provider", { length: 100 }).notNull(),
+  externalId: varchar("external_id", { length: 255 }).notNull(),
+  canonicalUrl: text("canonical_url"),
+  sourceCreatedAt: timestamp("source_created_at", { withTimezone: true }).notNull(),
+  matchedTerms: jsonb("matched_terms").$type<string[]>().default([]).notNull(),
+  firstRunId: varchar("first_run_id", { length: 96 }).notNull().references(() => runtimeRedditMonitorRuns.id, { onDelete: "restrict" }),
+  lastRunId: varchar("last_run_id", { length: 96 }).notNull().references(() => runtimeRedditMonitorRuns.id, { onDelete: "restrict" }),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  outcome: varchar("outcome", { length: 32 }).default("unreviewed").notNull(),
+  record: jsonb("record").$type<Record<string, unknown>>().notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.workspaceId, table.provider, table.externalId] }),
+  check("runtime_reddit_monitor_matches_terms_check", sql`jsonb_typeof(${table.matchedTerms}) = 'array'`),
+  check("runtime_reddit_monitor_matches_outcome_check", sql`${table.outcome} in ('unreviewed', 'irrelevant', 'relevant', 'opportunity')`),
+  index("runtime_reddit_monitor_matches_run_idx").on(table.lastRunId),
+]);
+
+/**
+ * AI Visibility Tracking (MVP) -- a sidecar, isolated from the Reddit
+ * discovery/monitoring tables above. Mirrors the runtime_reddit_monitors /
+ * runtime_reddit_monitor_runs split: one settings row per workspace (the
+ * weekly Monday schedule) and one row per scan (the 9 stored answers +
+ * computed metrics, kept as scan history for week-over-week comparison).
+ */
+export const runtimeAiVisibilitySchedules = pgTable("runtime_ai_visibility_schedules", {
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  enabled: boolean("enabled").default(true).notNull(),
+  lastSuccessfulScanAt: timestamp("last_successful_scan_at", { withTimezone: true }),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }).defaultNow().notNull(),
+  lastScanId: varchar("last_scan_id", { length: 96 }),
+  createdAt,
+  updatedAt,
+}, (table) => [
+  // Composite, not workspaceId alone -- same reasoning as
+  // runtimeRedditMonitors above: one workspace, several tracked
+  // businesses, each needs its own AI Visibility schedule and results.
+  primaryKey({ columns: [table.workspaceId, table.seedScanId] }),
+  index("runtime_ai_visibility_schedules_due_idx").on(table.enabled, table.nextRunAt),
+]);
+
+export const runtimeAiVisibilityScans = pgTable("runtime_ai_visibility_scans", {
+  id: varchar("id", { length: 96 }).primaryKey(),
+  workspaceId: varchar("workspace_id", { length: 96 }).notNull().references(() => runtimeWorkspaces.id, { onDelete: "cascade" }),
+  seedScanId: varchar("seed_scan_id", { length: 96 }).notNull().references(() => runtimeScans.id, { onDelete: "restrict" }),
+  status: varchar("status", { length: 24 }).notNull(),
+  questions: jsonb("questions").$type<string[]>().default([]).notNull(),
+  answers: jsonb("answers").$type<AiVisibilityAnswer[]>().default([]).notNull(),
+  metrics: jsonb("metrics").$type<Record<string, unknown> | null>(),
+  error: text("error"),
+  providerErrors: jsonb("provider_errors").$type<Record<string, string | null>>().default({ chatgpt: null, gemini: null, perplexity: null }).notNull(),
+  createdAt,
+  updatedAt,
+}, (table) => [
+  check("runtime_ai_visibility_scans_status_check", sql`${table.status} in ('queued', 'running', 'succeeded', 'failed')`),
+  check("runtime_ai_visibility_scans_questions_check", sql`jsonb_typeof(${table.questions}) = 'array'`),
+  check("runtime_ai_visibility_scans_answers_check", sql`jsonb_typeof(${table.answers}) = 'array'`),
+  index("runtime_ai_visibility_scans_workspace_created_idx").on(table.workspaceId, table.createdAt),
+]);
+
+/**
+ * A single cached row of real, honest landing-page numbers -- how many live
+ * (non-mock, non-test) scans have completed, and how many Reddit posts they
+ * collectively read. Computed by a daily background job (see
+ * scripts/background-worker.mjs's runPublicStatsScheduler) via one cheap
+ * SQL aggregate over runtime_scans, never per-request: the landing page
+ * only ever reads this cached row, so a real, growing number costs the app
+ * nothing extra beyond one query a day, however much traffic the page gets.
+ * Deliberately just cached facts, not a projection library: one row,
+ * "landing" as its fixed id, no history kept.
+ */
+export const runtimePublicStats = pgTable("runtime_public_stats", {
+  id: varchar("id", { length: 32 }).primaryKey(),
+  scansAnalyzed: integer("scans_analyzed").notNull().default(0),
+  redditPostsAnalyzed: integer("reddit_posts_analyzed").notNull().default(0),
+  nextRunAt: timestamp("next_run_at", { withTimezone: true }).defaultNow().notNull(),
+  createdAt,
+  updatedAt,
+});
 
 export const runtimeConversions = pgTable("runtime_conversions", {
   id: varchar("id", { length: 96 }).primaryKey(),

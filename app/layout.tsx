@@ -23,19 +23,19 @@ export async function generateMetadata(): Promise<Metadata> {
     requestHeaders.get("x-forwarded-proto") ??
     (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "Threadline — Reddit demand intelligence";
+  const title = "Scooptr — Reddit demand intelligence";
   const description =
     "Find high-intent Reddit conversations, understand customer demand, and prepare useful replies grounded in your website.";
 
   return {
     metadataBase: new URL(origin),
-    title: { default: title, template: "%s · Threadline" },
+    title: { default: title, template: "%s · Scooptr" },
     description,
     openGraph: {
       type: "website",
       title,
       description,
-      images: [{ url: `${origin}/og.png`, width: 1731, height: 909, alt: "Threadline turns relevant conversations into one helpful next action." }],
+      images: [{ url: `${origin}/og.png`, width: 1731, height: 909, alt: "Scooptr turns relevant conversations into one helpful next action." }],
     },
     twitter: {
       card: "summary_large_image",

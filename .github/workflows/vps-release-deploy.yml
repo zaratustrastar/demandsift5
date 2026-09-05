@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: second hero refinement -- centered nav, more breathing
-# room throughout, deeper (~280px) preview reveal, repositioned card,
-# reworded metric copy (2026-09-05).
+# Release marker: nav edge-anchoring fix, full (unclipped) dashboard
+# preview, more headline/subhead spacing, floating card moved to normal
+# flow (2026-09-05).
 
 on:
   push:

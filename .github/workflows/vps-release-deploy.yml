@@ -1,7 +1,6 @@
 name: DemandSift trusted VPS release
-# Release marker: increase logo mark size ~35-40% across all three
-# headers (nav, onboarding, dashboard/billing) -- was reading too small
-# next to the wordmark (2026-09-04).
+# Release marker: landing copy -- remove hero disclaimer line, rewrite
+# step 03 (title, body, example reply) (2026-09-05).
 
 on:
   push:

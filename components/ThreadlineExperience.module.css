@@ -243,7 +243,7 @@
 .slPage button { font-family: inherit; }
 
 .slNav { position: sticky; top: 0; z-index: 30; background: rgba(255,255,255,.86); backdrop-filter: blur(12px); border-bottom: 1px solid var(--sl-border-soft); }
-.slNavInner { max-width: 1200px; margin: 0 auto; padding: 0 40px; height: 66px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; }
+.slNavInner { max-width: 1800px; margin: 0 auto; padding: 0 40px; height: 66px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; }
 .slNavBrand { display: flex; align-items: center; justify-self: start; }
 .slNavLinks { display: flex; align-items: center; gap: 40px; justify-self: center; }
 .slNavLinks a { font-size: 14px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
@@ -277,17 +277,9 @@
 .slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 20px; }
 .slHeroBadge { display: inline-flex; align-items: center; gap: 9px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 40px; padding: 6px 8px 6px 14px; box-shadow: 0 1px 2px rgba(9,9,11,.04); font-size: 13px; font-weight: 500; color: #3f3f46; }
 .slHeroBadgeArrow { width: 20px; height: 20px; border-radius: 20px; background: var(--sl-ink); color: #fafafa; font-size: 11px; display: flex; align-items: center; justify-content: center; }
-.slHeroTitle { font-size: clamp(32px, 5.2vw, 65px); line-height: 1.02; letter-spacing: -.038em; font-weight: 600; max-width: 860px; margin-bottom: 30px; }
+.slHeroTitle { font-size: clamp(32px, 5.2vw, 65px); line-height: 1.02; letter-spacing: -.038em; font-weight: 600; max-width: 860px; margin-bottom: 40px; }
 .slHeroTitleAccent { color: var(--sl-primary); }
-.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 30px; }
-
-/* Fixed height so overflow: hidden above clips the preview mockup to a
- * deliberate ~280px reveal instead of showing it in full. Mobile (where
- * content stacks taller and the card drops into normal flow) keeps the
- * default auto height instead -- see the 700px breakpoint. */
-@media (min-width: 701px) {
-  .slHero { height: 830px; }
-}
+.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 40px; }
 
 .slHeroForm { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 17px; text-align: left; }
 .slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 2px; background: var(--sl-surface-alt); border-radius: 9px; padding: 2px; }
@@ -332,12 +324,17 @@
 
 /* One lightweight fragment of the actual product interface (subreddit +
  * age, a real tag pill, a one-line excerpt), not decorative illustration.
- * Positioned near the form so it reads as part of the same story the
- * copy is telling, not a stray decoration off in a corner. No
- * glow/motion -- kept intentionally plain per the "reduce clutter" pass. */
-.slHeroSignals { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+ * Normal document flow, not absolutely positioned: this used to float via
+ * percentage-based coordinates against .slHero's own height, which broke
+ * once that height went back to auto (see the preview-reveal change
+ * above) -- percentages on an absolutely positioned element resolve
+ * against an auto-height ancestor as if "auto" themselves, per the CSS
+ * spec, which is not what a fixed 40%-down placement needs. Sitting in
+ * normal flow, nudged left via align-self, avoids that entirely and is
+ * exactly as robust regardless of how tall the hero ends up being. */
 .slSignalCard {
-  position: absolute;
+  align-self: flex-start;
+  margin-top: 28px;
   width: 208px;
   background: var(--sl-canvas);
   border: 1px solid var(--sl-border);
@@ -351,7 +348,6 @@
 .slSignalTag { font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap; }
 .slSignalTagBlue { background: var(--sl-primary-tint); color: var(--sl-primary-deep); }
 
-.slSignalCardOne { top: 40%; left: 3%; transform: rotate(-3deg); }
 .slPreviewTopbar { display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--sl-divider); background: #fcfcfd; }
 .slPreviewDots { display: flex; gap: 6px; }
 .slPreviewDots i { width: 9px; height: 9px; border-radius: 9px; background: var(--sl-border); display: block; }
@@ -637,14 +633,11 @@
   .slPage * { transition: none !important; }
 }
 
-/* The one remaining floating card lives in the left gutter outside the
- * 780px centered column; below ~1100px that gutter vanishes before the
- * general 700px mobile breakpoint kicks in, so this needs its own, wider
- * threshold to avoid the card overlapping the headline/form on
- * tablet-width screens -- it just drops into normal flow below the form. */
-@media (max-width: 1100px) {
-  .slHeroSignals { position: static; inset: auto; margin-top: 22px; display: flex; justify-content: center; }
-  .slSignalCard { position: static; width: 100%; box-sizing: border-box; transform: none; max-width: 420px; }
+/* On narrow screens the 208px fixed-width card (nudged left via
+ * align-self on wider layouts) reads better centered and closer to the
+ * form's own width, rather than staying small and off to one side. */
+@media (max-width: 700px) {
+  .slSignalCard { align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; }
 }
 
 /* Results -> Signup -> Done (onboarding steps 6-8). Reuses .scanScreen /

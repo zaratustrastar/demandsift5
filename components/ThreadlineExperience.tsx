@@ -665,10 +665,8 @@ function Landing({
               </p>
             )}
           </form>
-        </div>
 
-        <div className={styles.slHeroSignals} aria-hidden="true">
-          <div className={`${styles.slSignalCard} ${styles.slSignalCardOne}`}>
+          <div className={styles.slSignalCard}>
             <div className={styles.slSignalMeta}>
               <span>r/SaaS &middot; 3h</span>
               <span className={`${styles.slSignalTag} ${styles.slSignalTagBlue}`}>High intent</span>

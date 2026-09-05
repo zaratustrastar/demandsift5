@@ -339,34 +339,26 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
 
 /* One lightweight fragment of the actual product interface (subreddit +
  * age, a real tag pill, a one-line excerpt), not decorative illustration.
- * Normal document flow, not absolutely positioned: this used to float via
- * percentage-based coordinates against .slHero's own height, which broke
- * once that height went back to auto (see the preview-reveal change
- * above) -- percentages on an absolutely positioned element resolve
- * against an auto-height ancestor as if "auto" themselves, per the CSS
- * spec, which is not what a fixed 40%-down placement needs. Sitting in
- * normal flow, nudged left via align-self, avoids that entirely and is
- * exactly as robust regardless of how tall the hero ends up being. */
-/* Static/normal-flow by default -- this is the one positioning approach
- * that's genuinely safe at any viewport width. The alternative (floating
- * in the left gutter near the headline, like the original reference)
- * only actually fits without overlapping the headline on wide screens:
- * at .slHeroInner's 900px max-width, the gutter is only wide enough for
- * this 208px card once the viewport is roughly 1440px+ -- at more
- * common widths (1280, 1366px laptops) the gutter is narrower than the
- * card itself, so a fixed negative offset that looked fine on a wide
- * test window overlapped the headline text on an ordinary one. See the
- * 1440px override below for where the floating treatment actually has
- * room to work. */
+ * This used to switch between two different treatments depending on
+ * viewport width (normal document flow below 1440px, absolute/rotated
+ * above it) specifically to avoid overlapping the headline at narrower
+ * desktop widths where the left gutter is tight. That produced a real,
+ * visible inconsistency -- different design at different sizes -- so
+ * per explicit direction this is now the one unconditional desktop/
+ * laptop treatment instead, accepting the narrow-gutter tradeoff rather
+ * than branching by width. Only the existing <=700px mobile breakpoint
+ * still overrides it, for genuine phone-width screens. */
 .slSignalCard {
-  align-self: flex-start;
-  margin-top: 28px;
+  position: absolute;
+  top: 176px;
+  left: -215px;
   width: 220px;
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.06);
   border-radius: 19px;
   padding: 14px 16px;
   box-shadow: 0 20px 40px -22px rgba(9,9,11,.14), 0 2px 6px -2px rgba(9,9,11,.05);
+  transform: rotate(-4deg);
 }
 .slSignalMeta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .slSignalMeta > span:first-child { font-family: "IBM Plex Mono", monospace; font-size: 14px; color: var(--sl-text-faint); white-space: nowrap; }
@@ -374,33 +366,20 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
 .slSignalTag { font-size: 13.5px; font-weight: 500; padding: 4px 10px; border-radius: 20px; white-space: nowrap; }
 .slSignalTagBlue { background: var(--sl-primary-tint); color: var(--sl-primary-deep); }
 
-/* Only at genuinely wide viewports is there enough real gutter space
- * (see the note above) for the card to float near the headline the way
- * the reference showed, without needing to overlap it. */
-@media (min-width: 1440px) {
-  .slSignalCard {
-    position: absolute;
-    top: -10px;
-    left: -215px;
-    align-self: auto;
-    margin-top: 0;
-    transform: rotate(-4deg);
-  }
-  /* Soft pale-blue oval halo, not a circle: an ellipse wider than tall
-   * (asymmetric inset, not a uniform one) reads as "glowing behind a
-   * card" rather than "a dot behind a card." Kept faint and delicate --
-   * this is meant to be barely noticed, not a visual feature of its own. */
-  .slSignalCard::before {
-    content: "";
-    position: absolute;
-    top: -22px;
-    bottom: -22px;
-    left: -34px;
-    right: -34px;
-    z-index: -1;
-    border-radius: 50%;
-    background: radial-gradient(ellipse, rgba(37,99,235,.10), transparent 70%);
-  }
+/* Soft pale-blue oval halo, not a circle: an ellipse wider than tall
+ * (asymmetric inset, not a uniform one) reads as "glowing behind a
+ * card" rather than "a dot behind a card." Kept faint and delicate --
+ * this is meant to be barely noticed, not a visual feature of its own. */
+.slSignalCard::before {
+  content: "";
+  position: absolute;
+  top: -22px;
+  bottom: -22px;
+  left: -34px;
+  right: -34px;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(37,99,235,.10), transparent 70%);
 }
 
 .slPreviewTopbar { display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--sl-divider); background: #fcfcfd; }
@@ -688,11 +667,14 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
   .slPage * { transition: none !important; }
 }
 
-/* On narrow screens the default 208px width (pinned left via
- * align-self) is too wide relative to the viewport -- center it and cap
- * the width instead, matching the rest of the form. */
+/* Mobile is the one deliberately different treatment (explicitly
+ * allowed): the desktop absolute/rotated/glow positioning has no room
+ * to work on a phone-width screen, so it drops into normal document
+ * flow, centered, right after the form -- position: static has to be
+ * set explicitly here now, since the base rule above is absolute. */
 @media (max-width: 700px) {
-  .slSignalCard { align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; margin-top: 22px; }
+  .slSignalCard { position: static; align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; margin-top: 22px; transform: none; }
+  .slSignalCard::before { display: none; }
 }
 
 /* Results -> Signup -> Done (onboarding steps 6-8). Reuses .scanScreen /

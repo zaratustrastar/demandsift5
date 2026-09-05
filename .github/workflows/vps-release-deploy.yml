@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: hero refinement -- one floating card instead of three,
-# tighter spacing rhythm, hero clipped to a fixed height so the preview
-# only peeks in (2026-09-05).
+# Release marker: second hero refinement -- centered nav, more breathing
+# room throughout, deeper (~280px) preview reveal, repositioned card,
+# reworded metric copy (2026-09-05).
 
 on:
   push:

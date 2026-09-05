@@ -676,10 +676,6 @@ function Landing({
         </div>
 
         <div className={styles.slPreviewWrap}>
-          <span className={styles.slPreviewLabel}>
-            <span className={styles.slPreviewLabelDot} aria-hidden="true" />
-            Live product preview
-          </span>
           <div className={styles.slPreviewFrame}>
             <div className={styles.slPreviewTopbar}>
               <span className={styles.slPreviewDots}>

@@ -277,9 +277,16 @@
 .slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 20px; }
 .slHeroBadge { display: inline-flex; align-items: center; gap: 9px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 40px; padding: 6px 8px 6px 14px; box-shadow: 0 1px 2px rgba(9,9,11,.04); font-size: 13px; font-weight: 500; color: #3f3f46; }
 .slHeroBadgeArrow { width: 20px; height: 20px; border-radius: 20px; background: var(--sl-ink); color: #fafafa; font-size: 11px; display: flex; align-items: center; justify-content: center; }
-.slHeroTitle { font-size: clamp(32px, 5.2vw, 65px); line-height: 1.02; letter-spacing: -.038em; font-weight: 600; max-width: 860px; margin-bottom: 40px; }
+/* Element-qualified (h1.x, not just .x) deliberately: .slPage's global
+ * reset below is `.slPage :is(h1, ..., p, ...) { margin: 0 }`, which has
+ * higher specificity (class+type via :is) than a bare class selector.
+ * Every margin-bottom on .slHeroTitle/.slHeroLead was silently losing to
+ * that reset and rendering as 0px regardless of the value written here --
+ * this is what actually caused the "headline almost overlaps
+ * subheadline" report, not merely an insufficient px value. */
+h1.slHeroTitle { font-size: clamp(32px, 5.2vw, 65px); line-height: 1.02; letter-spacing: -.038em; font-weight: 600; max-width: 860px; margin-bottom: 44px; }
 .slHeroTitleAccent { color: var(--sl-primary); }
-.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 40px; }
+p.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 36px; }
 
 .slHeroForm { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 17px; text-align: left; }
 .slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 2px; background: var(--sl-surface-alt); border-radius: 9px; padding: 2px; }
@@ -318,8 +325,6 @@
  * an actual height to clip against, not the auto height this box used
  * to have. */
 .slPreviewWrap { max-width: 1120px; margin: 56px auto 0; position: relative; z-index: 2; }
-.slPreviewLabel { position: absolute; top: -30px; right: 0; display: inline-flex; align-items: center; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--sl-text-muted); background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 20px; padding: 5px 10px; }
-.slPreviewLabelDot { width: 6px; height: 6px; border-radius: 6px; background: var(--sl-primary); flex-shrink: 0; }
 .slPreviewFrame { background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px 14px 0 0; box-shadow: 0 -1px 0 rgba(9,9,11,.02), 0 44px 90px -36px rgba(9,9,11,.32); overflow: hidden; }
 
 /* One lightweight fragment of the actual product interface (subreddit +
@@ -332,15 +337,31 @@
  * spec, which is not what a fixed 40%-down placement needs. Sitting in
  * normal flow, nudged left via align-self, avoids that entirely and is
  * exactly as robust regardless of how tall the hero ends up being. */
+/* Positioned like the reference: near the top, bleeding into the left
+ * gutter past .slHeroInner's edge, with a soft glow behind it. Uses a
+ * fixed pixel top (not a percentage) specifically because .slHeroInner's
+ * height is auto/content-derived -- a percentage top on an absolutely
+ * positioned element resolves as if "auto" against an auto-height
+ * ancestor per the CSS spec, so it wouldn't reliably land here at all;
+ * a fixed px offset has no such ambiguity regardless of hero height. */
 .slSignalCard {
-  align-self: flex-start;
-  margin-top: 28px;
+  position: absolute;
+  top: 4px;
+  left: -200px;
   width: 208px;
   background: var(--sl-canvas);
   border: 1px solid var(--sl-border);
   border-radius: 12px;
   padding: 12px 14px;
   box-shadow: 0 16px 32px -18px rgba(9,9,11,.18), 0 1px 2px rgba(9,9,11,.04);
+}
+.slSignalCard::before {
+  content: "";
+  position: absolute;
+  inset: -26px;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(82,82,91,.10), transparent 72%);
 }
 .slSignalMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .slSignalMeta > span:first-child { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--sl-text-fainter); }
@@ -633,11 +654,15 @@
   .slPage * { transition: none !important; }
 }
 
-/* On narrow screens the 208px fixed-width card (nudged left via
- * align-self on wider layouts) reads better centered and closer to the
- * form's own width, rather than staying small and off to one side. */
+/* On narrow screens there's no left gutter for the card to bleed into,
+ * so it drops into normal flow after the form instead of floating with a
+ * negative offset that would just clip or overlap awkwardly. The glow
+ * pseudo-element is positioned relative to the card itself, which needs
+ * position: absolute for that to work -- switching the card to static
+ * means hiding the glow here rather than leaving it mispositioned. */
 @media (max-width: 700px) {
-  .slSignalCard { align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; }
+  .slSignalCard { position: static; align-self: center; width: 100%; max-width: 320px; box-sizing: border-box; margin-top: 22px; }
+  .slSignalCard::before { display: none; }
 }
 
 /* Results -> Signup -> Done (onboarding steps 6-8). Reuses .scanScreen /

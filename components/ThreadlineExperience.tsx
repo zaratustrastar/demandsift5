@@ -660,11 +660,7 @@ function Landing({
               <p className={styles.slFormError} id="sl-url-error">
                 {error}
               </p>
-            ) : (
-              <p className={styles.slFormNote}>
-                No card required &middot; Nothing posts without your approval
-              </p>
-            )}
+            ) : null}
           </form>
 
           <div className={styles.slSignalCard}>

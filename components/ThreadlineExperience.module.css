@@ -243,12 +243,12 @@
 .slPage button { font-family: inherit; }
 
 .slNav { position: sticky; top: 0; z-index: 30; background: rgba(255,255,255,.86); backdrop-filter: blur(12px); border-bottom: 1px solid var(--sl-border-soft); }
-.slNavInner { max-width: 1200px; margin: 0 auto; padding: 0 40px; height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 32px; }
-.slNavLeft { display: flex; align-items: center; gap: 38px; }
-.slNavLinks { display: flex; align-items: center; gap: 26px; }
+.slNavInner { max-width: 1200px; margin: 0 auto; padding: 0 40px; height: 66px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; }
+.slNavBrand { display: flex; align-items: center; justify-self: start; }
+.slNavLinks { display: flex; align-items: center; gap: 40px; justify-self: center; }
 .slNavLinks a { font-size: 14px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
 .slNavLinks a:hover { color: var(--sl-ink); }
-.slNavRight { display: flex; align-items: center; gap: 18px; }
+.slNavRight { display: flex; align-items: center; gap: 18px; justify-self: end; }
 .slNavLogin { font-size: 14px; font-weight: 500; color: var(--sl-text-muted); text-decoration: none; }
 .slNavLogin:hover { color: var(--sl-ink); }
 .slNavAccount { display: inline-flex; align-items: center; gap: 8px; }
@@ -270,40 +270,43 @@
     repeating-linear-gradient(to right, rgba(9,9,11,.014) 0 1px, transparent 1px 96px),
     repeating-linear-gradient(to bottom, rgba(9,9,11,.014) 0 1px, transparent 1px 96px);
   border-bottom: 1px solid var(--sl-border-soft);
-  padding: 48px 40px 0;
+  padding: 56px 40px 0;
   overflow: hidden;
 }
 .slHeroInner { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; text-align: center; position: relative; z-index: 2; }
-.slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 8px; }
+.slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 20px; }
 .slHeroBadge { display: inline-flex; align-items: center; gap: 9px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 40px; padding: 6px 8px 6px 14px; box-shadow: 0 1px 2px rgba(9,9,11,.04); font-size: 13px; font-weight: 500; color: #3f3f46; }
 .slHeroBadgeArrow { width: 20px; height: 20px; border-radius: 20px; background: var(--sl-ink); color: #fafafa; font-size: 11px; display: flex; align-items: center; justify-content: center; }
-.slHeroTitle { font-size: clamp(34px, 5.5vw, 69px); line-height: .99; letter-spacing: -.04em; font-weight: 600; max-width: 780px; margin-bottom: 22px; }
+.slHeroTitle { font-size: clamp(32px, 5.2vw, 65px); line-height: 1.02; letter-spacing: -.038em; font-weight: 600; max-width: 860px; margin-bottom: 30px; }
 .slHeroTitleAccent { color: var(--sl-primary); }
-.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 28px; }
+.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 30px; }
 
-/* Fixed height so overflow: hidden above actually clips the preview
- * mockup down to a ~100px peek instead of showing it in full. Mobile
- * (where content stacks taller and the card drops into normal flow)
- * keeps the default auto height instead -- see the 700px breakpoint. */
+/* Fixed height so overflow: hidden above clips the preview mockup to a
+ * deliberate ~280px reveal instead of showing it in full. Mobile (where
+ * content stacks taller and the card drops into normal flow) keeps the
+ * default auto height instead -- see the 700px breakpoint. */
 @media (min-width: 701px) {
-  .slHero { height: 620px; }
+  .slHero { height: 830px; }
 }
 
-.slHeroForm { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 16px; text-align: left; }
-.slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 3px; background: var(--sl-surface-alt); border-radius: 10px; padding: 3px; }
-.slModeBtn { cursor: pointer; border: 0; background: transparent; color: var(--sl-text-muted); font-family: inherit; font-size: 13.5px; font-weight: 600; padding: 9px 18px; border-radius: 8px; white-space: nowrap; }
-.slModeBtnActive { background: var(--sl-canvas); color: var(--sl-ink); box-shadow: 0 1px 2px rgba(9,9,11,.08); }
+.slHeroForm { width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 17px; text-align: left; }
+.slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 2px; background: var(--sl-surface-alt); border-radius: 9px; padding: 2px; }
+.slModeBtn { cursor: pointer; border: 0; background: transparent; color: var(--sl-text-muted); font-family: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 14px; border-radius: 7px; white-space: nowrap; }
+.slModeBtnActive { background: var(--sl-canvas); color: var(--sl-ink); box-shadow: 0 1px 2px rgba(9,9,11,.06); }
 
 .slUrlBar { display: flex; align-items: center; gap: 10px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px; padding: 11px 11px 11px 22px; box-shadow: 0 8px 24px -12px rgba(9,9,11,.16), 0 1px 2px rgba(9,9,11,.05); }
 .slUrlProto { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--sl-text-fainter); flex-shrink: 0; }
 .slUrlBar input,
 .slClosingForm input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 17px; color: var(--sl-ink); min-width: 0; font-family: inherit; }
-.slUrlSubmit { border: 0; cursor: pointer; background: var(--sl-primary); color: #fff; font-size: 15.5px; font-weight: 700; padding: 18px 26px; border-radius: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 10px 22px -10px rgba(37,99,235,.55); }
+.slUrlBar input::placeholder,
+.slClosingForm input::placeholder { color: var(--sl-text-muted); }
+.slUrlSubmit { border: 0; cursor: pointer; background: var(--sl-primary); color: #fff; font-size: 15.5px; font-weight: 700; padding: 18px 22px; min-width: 34%; justify-content: center; border-radius: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 10px 22px -10px rgba(37,99,235,.55); }
 .slUrlSubmit:hover { background: var(--sl-primary-hover); }
 
 .slIdeaBox { display: flex; flex-direction: column; gap: 9px; }
 .slIdeaBox textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--sl-border); border-radius: 12px; padding: 15px 17px; font-family: inherit; font-size: 15.5px; line-height: 1.55; color: var(--sl-ink); resize: vertical; min-height: 104px; outline: 0; box-shadow: 0 8px 24px -12px rgba(9,9,11,.16); }
 .slIdeaBox textarea:focus { border-color: var(--sl-primary); }
+.slIdeaBox textarea::placeholder { color: var(--sl-text-muted); }
 .slIdeaFooter { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .slIdeaNote { font-size: 12.5px; color: var(--sl-text-faint); }
 
@@ -318,18 +321,20 @@
 .slAvatarDot[data-tone="c"] { background: #d4d4d8; }
 
 /* The hero gets a fixed height on wider screens specifically so the
- * preview mockup below is clipped to a peek (~100px) rather than shown
- * in full -- overflow: hidden above only does anything with an actual
- * height to clip against, not the auto height this box used to have. */
-.slPreviewWrap { max-width: 1120px; margin: 48px auto 0; position: relative; z-index: 2; }
-.slPreviewLabel { position: absolute; top: -26px; right: 0; font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--sl-text-faint); }
-.slPreviewFrame { background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px 14px 0 0; box-shadow: 0 -1px 0 rgba(9,9,11,.02), 0 40px 80px -40px rgba(9,9,11,.28); overflow: hidden; }
+ * preview mockup below is clipped to a deliberate ~280px reveal rather
+ * than shown in full -- overflow: hidden above only does anything with
+ * an actual height to clip against, not the auto height this box used
+ * to have. */
+.slPreviewWrap { max-width: 1120px; margin: 56px auto 0; position: relative; z-index: 2; }
+.slPreviewLabel { position: absolute; top: -30px; right: 0; display: inline-flex; align-items: center; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--sl-text-muted); background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 20px; padding: 5px 10px; }
+.slPreviewLabelDot { width: 6px; height: 6px; border-radius: 6px; background: var(--sl-primary); flex-shrink: 0; }
+.slPreviewFrame { background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px 14px 0 0; box-shadow: 0 -1px 0 rgba(9,9,11,.02), 0 44px 90px -36px rgba(9,9,11,.32); overflow: hidden; }
 
 /* One lightweight fragment of the actual product interface (subreddit +
  * age, a real tag pill, a one-line excerpt), not decorative illustration.
- * Sits in the hero's left gutter, well clear of the centered 780px
- * headline column so it never competes with it. No glow/motion -- kept
- * intentionally plain per the "reduce clutter" pass. */
+ * Positioned near the form so it reads as part of the same story the
+ * copy is telling, not a stray decoration off in a corner. No
+ * glow/motion -- kept intentionally plain per the "reduce clutter" pass. */
 .slHeroSignals { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .slSignalCard {
   position: absolute;
@@ -346,7 +351,7 @@
 .slSignalTag { font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap; }
 .slSignalTagBlue { background: var(--sl-primary-tint); color: var(--sl-primary-deep); }
 
-.slSignalCardOne { top: 14%; left: 4%; transform: rotate(-3deg); }
+.slSignalCardOne { top: 40%; left: 3%; transform: rotate(-3deg); }
 .slPreviewTopbar { display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--sl-divider); background: #fcfcfd; }
 .slPreviewDots { display: flex; gap: 6px; }
 .slPreviewDots i { width: 9px; height: 9px; border-radius: 9px; background: var(--sl-border); display: block; }
@@ -392,7 +397,7 @@
 .slPreviewRewrite { text-align: center; border: 1px solid var(--sl-border); background: var(--sl-canvas); color: #3f3f46; font-size: 12.5px; font-weight: 500; padding: 9px 12px; border-radius: 7px; }
 .slPreviewFootnote { font-size: 11px; color: var(--sl-text-fainter); line-height: 1.45; }
 
-.slStats { border-bottom: 1px solid var(--sl-border-soft); padding: 44px 40px; }
+.slStats { border-bottom: 1px solid var(--sl-border-soft); padding: 72px 40px 44px; }
 .slStatsGrid { max-width: 1120px; margin: 0 auto; display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
 .slStatItem { display: flex; flex-direction: column; gap: 5px; }
 .slStatValue { font-size: 30px; font-weight: 600; letter-spacing: -.035em; }

@@ -282,9 +282,9 @@ export type LandingSubmission = { mode: "website"; websiteUrl: string } | { mode
 const MIN_CONTEXT_TEXT_LENGTH = 20;
 
 const landingStatsBase = [
-  { value: "100%", label: "Source-linked, every result" },
-  { value: "Live", label: "Saved progress as your scan runs" },
-  { value: "94%", label: "Filtered out before it wastes your time" },
+  { value: "100%", label: "Source-linked" },
+  { value: "Live", label: "Opportunity monitoring" },
+  { value: "94%", label: "Noise filtered out" },
 ];
 
 const landingStepChips = ["social listening", "reddit monitoring", "lead discovery", "B2B SaaS"];
@@ -496,7 +496,13 @@ function Landing({
   const landingStats = useMemo(
     () => [
       landingStatsBase[0],
-      { value: (publicStats?.redditPostsAnalyzed ?? 0).toLocaleString(), label: "Reddit posts analyzed" },
+      {
+        // "+" signals "at least this many, and growing" without
+        // overclaiming precision -- the number itself stays real (see
+        // app/api/public/landing-stats), never hardcoded.
+        value: `${(publicStats?.redditPostsAnalyzed ?? 0).toLocaleString()}+`,
+        label: "Posts analyzed",
+      },
       landingStatsBase[1],
       landingStatsBase[2],
     ],
@@ -544,14 +550,14 @@ function Landing({
       <main className={styles.slPage}>
         <nav className={styles.slNav}>
         <div className={styles.slNavInner}>
-          <div className={styles.slNavLeft}>
+          <div className={styles.slNavBrand}>
             <LandingBrand />
-            <div className={styles.slNavLinks}>
-              <a href="#how-it-works">How it works</a>
-              <a href="#compounding">Product</a>
-              <a href="#example">Examples</a>
-              <a href="#pricing">Pricing</a>
-            </div>
+          </div>
+          <div className={styles.slNavLinks}>
+            <a href="#how-it-works">How it works</a>
+            <a href="#compounding">Product</a>
+            <a href="#example">Examples</a>
+            <a href="#pricing">Pricing</a>
           </div>
           <div className={styles.slNavRight}>
             {account ? (
@@ -672,7 +678,10 @@ function Landing({
         </div>
 
         <div className={styles.slPreviewWrap}>
-          <span className={styles.slPreviewLabel}>[ your inbox, day one ]</span>
+          <span className={styles.slPreviewLabel}>
+            <span className={styles.slPreviewLabelDot} aria-hidden="true" />
+            Live product preview
+          </span>
           <div className={styles.slPreviewFrame}>
             <div className={styles.slPreviewTopbar}>
               <span className={styles.slPreviewDots}>

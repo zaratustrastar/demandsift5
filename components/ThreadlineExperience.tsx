@@ -669,20 +669,6 @@ function Landing({
             </div>
             <p>&ldquo;Looking for an alternative to&hellip;&rdquo;</p>
           </div>
-          <div className={`${styles.slSignalCard} ${styles.slSignalCardTwo}`}>
-            <div className={styles.slSignalMeta}>
-              <span>r/marketing &middot; 18m</span>
-              <span className={`${styles.slSignalTag} ${styles.slSignalTagOrange}`}>Switching</span>
-            </div>
-            <p>Competitor mentioned</p>
-          </div>
-          <div className={`${styles.slSignalCard} ${styles.slSignalCardThree}`}>
-            <div className={styles.slSignalMeta}>
-              <span>r/smallbusiness &middot; 42m</span>
-              <span className={`${styles.slSignalTag} ${styles.slSignalTagNeutral}`}>Problem</span>
-            </div>
-            <p>Actively looking for a solution</p>
-          </div>
         </div>
 
         <div className={styles.slPreviewWrap}>

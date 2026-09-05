@@ -267,21 +267,29 @@
   position: relative;
   background: var(--sl-surface);
   background-image:
-    repeating-linear-gradient(to right, rgba(9,9,11,.022) 0 1px, transparent 1px 96px),
-    repeating-linear-gradient(to bottom, rgba(9,9,11,.022) 0 1px, transparent 1px 96px);
+    repeating-linear-gradient(to right, rgba(9,9,11,.014) 0 1px, transparent 1px 96px),
+    repeating-linear-gradient(to bottom, rgba(9,9,11,.014) 0 1px, transparent 1px 96px);
   border-bottom: 1px solid var(--sl-border-soft);
-  padding: 52px 40px 4px;
+  padding: 48px 40px 0;
   overflow: hidden;
 }
-.slHeroInner { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; gap: 18px; text-align: center; position: relative; z-index: 2; }
-.slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--sl-primary-deep); }
+.slHeroInner { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; text-align: center; position: relative; z-index: 2; }
+.slHeroEyebrow { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--sl-primary-deep); margin-bottom: 8px; }
 .slHeroBadge { display: inline-flex; align-items: center; gap: 9px; background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 40px; padding: 6px 8px 6px 14px; box-shadow: 0 1px 2px rgba(9,9,11,.04); font-size: 13px; font-weight: 500; color: #3f3f46; }
 .slHeroBadgeArrow { width: 20px; height: 20px; border-radius: 20px; background: var(--sl-ink); color: #fafafa; font-size: 11px; display: flex; align-items: center; justify-content: center; }
-.slHeroTitle { font-size: clamp(40px, 6.4vw, 80px); line-height: .98; letter-spacing: -.042em; font-weight: 600; max-width: 900px; }
+.slHeroTitle { font-size: clamp(34px, 5.5vw, 69px); line-height: .99; letter-spacing: -.04em; font-weight: 600; max-width: 780px; margin-bottom: 22px; }
 .slHeroTitleAccent { color: var(--sl-primary); }
-.slHeroLead { font-size: 18.5px; line-height: 1.5; color: var(--sl-text-muted); max-width: 720px; }
+.slHeroLead { font-size: 18px; line-height: 1.5; color: var(--sl-text-muted); max-width: 680px; margin-bottom: 28px; }
 
-.slHeroForm { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 14px; margin-top: 16px; text-align: left; }
+/* Fixed height so overflow: hidden above actually clips the preview
+ * mockup down to a ~100px peek instead of showing it in full. Mobile
+ * (where content stacks taller and the card drops into normal flow)
+ * keeps the default auto height instead -- see the 700px breakpoint. */
+@media (min-width: 701px) {
+  .slHero { height: 620px; }
+}
+
+.slHeroForm { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 16px; text-align: left; }
 .slModeSwitch { display: inline-flex; align-self: center; align-items: center; gap: 3px; background: var(--sl-surface-alt); border-radius: 10px; padding: 3px; }
 .slModeBtn { cursor: pointer; border: 0; background: transparent; color: var(--sl-text-muted); font-family: inherit; font-size: 13.5px; font-weight: 600; padding: 9px 18px; border-radius: 8px; white-space: nowrap; }
 .slModeBtnActive { background: var(--sl-canvas); color: var(--sl-ink); box-shadow: 0 1px 2px rgba(9,9,11,.08); }
@@ -290,7 +298,7 @@
 .slUrlProto { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--sl-text-fainter); flex-shrink: 0; }
 .slUrlBar input,
 .slClosingForm input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 17px; color: var(--sl-ink); min-width: 0; font-family: inherit; }
-.slUrlSubmit { border: 0; cursor: pointer; background: var(--sl-primary); color: #fff; font-size: 15.5px; font-weight: 600; padding: 18px 26px; border-radius: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+.slUrlSubmit { border: 0; cursor: pointer; background: var(--sl-primary); color: #fff; font-size: 15.5px; font-weight: 700; padding: 18px 26px; border-radius: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 10px 22px -10px rgba(37,99,235,.55); }
 .slUrlSubmit:hover { background: var(--sl-primary-hover); }
 
 .slIdeaBox { display: flex; flex-direction: column; gap: 9px; }
@@ -309,45 +317,36 @@
 .slAvatarDot[data-tone="b"] { background: var(--sl-border); }
 .slAvatarDot[data-tone="c"] { background: #d4d4d8; }
 
-.slPreviewWrap { max-width: 1120px; margin: 34px auto 0; position: relative; z-index: 2; }
+/* The hero gets a fixed height on wider screens specifically so the
+ * preview mockup below is clipped to a peek (~100px) rather than shown
+ * in full -- overflow: hidden above only does anything with an actual
+ * height to clip against, not the auto height this box used to have. */
+.slPreviewWrap { max-width: 1120px; margin: 48px auto 0; position: relative; z-index: 2; }
 .slPreviewLabel { position: absolute; top: -26px; right: 0; font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--sl-text-faint); }
 .slPreviewFrame { background: var(--sl-canvas); border: 1px solid var(--sl-border); border-radius: 14px 14px 0 0; box-shadow: 0 -1px 0 rgba(9,9,11,.02), 0 40px 80px -40px rgba(9,9,11,.28); overflow: hidden; }
 
-/* Item 8: lightweight fragments of the actual product interface (subreddit
- * + age, a real tag pill, a one-line excerpt) scattered in the hero's side
- * gutters -- not decorative illustration. Kept out of the centered 900px
- * text column entirely so they never compete with the headline or CTA. */
+/* One lightweight fragment of the actual product interface (subreddit +
+ * age, a real tag pill, a one-line excerpt), not decorative illustration.
+ * Sits in the hero's left gutter, well clear of the centered 780px
+ * headline column so it never competes with it. No glow/motion -- kept
+ * intentionally plain per the "reduce clutter" pass. */
 .slHeroSignals { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .slSignalCard {
   position: absolute;
-  width: 210px;
+  width: 208px;
   background: var(--sl-canvas);
   border: 1px solid var(--sl-border);
   border-radius: 12px;
   padding: 12px 14px;
-  box-shadow: 0 16px 32px -18px rgba(9,9,11,.2), 0 1px 2px rgba(9,9,11,.04);
+  box-shadow: 0 16px 32px -18px rgba(9,9,11,.18), 0 1px 2px rgba(9,9,11,.04);
 }
 .slSignalMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .slSignalMeta > span:first-child { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--sl-text-fainter); }
 .slSignalCard p { margin: 7px 0 0; font-size: 13px; line-height: 1.4; color: var(--sl-text); font-weight: 500; }
 .slSignalTag { font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 20px; white-space: nowrap; }
 .slSignalTagBlue { background: var(--sl-primary-tint); color: var(--sl-primary-deep); }
-.slSignalTagOrange { background: var(--sl-warm-tint); color: var(--sl-warm-text); }
-.slSignalTagNeutral { background: var(--sl-surface-alt); color: var(--sl-text-muted); }
 
-.slSignalCardOne { top: 8%; left: 3%; transform: rotate(-3deg); }
-/* Item 9's scanning motif: a soft blue glow, not motion -- reads as
- * "detected something" without any animation to manage/reduce-motion. */
-.slSignalCardOne::before {
-  content: "";
-  position: absolute;
-  inset: -22px;
-  z-index: -1;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(37,99,235,.16), transparent 72%);
-}
-.slSignalCardTwo { top: 46%; right: 2.5%; transform: rotate(2deg); }
-.slSignalCardThree { bottom: 6%; left: 7%; transform: rotate(-1.5deg); }
+.slSignalCardOne { top: 14%; left: 4%; transform: rotate(-3deg); }
 .slPreviewTopbar { display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--sl-divider); background: #fcfcfd; }
 .slPreviewDots { display: flex; gap: 6px; }
 .slPreviewDots i { width: 9px; height: 9px; border-radius: 9px; background: var(--sl-border); display: block; }
@@ -633,15 +632,14 @@
   .slPage * { transition: none !important; }
 }
 
-/* The floating cards live in the gutters outside the 900px centered
- * column; below ~1100px those gutters vanish before the general 700px
- * mobile breakpoint kicks in, so this needs its own, wider threshold to
- * avoid the cards overlapping the headline/form on tablet-width screens. */
+/* The one remaining floating card lives in the left gutter outside the
+ * 780px centered column; below ~1100px that gutter vanishes before the
+ * general 700px mobile breakpoint kicks in, so this needs its own, wider
+ * threshold to avoid the card overlapping the headline/form on
+ * tablet-width screens -- it just drops into normal flow below the form. */
 @media (max-width: 1100px) {
-  .slHeroSignals { position: static; inset: auto; display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }
-  .slSignalCard { position: static; width: 100%; box-sizing: border-box; transform: none; max-width: 420px; margin: 0 auto; }
-  .slSignalCardOne::before { display: none; }
-  .slSignalCardThree { display: none; }
+  .slHeroSignals { position: static; inset: auto; margin-top: 22px; display: flex; justify-content: center; }
+  .slSignalCard { position: static; width: 100%; box-sizing: border-box; transform: none; max-width: 420px; }
 }
 
 /* Results -> Signup -> Done (onboarding steps 6-8). Reuses .scanScreen /

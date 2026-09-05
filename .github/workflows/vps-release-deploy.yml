@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix the floating card overlapping the headline at
-# common (~1280-1366px) viewport widths -- floating position now only
-# applies at 1440px+ where there's actually gutter room for it
-# (2026-09-05).
+# Release marker: tighten hero type scale (headline 70px, forced 2-line
+# break) and spacing (eyebrow/headline/subhead/tabs/input/microcopy) to
+# exact spec; nav/tabs/CTA sizes bumped to 15-17px (2026-09-05).
 
 on:
   push:

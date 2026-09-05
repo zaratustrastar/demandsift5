@@ -1,7 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: fix the card's meta row wrapping awkwardly after the
-# larger-text refinement -- widened slightly, offset adjusted to match
-# (2026-09-05).
+# Release marker: move floating card down to subheadline level (top
+# only, everything else untouched); make its absolute/rotated
+# positioning the one unconditional desktop/laptop treatment instead of
+# switching design at 1440px (2026-09-05).
 
 on:
   push:

@@ -1,8 +1,6 @@
 name: DemandSift trusted VPS release
-# Release marker: move floating card down to subheadline level (top
-# only, everything else untouched); make its absolute/rotated
-# positioning the one unconditional desktop/laptop treatment instead of
-# switching design at 1440px (2026-09-05).
+# Release marker: remove hero microcopy line ("No card required ...
+# Nothing posts without your approval") (2026-09-05).
 
 on:
   push:

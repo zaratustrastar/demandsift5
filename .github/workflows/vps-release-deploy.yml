@@ -1,7 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: nav edge-anchoring fix, full (unclipped) dashboard
-# preview, more headline/subhead spacing, floating card moved to normal
-# flow (2026-09-05).
+# Release marker: fix the actual specificity bug behind broken hero
+# spacing (margin-bottom was losing to a global reset), remove the
+# preview label, restore the card's original top-left placement
+# (2026-09-05).
 
 on:
   push:

@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: hero redesign per design brief -- compact height,
-# new headline/subhead, floating opportunity-fragment cards, real
-# CTA copy, no fake social proof (2026-09-05).
+# Release marker: hero refinement -- one floating card instead of three,
+# tighter spacing rhythm, hero clipped to a fixed height so the preview
+# only peeks in (2026-09-05).
 
 on:
   push:

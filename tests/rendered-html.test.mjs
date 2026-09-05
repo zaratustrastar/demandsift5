@@ -28,9 +28,9 @@ test("server-renders the Scooptr acquisition experience", async () => {
 
   const html = await response.text();
   assert.match(html, /Scooptr — find the Reddit threads where your next customers already are/i);
-  assert.match(html, /Find the Reddit conversations where people are[\s\S]{0,200}already looking[\s\S]{0,100}for what you sell/);
-  assert.match(html, /Run free scan/);
-  assert.match(html, /Public same-domain pages only/);
+  assert.match(html, /Find people[\s\S]{0,100}already asking[\s\S]{0,100}for[\s\S]{0,20}you sell/);
+  assert.match(html, /Scan my business/);
+  assert.match(html, /Nothing posts without your approval/);
   assert.match(html, /\$0/);
   assert.match(html, /\$30/);
   assert.doesNotMatch(html, /94% fit|3 related conversations/i);

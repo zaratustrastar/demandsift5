@@ -113,8 +113,10 @@ test("the landing page fetches the real stats endpoint and never renders a hardc
   assert.equal(landingSource.includes('"520"'), false);
   assert.equal(landingSource.includes('"1,412"'), false);
   assert.equal(landingSource.includes('"1408"'), false);
-  // The hero count only renders once real data has actually arrived, not
-  // as a 0 flash while the fetch is still in flight.
-  assert.match(landingSource, /publicStats !== null && publicStats\.scansAnalyzed > 0/);
+  // The hero's own "N scans run so far" line was deliberately removed (a
+  // small real number reads as weak social proof) -- the fetch and state
+  // stay, since the stat-grid card still shows real redditPostsAnalyzed,
+  // but nothing should render publicStats.scansAnalyzed in the hero.
+  assert.equal(landingSource.includes("scansAnalyzed.toLocaleString()"), false);
   assert.match(landingSource, /publicStats\?\.redditPostsAnalyzed/);
 });

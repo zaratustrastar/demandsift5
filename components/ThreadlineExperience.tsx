@@ -548,8 +548,8 @@ function Landing({
             <LandingBrand />
             <div className={styles.slNavLinks}>
               <a href="#how-it-works">How it works</a>
-              <a href="#compounding">Why Reddit</a>
-              <a href="#example">Example</a>
+              <a href="#compounding">Product</a>
+              <a href="#example">Examples</a>
               <a href="#pricing">Pricing</a>
             </div>
           </div>
@@ -569,22 +569,23 @@ function Landing({
                 Log in
               </a>
             )}
-            <a href="#website-url" className={styles.slNavCta}>Run a free scan</a>
+            <a href="#website-url" className={styles.slNavCta}>Scan my business</a>
           </div>
         </div>
       </nav>
 
       <section className={styles.slHero} id="top">
         <div className={styles.slHeroInner}>
+          <span className={styles.slHeroEyebrow}>Reddit demand intelligence</span>
+
           <h1 className={styles.slHeroTitle}>
-            Find the Reddit conversations where people are{" "}
-            <span className={styles.slHeroTitleAccent}>already looking</span> for what you sell
+            Find people <span className={styles.slHeroTitleAccent}>already asking</span> for what
+            you sell.
           </h1>
 
           <p className={styles.slHeroLead}>
-            Give us your website. We read it, work out what you actually sell, and bring back
-            the threads where someone is asking for it right now &mdash; with a reply you&rsquo;d be
-            happy to post.
+            Scooptr finds high-intent Reddit conversations, explains why they match your business,
+            and drafts a reply you can make your own.
           </p>
 
           <form className={styles.slHeroForm} onSubmit={submit} noValidate>
@@ -627,7 +628,7 @@ function Landing({
                   aria-describedby={error ? "sl-url-error" : undefined}
                 />
                 <button type="submit" className={styles.slUrlSubmit}>
-                  Run free scan <span aria-hidden="true">&#8594;</span>
+                  Scan my business <span aria-hidden="true">&#8594;</span>
                 </button>
               </div>
             ) : (
@@ -642,7 +643,7 @@ function Landing({
                 <div className={styles.slIdeaFooter}>
                   <span className={styles.slIdeaNote}>No website needed &mdash; a couple of sentences is enough.</span>
                   <button type="submit" className={styles.slUrlSubmit}>
-                    Run free scan <span aria-hidden="true">&#8594;</span>
+                    Scan my business <span aria-hidden="true">&#8594;</span>
                   </button>
                 </div>
               </div>
@@ -652,16 +653,36 @@ function Landing({
               <p className={styles.slFormError} id="sl-url-error">
                 {error}
               </p>
-            ) : null}
+            ) : (
+              <p className={styles.slFormNote}>
+                No card required &middot; Nothing posts without your approval
+              </p>
+            )}
           </form>
+        </div>
 
-          {publicStats !== null && publicStats.scansAnalyzed > 0 && (
-            <div className={styles.slAvatarRow}>
-              <span className={styles.slScanCount}>
-                <strong>{publicStats.scansAnalyzed.toLocaleString()}</strong> scans run so far
-              </span>
+        <div className={styles.slHeroSignals} aria-hidden="true">
+          <div className={`${styles.slSignalCard} ${styles.slSignalCardOne}`}>
+            <div className={styles.slSignalMeta}>
+              <span>r/SaaS &middot; 3h</span>
+              <span className={`${styles.slSignalTag} ${styles.slSignalTagBlue}`}>High intent</span>
             </div>
-          )}
+            <p>&ldquo;Looking for an alternative to&hellip;&rdquo;</p>
+          </div>
+          <div className={`${styles.slSignalCard} ${styles.slSignalCardTwo}`}>
+            <div className={styles.slSignalMeta}>
+              <span>r/marketing &middot; 18m</span>
+              <span className={`${styles.slSignalTag} ${styles.slSignalTagOrange}`}>Switching</span>
+            </div>
+            <p>Competitor mentioned</p>
+          </div>
+          <div className={`${styles.slSignalCard} ${styles.slSignalCardThree}`}>
+            <div className={styles.slSignalMeta}>
+              <span>r/smallbusiness &middot; 42m</span>
+              <span className={`${styles.slSignalTag} ${styles.slSignalTagNeutral}`}>Problem</span>
+            </div>
+            <p>Actively looking for a solution</p>
+          </div>
         </div>
 
         <div className={styles.slPreviewWrap}>

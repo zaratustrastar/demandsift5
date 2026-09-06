@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: auto-fill competitor URLs -- batched economy-model
-# domain lookup, independently verified against each homepage's own
-# identity before ever auto-filling a suggestion (2026-09-06).
+# Release marker: fix the 2 real Competitors-screen gaps (Continue button
+# label, zero-suggestions fallback row) -- everything else in that
+# redesign was already live, confirmed via a real test scan (2026-09-06).
 
 on:
   push:

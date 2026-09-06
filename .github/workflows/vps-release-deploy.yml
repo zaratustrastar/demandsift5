@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: adopt crawl-evidence competitor suggestion permanently
-# -- runs concurrently with analyzeBusiness right after the crawl,
-# persisted before awaiting_review so the Competitors screen reads from
-# cache instead of its own round-trip (2026-09-06).
+# Release marker: measure the competitor-suggestion branch's own
+# duration independently of analyzeBusinessMs, to get a real background
+# number for the next UX-parallelization investigation (2026-09-06).
 
 on:
   push:

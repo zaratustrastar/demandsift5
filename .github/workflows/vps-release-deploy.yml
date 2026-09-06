@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: website crawler optimization batch -- shared browser
-# instance, same-host image/font/media blocking, content-readiness
-# racing (15s ceiling unchanged), noscript extraction, full per-page
-# instrumentation (2026-09-06).
+# Release marker: redesign the pre-input scan-progress screen -- wider
+# card, relabeled stepper, rewritten copy, "What we're finding" (real
+# data only), telemetry moved to a collapsed "Scan details" (2026-09-06).
 
 on:
   push:

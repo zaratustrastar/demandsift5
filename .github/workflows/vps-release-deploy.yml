@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: add full diagnostics (?debug=1) to competitor URL
-# resolution to trace the real notion.com failure; fix a real caching
-# bug that permanently blocked retrying a failed resolution (2026-09-06).
+# Release marker: replace competitor URL resolution with one combined
+# name+URL suggestion call, sourced from business context instead of
+# the usually-empty BusinessUnderstanding.competitors (2026-09-06).
 
 on:
   push:

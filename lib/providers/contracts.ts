@@ -23,6 +23,12 @@ export interface WebsiteEvidencePage {
   text: string;
   contentHash: string;
   retrievedAt: string;
+  /** Populated by website-crawler.ts's extractPage; optional and unused
+   * by analyzeBusiness's own pages mapping (which lists its fields
+   * explicitly), so this adds no new data to that prompt. Currently only
+   * lib/server/competitor-url-resolution.ts reads it, for identity-match
+   * diagnostics. */
+  identity?: { title: string; description?: string; ogTitle?: string; ogSiteName?: string; applicationName?: string };
 }
 
 export type RedditActorEvent = {

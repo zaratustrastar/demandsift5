@@ -10,8 +10,31 @@ export interface CompetitorUrlSuggestion {
   url: string | null;
 }
 
+/** Full per-candidate trace, for diagnosing why a name did or didn't
+ * resolve -- not returned in the normal production response, only when a
+ * caller explicitly asks for it (see the API route's ?debug=1). */
+export interface CompetitorUrlDiagnostic {
+  name: string;
+  proposedUrl: string | null;
+  normalizedUrl: string | null;
+  validation: "no_proposal" | "invalid_or_unsafe_url" | "own_domain" | "duplicate_domain" | "valid";
+  validatedHostname?: string;
+  fetch: "not_attempted" | "success" | "failed";
+  fetchError?: string;
+  homepageTitle?: string;
+  ogTitle?: string;
+  ogSiteName?: string;
+  description?: string;
+  bodyTextPrefix?: string;
+  identityMatch: boolean | null;
+  /** Which signal the match was found on, when identityMatch is true. */
+  matchedOn?: "title" | "ogTitle" | "ogSiteName" | "description" | "bodyText";
+  finalUrl: string | null;
+}
+
 export interface CompetitorUrlResolutionResult {
   suggestions: CompetitorUrlSuggestion[];
+  diagnostics: CompetitorUrlDiagnostic[];
   instrumentation: {
     modelLookupMs: number;
     verificationMs: number;
@@ -33,24 +56,45 @@ function normalizeForMatch(value: string): string {
     .replace(/\s+/g, " ");
 }
 
-/**
- * A deliberately conservative identity check: does the competitor's name
- * (or its single most distinctive token, for short/compound names like
- * "Cal.com" or "Notion Labs") actually appear in what the homepage itself
- * says about itself. This is the independent verification step that keeps
- * a hallucinated-but-real domain from ever being auto-filled -- passing
- * validatePublicWebsiteUrl only proves a URL is safe to fetch, not that it
- * is the right company.
- */
-function identityMatches(competitorName: string, identityText: string): boolean {
+function textIncludesName(competitorName: string, text: string | undefined): boolean {
+  if (!text) return false;
   const normalizedName = normalizeForMatch(competitorName);
   if (!normalizedName) return false;
-  const normalizedIdentity = normalizeForMatch(identityText);
-  if (normalizedIdentity.includes(normalizedName)) return true;
+  const normalizedText = normalizeForMatch(text);
+  if (normalizedText.includes(normalizedName)) return true;
   const tokens = normalizedName.split(" ").filter(Boolean);
   if (tokens.length === 0) return false;
   const primaryToken = tokens.reduce((longest, token) => (token.length > longest.length ? token : longest), "");
-  return primaryToken.length >= 3 && normalizedIdentity.includes(primaryToken);
+  return primaryToken.length >= 3 && normalizedText.includes(primaryToken);
+}
+
+/**
+ * A deliberately conservative identity check, done against each signal
+ * separately (title, og:title, og:site_name, description, then a body-text
+ * prefix as the last resort) rather than one concatenated blob. Checking
+ * fields independently, in order of how reliably they identify a site
+ * (structured metadata first, free body text last), means a title or
+ * og:site_name that cleanly says the company name still matches even when
+ * the body-text prefix is noisy (cookie banners, nav labels, a framework's
+ * loading skeleton) -- a single combined-string search would have diluted
+ * a clean signal with that noise instead of checking it on its own.
+ * Reports which field actually matched, for diagnostics.
+ */
+function identityMatch(
+  competitorName: string,
+  identity: { title?: string; ogTitle?: string; ogSiteName?: string; description?: string; bodyTextPrefix?: string },
+): { matched: boolean; matchedOn?: CompetitorUrlDiagnostic["matchedOn"] } {
+  const order: Array<[CompetitorUrlDiagnostic["matchedOn"], string | undefined]> = [
+    ["title", identity.title],
+    ["ogSiteName", identity.ogSiteName],
+    ["ogTitle", identity.ogTitle],
+    ["description", identity.description],
+    ["bodyText", identity.bodyTextPrefix],
+  ];
+  for (const [field, value] of order) {
+    if (textIncludesName(competitorName, value)) return { matched: true, matchedOn: field };
+  }
+  return { matched: false };
 }
 
 /**
@@ -67,10 +111,10 @@ function identityMatches(competitorName: string, identityText: string): boolean 
  * equal to the user's own domain; (3) every surviving candidate gets one
  * lightweight single-page fetch (crawlWebsite with maxPages: 1 -- not the
  * multi-page competitor crawl, which still only runs later if the user
- * continues from this screen) and is only kept if the homepage's own title/
- * description/metadata actually identifies as that company. A domain that
- * is real, public, and SSRF-safe but simply is not the named competitor is
- * caught here, not just at the URL-validation layer.
+ * continues from this screen) and is only kept if the homepage's own
+ * title/og:site_name/og:title/description identifies as that company. A
+ * domain that is real, public, and SSRF-safe but simply is not the named
+ * competitor is caught here, not just at the URL-validation layer.
  */
 export async function resolveCompetitorUrls(params: {
   competitorNames: string[];
@@ -88,8 +132,15 @@ export async function resolveCompetitorUrls(params: {
   const totalStarted = performance.now();
   const names = [...new Set(params.competitorNames.map((name) => name.trim()).filter(Boolean))].slice(0, 3);
   if (names.length === 0) {
-    return { suggestions: [], instrumentation: { modelLookupMs: 0, verificationMs: 0, resolvedCount: 0, totalCount: 0, totalMs: 0 } };
+    return { suggestions: [], diagnostics: [], instrumentation: { modelLookupMs: 0, verificationMs: 0, resolvedCount: 0, totalCount: 0, totalMs: 0 } };
   }
+
+  const diagnostics = new Map<string, CompetitorUrlDiagnostic>(
+    names.map((name) => [name, {
+      name, proposedUrl: null, normalizedUrl: null, validation: "no_proposal",
+      fetch: "not_attempted", identityMatch: null, finalUrl: null,
+    }]),
+  );
 
   const modelStarted = performance.now();
   let proposedByName = new Map<string, string | null>();
@@ -106,28 +157,45 @@ export async function resolveCompetitorUrls(params: {
     // competitor field stays editable and empty, same as today.
   }
   const modelLookupMs = performance.now() - modelStarted;
+  for (const [name, url] of proposedByName) {
+    const diagnostic = diagnostics.get(name);
+    if (diagnostic) diagnostic.proposedUrl = url;
+  }
 
   // Normalize, validate and dedupe before ever fetching anything.
   const seenHostnames = new Set<string>();
   const candidates: Array<{ name: string; url: string }> = [];
   for (const name of names) {
+    const diagnostic = diagnostics.get(name)!;
     const rawUrl = proposedByName.get(name);
-    if (!rawUrl) continue;
+    if (!rawUrl) continue; // stays "no_proposal"
     const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    diagnostic.normalizedUrl = withScheme;
     try {
       const target = await validatePublicWebsiteUrl(withScheme, params.resolver);
-      if (params.ownDomain && target.canonicalHostname === params.ownDomain) continue;
-      if (seenHostnames.has(target.canonicalHostname)) continue;
+      if (params.ownDomain && target.canonicalHostname === params.ownDomain) {
+        diagnostic.validation = "own_domain";
+        diagnostic.validatedHostname = target.canonicalHostname;
+        continue;
+      }
+      if (seenHostnames.has(target.canonicalHostname)) {
+        diagnostic.validation = "duplicate_domain";
+        diagnostic.validatedHostname = target.canonicalHostname;
+        continue;
+      }
       seenHostnames.add(target.canonicalHostname);
+      diagnostic.validation = "valid";
+      diagnostic.validatedHostname = target.canonicalHostname;
       candidates.push({ name, url: target.url.toString() });
     } catch {
-      // Not a valid/unique/public/SSRF-safe destination -- dropped, not surfaced.
+      diagnostic.validation = "invalid_or_unsafe_url";
     }
   }
 
   const verificationStarted = performance.now();
-  const verified = await Promise.all(
+  await Promise.all(
     candidates.map(async (candidate) => {
+      const diagnostic = diagnostics.get(candidate.name)!;
       try {
         const crawl = await crawlWebsite(candidate.url, {
           maxPages: 1,
@@ -137,20 +205,36 @@ export async function resolveCompetitorUrls(params: {
           fetchImpl: params.fetchImpl,
         });
         const homepage = crawl.pages[0];
-        if (!homepage) return null;
-        const identityText = [homepage.title, homepage.description ?? "", homepage.text.slice(0, 800)].join(" ");
-        return identityMatches(candidate.name, identityText) ? candidate : null;
-      } catch {
-        return null;
+        if (!homepage) {
+          diagnostic.fetch = "failed";
+          diagnostic.fetchError = "No page returned.";
+          return;
+        }
+        diagnostic.fetch = "success";
+        diagnostic.homepageTitle = homepage.identity?.title ?? homepage.title;
+        diagnostic.ogTitle = homepage.identity?.ogTitle;
+        diagnostic.ogSiteName = homepage.identity?.ogSiteName;
+        diagnostic.description = homepage.identity?.description ?? homepage.description;
+        diagnostic.bodyTextPrefix = homepage.text.slice(0, 300);
+        const { matched, matchedOn } = identityMatch(candidate.name, {
+          title: diagnostic.homepageTitle,
+          ogTitle: diagnostic.ogTitle,
+          ogSiteName: diagnostic.ogSiteName,
+          description: diagnostic.description,
+          bodyTextPrefix: homepage.text.slice(0, 800),
+        });
+        diagnostic.identityMatch = matched;
+        diagnostic.matchedOn = matchedOn;
+        if (matched) diagnostic.finalUrl = candidate.url;
+      } catch (error) {
+        diagnostic.fetch = "failed";
+        diagnostic.fetchError = error instanceof Error ? error.message : "Unknown error.";
       }
     }),
   );
   const verificationMs = performance.now() - verificationStarted;
 
-  const verifiedByName = new Map(
-    verified.filter((entry): entry is { name: string; url: string } => entry !== null).map((entry) => [entry.name, entry.url]),
-  );
-  const suggestions = names.map((name) => ({ name, url: verifiedByName.get(name) ?? null }));
+  const suggestions = names.map((name) => ({ name, url: diagnostics.get(name)!.finalUrl }));
   const resolvedCount = suggestions.filter((suggestion) => suggestion.url !== null).length;
   const totalMs = performance.now() - totalStarted;
 
@@ -166,6 +250,7 @@ export async function resolveCompetitorUrls(params: {
 
   return {
     suggestions,
+    diagnostics: [...diagnostics.values()],
     instrumentation: { modelLookupMs, verificationMs, resolvedCount, totalCount: names.length, totalMs },
   };
 }

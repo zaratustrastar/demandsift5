@@ -616,15 +616,28 @@ function extractJsonLdEvidence(html: string): string[] {
   return evidence;
 }
 
-function extractPage(html: string): { title: string; description?: string; text: string } {
+/** Identity signals kept separate from the combined `text` blob
+ * specifically for callers (currently only
+ * lib/server/competitor-url-resolution.ts) that need to inspect og:title/
+ * og:site_name/application-name individually -- e.g. to diagnose why an
+ * identity check did or didn't match, rather than only having the single
+ * concatenated string every other consumer of extractPage already used. */
+export interface PageIdentitySignals {
+  title: string;
+  description?: string;
+  ogTitle?: string;
+  ogSiteName?: string;
+  applicationName?: string;
+}
+
+function extractPage(html: string): { title: string; description?: string; text: string; identity: PageIdentitySignals } {
   const title = capture(html, /<title\b[^>]*>([\s\S]*?)<\/title>/i) ?? "Untitled page";
   const description =
     metaContent(html, ["description", "og:description", "twitter:description"]);
-  const metadata = [
-    metaContent(html, ["og:site_name", "application-name"]),
-    metaContent(html, ["og:title", "twitter:title"]),
-    ...extractJsonLdEvidence(html),
-  ];
+  const ogSiteName = metaContent(html, ["og:site_name"]);
+  const applicationName = metaContent(html, ["application-name"]);
+  const ogTitle = metaContent(html, ["og:title", "twitter:title"]);
+  const metadata = [ogSiteName ?? applicationName, ogTitle, ...extractJsonLdEvidence(html)];
   // <noscript> fallback text is genuine human-readable content -- often
   // written deliberately for SEO/no-JS visitors -- unlike script/style/
   // template/svg, which are never text. Extracted separately (its own
@@ -647,7 +660,7 @@ function extractPage(html: string): { title: string; description?: string; text:
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120_000);
-  return { title, description, text };
+  return { title, description, text, identity: { title, description, ogTitle, ogSiteName, applicationName } };
 }
 
 function extractInternalLinks(html: string, pageUrl: URL, allowedHostname: string): URL[] {
@@ -1014,6 +1027,7 @@ export async function crawlWebsite(
         text: extracted.text,
         contentHash: sha256(extracted.text),
         retrievedAt,
+        identity: extracted.identity,
       });
 
       for (const link of extractInternalLinks(pageHtml, finalUrl, target.url.hostname)) {

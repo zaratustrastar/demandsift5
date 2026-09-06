@@ -25,11 +25,12 @@ const serverContracts = await read("../lib/server/contracts.ts");
 const domainTypes = await read("../lib/domain/types.ts");
 
 test("the model proposal is never trusted alone -- every candidate is independently verified against its own homepage before being kept", () => {
-  assert.match(resolution, /identityMatches\(candidate\.name, identityText\)/);
+  assert.match(resolution, /identityMatch\(candidate\.name, \{/);
   // The homepage fetch happens after -- not instead of -- validating the
-  // URL, and the final suggestion list is built from the *verified* set,
-  // not the raw model proposal.
-  assert.match(resolution, /const verifiedByName = new Map/);
+  // URL, and the final suggestion list is built from the diagnostic's
+  // finalUrl, only ever set once a match is confirmed, not the raw model
+  // proposal.
+  assert.match(resolution, /if \(matched\) diagnostic\.finalUrl = candidate\.url;/);
   assert.doesNotMatch(
     resolution,
     /suggestions = names\.map\(\(name\) => \(\{ name, url: proposedByName/,
@@ -84,7 +85,15 @@ test("the suggestions cache lives on discoveryProfile, keyed by name, distinguis
 });
 
 test("the route serves from cache when every current competitor name already has an entry, instead of re-running the model+fetch pipeline", () => {
-  assert.match(route, /if \(cached && names\.every\(\(name\) => name in cached\)\)/);
+  assert.match(route, /if \(!debug && cached && names\.every\(\(name\) => name in cached\)\)/);
+});
+
+test("only successfully-resolved names are cached -- a name that resolved to null is retried on the next request, not permanently remembered as failed", () => {
+  assert.match(route, /resolution\.suggestions\.filter\(\(suggestion\) => suggestion\.url !== null\)/);
+  // The cache write merges with what was already there rather than
+  // replacing it outright, so a name resolved on an earlier visit isn't
+  // lost just because a later visit's batch didn't re-resolve it.
+  assert.match(route, /competitorUrlSuggestions: \{ \.\.\.cached, \.\.\.resolvedOnly \}/);
 });
 
 test("the route is its own endpoint, not a field bolted onto the shared discovery-terms route DiscoveryProfile.tsx also polls for unrelated data", () => {

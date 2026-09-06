@@ -116,9 +116,17 @@ export function CompetitorsSetup({
   // competitor" link with nothing visible until it's clicked.
   useEffect(() => {
     let cancelled = false;
+    // Temporary diagnostic only, matching the __scanPollLog one in
+    // ThreadlineExperience.tsx -- traces exactly when this screen mounts
+    // and when its own fetch starts/ends, with precise (not manually
+    // observed) timestamps.
+    const diagLog = ((window as unknown as { __scanPollLog?: unknown[] }).__scanPollLog ??= []);
+    diagLog.push({ atIso: new Date().toISOString(), event: "competitors_setup_mount" });
     (async () => {
       try {
+        diagLog.push({ atIso: new Date().toISOString(), event: "competitor_url_suggestions_fetch_start" });
         const response = await fetch(`/api/scans/${encodeURIComponent(scanId)}/competitor-url-suggestions`, { cache: "no-store" });
+        diagLog.push({ atIso: new Date().toISOString(), event: "competitor_url_suggestions_fetch_end", status: response.status });
         if (!response.ok) {
           if (!cancelled) setRows([{ id: nextRowId(), url: "" }]);
           return;

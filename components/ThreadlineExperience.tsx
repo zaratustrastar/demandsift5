@@ -2353,6 +2353,15 @@ export function ThreadlineExperience() {
               ));
             }
             signal.throwIfAborted();
+            // Temporary diagnostic only, for tracing the analyzeBusiness-complete
+            // -> Competitors-screen-visible gap with precise (not manually
+            // observed) client timestamps. Harmless no-op outside a debug
+            // session -- nothing reads window.__scanPollLog in production.
+            (window as unknown as { __scanPollLog?: unknown[] }).__scanPollLog ??= [];
+            (window as unknown as { __scanPollLog: unknown[] }).__scanPollLog.push({
+              atIso: new Date().toISOString(), phase: latest.scan.phase, status: latest.scan.status,
+              visibilityState: document.visibilityState,
+            });
             const merged = { ...created, scan: { ...created.scan, ...latest.scan }, access: latest.access };
             analysisScanRef.current = Promise.resolve(merged);
             setScanProgress(latest.scan.progress);

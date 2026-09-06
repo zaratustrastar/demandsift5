@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix the 2 real Competitors-screen gaps (Continue button
-# label, zero-suggestions fallback row) -- everything else in that
-# redesign was already live, confirmed via a real test scan (2026-09-06).
+# Release marker: add full diagnostics (?debug=1) to competitor URL
+# resolution to trace the real notion.com failure; fix a real caching
+# bug that permanently blocked retrying a failed resolution (2026-09-06).
 
 on:
   push:

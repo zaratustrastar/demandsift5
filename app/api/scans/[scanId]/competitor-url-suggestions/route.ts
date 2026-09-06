@@ -6,7 +6,7 @@ import { getStateRepository } from "@/lib/server/repository";
 import { aiCapacityFromEnv } from "@/lib/ai/capacity";
 import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
-import { resolveCompetitorUrls } from "@/lib/server/competitor-url-resolution";
+import { resolveCompetitorUrls, resolveCompetitorUrlsFromCrawl, buildCompactCompetitorEvidence } from "@/lib/server/competitor-url-resolution";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
@@ -50,6 +50,7 @@ export async function GET(request: Request, context: RouteContext) {
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
     const debug = new URL(request.url).searchParams.get("debug") === "1";
+    const compareSuggestionSource = new URL(request.url).searchParams.get("compareSuggestionSource") === "1";
 
     const business = scan.discoveryProfile?.business;
     if (!business) {
@@ -57,6 +58,59 @@ export async function GET(request: Request, context: RouteContext) {
         "Analyze the website before suggesting competitor websites.",
         409,
         "website_not_analyzed",
+      );
+    }
+
+    // A/B comparison mode: runs both the OLD (business-profile-based) and
+    // NEW (crawl-evidence-based) suggestion sources side by side, against
+    // the already-persisted crawl snapshot -- no re-crawl, and never
+    // writes to the suggestion cache, since this is purely a read-only
+    // comparison for evaluating whether to switch. Not used by
+    // CompetitorsSetup.tsx.
+    if (compareSuggestionSource) {
+      const crawl = scan.websiteSnapshot?.crawl;
+      if (!crawl) {
+        throw new ApiError("No crawl snapshot is available for this scan to compare against.", 409, "no_crawl_snapshot");
+      }
+      const capacity = aiCapacityFromEnv();
+      const aiProvider = process.env.OPENAI_API_KEY?.trim()
+        ? createOpenAiProviderFromEnv(process.env, {
+            requestGate: globallyBoundedAiRequestGate({
+              workspaceId: actor.workspaceId,
+              localLimit: capacity.requestConcurrency,
+              holderPrefix: `competitor-url-compare:${actor.workspaceId}:${scanId}`,
+            }),
+          })
+        : null;
+      if (!aiProvider) throw new ApiError("AI is not configured; cannot run the comparison.", 409, "ai_not_configured");
+      const models = openAiModelsFromEnv();
+      const ownDomain = normalizedBusinessHostname(scan.websiteUrl) ?? "";
+      const compactEvidence = buildCompactCompetitorEvidence(crawl);
+      const [oldResult, newResult] = await Promise.all([
+        resolveCompetitorUrls({
+          businessName: business.name.value, websiteUrl: scan.websiteUrl, summary: business.summary.value,
+          productCategory: business.productCategory.value,
+          targetAudience: business.targetAudiences.value.map((segment) => segment.name),
+          problemsSolved: business.problemsSolved.value, ownDomain, aiProvider, models, workspaceId: actor.workspaceId,
+        }),
+        resolveCompetitorUrlsFromCrawl({
+          websiteUrl: scan.websiteUrl, canonicalDomain: crawl.canonicalDomain, pages: compactEvidence,
+          ownDomain, aiProvider, models, workspaceId: actor.workspaceId,
+        }),
+      ]);
+      return Response.json(
+        {
+          businessName: business.name.value,
+          old: { suggestions: oldResult.suggestions, diagnostics: oldResult.diagnostics, instrumentation: oldResult.instrumentation },
+          new: { suggestions: newResult.suggestions, diagnostics: newResult.diagnostics, instrumentation: newResult.instrumentation },
+          compactEvidencePromptChars: JSON.stringify({ websiteUrl: scan.websiteUrl, canonicalDomain: crawl.canonicalDomain, pages: compactEvidence }).length,
+          oldPromptChars: JSON.stringify({
+            businessName: business.name.value, websiteUrl: scan.websiteUrl, summary: business.summary.value,
+            productCategory: business.productCategory.value, targetAudience: business.targetAudiences.value.map((segment) => segment.name),
+            problemsSolved: business.problemsSolved.value,
+          }).length,
+        },
+        { headers: { "Cache-Control": "no-store" } },
       );
     }
 

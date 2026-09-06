@@ -287,6 +287,27 @@ export interface AiProvider {
   suggestCompetitors(
     request: SuggestCompetitorsRequest,
   ): Promise<AiProviderResult<SuggestedCompetitor[]>>;
+  /**
+   * Under A/B evaluation as a replacement for suggestCompetitors above:
+   * same output shape and same "propose, don't trust" contract, but reads
+   * compact crawl evidence (title/description/text excerpt per page)
+   * directly instead of a completed BusinessUnderstanding -- see
+   * lib/server/competitor-url-resolution.ts's buildCompactCompetitorEvidence
+   * and resolveCompetitorUrlsFromCrawl. The point is letting this run
+   * concurrently with analyzeBusiness right after the crawl finishes,
+   * rather than waiting on it.
+   */
+  suggestCompetitorsFromCrawl(
+    request: SuggestCompetitorsFromCrawlRequest,
+  ): Promise<AiProviderResult<SuggestedCompetitor[]>>;
+}
+
+export interface SuggestCompetitorsFromCrawlRequest {
+  workspaceId: EntityId;
+  websiteUrl: string;
+  canonicalDomain: string;
+  pages: Array<{ url: string; title: string; description?: string; textExcerpt: string }>;
+  models: ModelConfiguration;
 }
 
 export interface SuggestCompetitorsRequest {

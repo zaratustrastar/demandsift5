@@ -130,7 +130,34 @@ test("no new external search/AI provider was introduced -- the new AiProvider me
 });
 
 test("instrumentation covers model latency, candidates returned, verification latency, and verified count", () => {
-  assert.match(resolution, /modelLookupMs,\s*candidatesReturned:/);
-  assert.match(resolution, /verificationMs,\s*\n\s*verifiedCount:/);
-  assert.match(resolution, /totalMs = performance\.now\(\) - totalStarted;/);
+  assert.match(resolution, /modelLookupMs, candidatesReturned: proposed\.length, verificationMs, verifiedCount: suggestions\.length, totalMs/);
+});
+
+test("the new crawl-evidence path has no dependency on BusinessUnderstanding -- it only takes websiteUrl/canonicalDomain/pages", () => {
+  const fnStart = resolution.indexOf("export async function resolveCompetitorUrlsFromCrawl");
+  const fnBody = resolution.slice(fnStart, resolution.indexOf("\n}\n", fnStart));
+  assert.doesNotMatch(fnBody, /business\.|BusinessUnderstanding|businessName:/);
+  assert.match(fnBody, /aiProvider\.suggestCompetitorsFromCrawl\(/);
+});
+
+test("compact evidence is capped well below what analyzeBusiness receives, per page", () => {
+  assert.match(resolution, /MAX_TEXT_EXCERPT_CHARS = 600/);
+  assert.match(resolution, /MAX_EVIDENCE_PAGES = 4/);
+  assert.match(resolution, /textExcerpt: page\.text\.slice\(0, MAX_TEXT_EXCERPT_CHARS\)/);
+});
+
+test("both suggestion sources share the same verification pipeline, not two separate implementations", () => {
+  const oldCallsShared = resolution.indexOf("resolveCompetitorUrls(params") < resolution.indexOf("verifyProposedCompetitors(proposed, params)", resolution.indexOf("export async function resolveCompetitorUrls"));
+  assert.ok(oldCallsShared);
+  const newFnStart = resolution.indexOf("export async function resolveCompetitorUrlsFromCrawl");
+  assert.match(resolution.slice(newFnStart), /verifyProposedCompetitors\(proposed, params\)/);
+});
+
+test("the A/B comparison endpoint runs both sources against the same already-persisted crawl snapshot, without writing to the suggestion cache", () => {
+  assert.match(route, /compareSuggestionSource/);
+  assert.match(route, /scan\.websiteSnapshot\?\.crawl/);
+  const compareStart = route.indexOf("if (compareSuggestionSource)");
+  const compareEnd = route.indexOf("\n    }", compareStart);
+  const compareBody = route.slice(compareStart, compareEnd);
+  assert.doesNotMatch(compareBody, /saveScan/);
 });

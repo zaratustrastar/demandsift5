@@ -1,7 +1,7 @@
 import type { AiProvider } from "@/lib/providers/contracts";
 import type { ModelConfiguration } from "@/lib/domain/types";
 import { crawlWebsite, validatePublicWebsiteUrl } from "@/lib/security/website-crawler";
-import type { HostResolver, PinnedWebsiteFetch } from "@/lib/security/website-crawler";
+import type { HostResolver, PinnedWebsiteFetch, WebsiteCrawlResult } from "@/lib/security/website-crawler";
 
 export interface CompetitorUrlSuggestion {
   name: string;
@@ -12,9 +12,7 @@ export interface CompetitorUrlSuggestion {
  * verify -- not returned in the normal production response, only when a
  * caller explicitly asks for it (see the API route's ?debug=1). */
 export interface CompetitorUrlDiagnostic {
-  /** The name as the model proposed it -- unlike the old
-   * names-known-in-advance design, this is itself a hypothesis here, not
-   * a given. */
+  /** The name as the model proposed it -- itself a hypothesis here, not a given. */
   name: string;
   proposedUrl: string | null;
   normalizedUrl: string | null;
@@ -28,15 +26,11 @@ export interface CompetitorUrlDiagnostic {
   description?: string;
   bodyTextPrefix?: string;
   identityMatch: boolean | null;
-  /** Which signal the match was found on, when identityMatch is true. */
   matchedOn?: "title" | "ogTitle" | "ogSiteName" | "description" | "bodyText";
   /** True only once both the URL and the identity match are confirmed --
-   * this is what actually gets surfaced as a suggestion. An unverified
-   * candidate (bad name, bad URL, or a failed identity check) is dropped
-   * entirely, not shown as a name-only placeholder: unlike the previous
-   * BusinessUnderstanding.competitors-based design, the name itself is
-   * also just a model hypothesis here, so there is no part of an
-   * unverified candidate worth presenting as fact. */
+   * an unverified candidate is dropped entirely, not shown as a
+   * partial/name-only suggestion, since the name itself is also just a
+   * model hypothesis in this design, not evidence-based fact. */
   verified: boolean;
 }
 
@@ -80,14 +74,8 @@ function textIncludesName(competitorName: string, text: string | undefined): boo
  * A deliberately conservative identity check, done against each signal
  * separately (title, og:site_name, og:title, description, then a
  * body-text prefix as the last resort) rather than one concatenated
- * blob. Checking fields independently, in order of how reliably they
- * identify a site (structured metadata first, free body text last),
- * means a title or og:site_name that cleanly says the company name still
- * matches even when the body-text prefix is noisy (cookie banners, nav
- * labels, a framework's loading skeleton) -- a single combined-string
- * search would have diluted a clean signal with that noise instead of
- * checking it on its own. Reports which field actually matched, for
- * diagnostics.
+ * blob -- see the git history for the full rationale. Reports which
+ * field actually matched, for diagnostics.
  */
 function identityMatch(
   competitorName: string,
@@ -107,79 +95,32 @@ function identityMatch(
 }
 
 /**
- * Suggests up to 3 direct competitors for CompetitorsSetup.tsx to
- * auto-fill, from the business's own context -- not from
- * BusinessUnderstanding.competitors, whose evidence-based semantics
- * (name a competitor only when the website explicitly identifies it)
- * stay untouched and unused here. See the AiProvider.suggestCompetitors
- * doc comment for why.
- *
- * One batched request proposes name+URL pairs together (not two
- * sequential calls); every candidate then goes through the same
- * independent verification regardless of where it came from: normalized
- * and run through validatePublicWebsiteUrl (rejects unsafe/unsafe,
- * non-unique, or the user's own domain), then one lightweight single-page
- * fetch (crawlWebsite with maxPages: 1 -- not the multi-page competitor
- * crawl, which still only runs later if the user continues from this
- * screen) and an identity check against the homepage's own title/
- * og:site_name/og:title/description. Only a candidate whose URL AND
- * identity both verify is ever surfaced; since the name itself is also
- * just a model hypothesis in this design (unlike the old
- * names-already-known approach), an unverified candidate contributes
- * nothing trustworthy and is dropped entirely rather than shown as a
- * partial suggestion.
+ * The shared verification stage, independent of how the {name, url}
+ * candidates were proposed (from a completed BusinessUnderstanding, or
+ * directly from compact crawl evidence -- see the two callers below,
+ * currently kept side by side for an A/B comparison rather than one
+ * replacing the other outright). Every candidate is normalized and run
+ * through the same validatePublicWebsiteUrl used before crawling
+ * anything, then one lightweight single-page fetch (crawlWebsite with
+ * maxPages: 1, not the multi-page competitor crawl) and an identity
+ * check against the homepage's own title/og:site_name/og:title/
+ * description. Only a candidate whose URL AND identity both verify is
+ * ever surfaced.
  */
-export async function resolveCompetitorUrls(params: {
-  businessName: string;
-  websiteUrl: string;
-  summary: string;
-  productCategory?: string;
-  targetAudience: string[];
-  problemsSolved: string[];
-  /** Canonical hostname of the user's own scanned site, "" for a context-mode scan with no website. */
-  ownDomain: string;
-  aiProvider: AiProvider;
-  models: ModelConfiguration;
-  workspaceId: string;
-  /** Test-only injection points, matching website-crawler.ts's own
-   * pattern -- unset in production, where the real resolver/fetch apply. */
-  resolver?: HostResolver;
-  fetchImpl?: PinnedWebsiteFetch;
-}): Promise<CompetitorUrlResolutionResult> {
-  const totalStarted = performance.now();
-
-  const modelStarted = performance.now();
-  let proposed: Array<{ name: string; url: string | null }> = [];
-  try {
-    const result = await params.aiProvider.suggestCompetitors({
-      workspaceId: params.workspaceId,
-      businessName: params.businessName,
-      websiteUrl: params.websiteUrl,
-      summary: params.summary,
-      productCategory: params.productCategory,
-      targetAudience: params.targetAudience,
-      problemsSolved: params.problemsSolved,
-      models: params.models,
-    });
-    proposed = result.value;
-  } catch {
-    // A model-lookup failure degrades to "no suggestions" -- the
-    // Competitors screen falls back to its own single empty row, same
-    // as a genuine zero-candidates result.
-  }
-  const modelLookupMs = performance.now() - modelStarted;
-
+async function verifyProposedCompetitors(
+  proposed: Array<{ name: string; url: string | null }>,
+  params: { ownDomain: string; resolver?: HostResolver; fetchImpl?: PinnedWebsiteFetch },
+): Promise<{ suggestions: CompetitorUrlSuggestion[]; diagnostics: CompetitorUrlDiagnostic[]; verificationMs: number }> {
   const diagnostics: CompetitorUrlDiagnostic[] = proposed.map((entry) => ({
     name: entry.name, proposedUrl: entry.url, normalizedUrl: null, validation: "no_proposal",
     fetch: "not_attempted", identityMatch: null, verified: false,
   }));
 
-  // Normalize, validate and dedupe before ever fetching anything.
   const seenHostnames = new Set<string>();
   const candidates: Array<{ name: string; url: string; diagnostic: CompetitorUrlDiagnostic }> = [];
   for (const diagnostic of diagnostics) {
     const rawUrl = diagnostic.proposedUrl;
-    if (!rawUrl) continue; // stays "no_proposal"
+    if (!rawUrl) continue;
     const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
     diagnostic.normalizedUrl = withScheme;
     try {
@@ -247,24 +188,143 @@ export async function resolveCompetitorUrls(params: {
   const suggestions: CompetitorUrlSuggestion[] = candidates
     .filter(({ diagnostic }) => diagnostic.verified)
     .map(({ name, url }) => ({ name, url }));
+
+  return { suggestions, diagnostics, verificationMs };
+}
+
+/**
+ * OLD path: suggests competitors from a completed BusinessUnderstanding's
+ * distilled profile fields. Kept temporarily alongside
+ * resolveCompetitorUrlsFromCrawl for a direct A/B comparison -- see that
+ * function's doc comment for why a crawl-evidence-only path is being
+ * evaluated as a replacement (it would let competitor suggestion run
+ * concurrently with analyzeBusiness instead of waiting for it).
+ */
+export async function resolveCompetitorUrls(params: {
+  businessName: string;
+  websiteUrl: string;
+  summary: string;
+  productCategory?: string;
+  targetAudience: string[];
+  problemsSolved: string[];
+  ownDomain: string;
+  aiProvider: AiProvider;
+  models: ModelConfiguration;
+  workspaceId: string;
+  resolver?: HostResolver;
+  fetchImpl?: PinnedWebsiteFetch;
+}): Promise<CompetitorUrlResolutionResult> {
+  const totalStarted = performance.now();
+  const modelStarted = performance.now();
+  let proposed: Array<{ name: string; url: string | null }> = [];
+  try {
+    const result = await params.aiProvider.suggestCompetitors({
+      workspaceId: params.workspaceId,
+      businessName: params.businessName,
+      websiteUrl: params.websiteUrl,
+      summary: params.summary,
+      productCategory: params.productCategory,
+      targetAudience: params.targetAudience,
+      problemsSolved: params.problemsSolved,
+      models: params.models,
+    });
+    proposed = result.value;
+  } catch {
+    // A model-lookup failure degrades to "no suggestions" -- the
+    // Competitors screen falls back to its own single empty row.
+  }
+  const modelLookupMs = performance.now() - modelStarted;
+
+  const { suggestions, diagnostics, verificationMs } = await verifyProposedCompetitors(proposed, params);
   const totalMs = performance.now() - totalStarted;
 
   console.info(JSON.stringify({
-    type: "competitor_suggestion",
-    workspaceId: params.workspaceId,
-    modelLookupMs: Math.round(modelLookupMs),
-    candidatesReturned: proposed.length,
-    verificationMs: Math.round(verificationMs),
-    verifiedCount: suggestions.length,
-    totalMs: Math.round(totalMs),
+    type: "competitor_suggestion", source: "business_understanding", workspaceId: params.workspaceId,
+    modelLookupMs: Math.round(modelLookupMs), candidatesReturned: proposed.length,
+    verificationMs: Math.round(verificationMs), verifiedCount: suggestions.length, totalMs: Math.round(totalMs),
   }));
 
   return {
-    suggestions,
-    diagnostics,
-    instrumentation: {
-      modelLookupMs, candidatesReturned: proposed.length, verificationMs,
-      verifiedCount: suggestions.length, totalMs,
-    },
+    suggestions, diagnostics,
+    instrumentation: { modelLookupMs, candidatesReturned: proposed.length, verificationMs, verifiedCount: suggestions.length, totalMs },
+  };
+}
+
+const MAX_EVIDENCE_PAGES = 4;
+const MAX_TEXT_EXCERPT_CHARS = 600;
+
+export interface CompactCompetitorEvidencePage {
+  url: string;
+  title: string;
+  description?: string;
+  textExcerpt: string;
+}
+
+/**
+ * Builds a small, capped evidence set from an already-crawled site --
+ * enough to understand product, audience, and positioning, deliberately
+ * far short of what analyzeBusiness receives (up to 28,000 chars per
+ * page there vs. 600 here). Up to the same 4 pages the crawl already
+ * selected; no new crawling or page selection of its own.
+ */
+export function buildCompactCompetitorEvidence(crawl: WebsiteCrawlResult): CompactCompetitorEvidencePage[] {
+  return crawl.pages.slice(0, MAX_EVIDENCE_PAGES).map((page) => ({
+    url: page.url,
+    title: page.title,
+    description: page.description,
+    textExcerpt: page.text.slice(0, MAX_TEXT_EXCERPT_CHARS),
+  }));
+}
+
+/**
+ * NEW path, under A/B evaluation: suggests competitors directly from
+ * compact crawl evidence (see buildCompactCompetitorEvidence), with no
+ * dependency on BusinessUnderstanding at all. The point is latency, not
+ * a redesign for its own sake -- analyzeBusiness and this can then run
+ * concurrently right after the crawl finishes, instead of this waiting
+ * for analyzeBusiness's ~38s to complete first. Not yet used by the
+ * production route; see the ?compareSuggestionSource=1 debug mode that
+ * runs this alongside resolveCompetitorUrls for direct comparison.
+ */
+export async function resolveCompetitorUrlsFromCrawl(params: {
+  websiteUrl: string;
+  canonicalDomain: string;
+  pages: CompactCompetitorEvidencePage[];
+  ownDomain: string;
+  aiProvider: AiProvider;
+  models: ModelConfiguration;
+  workspaceId: string;
+  resolver?: HostResolver;
+  fetchImpl?: PinnedWebsiteFetch;
+}): Promise<CompetitorUrlResolutionResult> {
+  const totalStarted = performance.now();
+  const modelStarted = performance.now();
+  let proposed: Array<{ name: string; url: string | null }> = [];
+  try {
+    const result = await params.aiProvider.suggestCompetitorsFromCrawl({
+      workspaceId: params.workspaceId,
+      websiteUrl: params.websiteUrl,
+      canonicalDomain: params.canonicalDomain,
+      pages: params.pages,
+      models: params.models,
+    });
+    proposed = result.value;
+  } catch {
+    // Same conservative degrade as the OLD path above.
+  }
+  const modelLookupMs = performance.now() - modelStarted;
+
+  const { suggestions, diagnostics, verificationMs } = await verifyProposedCompetitors(proposed, params);
+  const totalMs = performance.now() - totalStarted;
+
+  console.info(JSON.stringify({
+    type: "competitor_suggestion", source: "crawl_evidence", workspaceId: params.workspaceId,
+    modelLookupMs: Math.round(modelLookupMs), candidatesReturned: proposed.length,
+    verificationMs: Math.round(verificationMs), verifiedCount: suggestions.length, totalMs: Math.round(totalMs),
+  }));
+
+  return {
+    suggestions, diagnostics,
+    instrumentation: { modelLookupMs, candidatesReturned: proposed.length, verificationMs, verifiedCount: suggestions.length, totalMs },
   };
 }

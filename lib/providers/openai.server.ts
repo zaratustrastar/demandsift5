@@ -41,6 +41,7 @@ import type {
   GenerateReplyRequest,
   GenerateVisibilityQuestionsRequest,
   QualifyConversationsRequest,
+  SuggestCompetitorsFromCrawlRequest,
   SuggestCompetitorsRequest,
   SuggestedCompetitor,
   TriagedConversation,
@@ -2428,6 +2429,46 @@ export class OpenAiProvider implements AiProvider {
         productCategory: request.productCategory,
         targetAudience: request.targetAudience,
         problemsSolved: request.problemsSolved,
+      }),
+      parse: (value) => parseSuggestedCompetitors(value),
+    });
+  }
+
+  /**
+   * Under A/B evaluation as a replacement for suggestCompetitors above --
+   * see that interface method's doc comment. Same schema/parse/system
+   * intent, reading compact crawled evidence instead of a completed
+   * business profile.
+   */
+  async suggestCompetitorsFromCrawl(
+    request: SuggestCompetitorsFromCrawlRequest,
+  ): Promise<AiProviderResult<SuggestedCompetitor[]>> {
+    return this.structured({
+      model: request.models.economyModel,
+      operation: "competitor_suggestion",
+      schemaName: "competitor_suggestions",
+      schema: COMPETITOR_SUGGESTIONS_SCHEMA,
+      maxOutputTokens: 500,
+      reasoningEffort: "low",
+      context: { workspaceId: request.workspaceId },
+      system:
+        "You are given several pages crawled directly from a company's own website (title, meta description, and " +
+        "an excerpt of the page's own text) -- read them to understand what the business sells, who it serves, and " +
+        "how it's positioned. Then name up to 3 of its closest direct competitors or meaningful alternatives -- " +
+        "specific companies a real customer would actually compare it against, not broad category giants unrelated " +
+        "to its actual size or niche. If the business is location-dependent (serves a specific city/region/" +
+        "country), only suggest competitors serving that same geographic market. If it's online/global, prioritize " +
+        "product similarity and target-customer overlap over geography. For each one, return its likely official " +
+        "homepage URL only if you are reasonably confident which specific company is meant and what its real " +
+        "domain is -- set url to null rather than guessing when unsure; a wrong domain is worse than none. Never " +
+        "invent a domain by pattern-matching the name (e.g. just appending .com); only return a domain you have " +
+        "concrete reason to believe is that company's actual official site. Return fewer than 3 results, or none, " +
+        "if you don't have that many genuine direct competitors in mind -- do not pad the list with a weak guess " +
+        "just to reach 3.",
+      user: JSON.stringify({
+        websiteUrl: request.websiteUrl,
+        canonicalDomain: request.canonicalDomain,
+        pages: request.pages,
       }),
       parse: (value) => parseSuggestedCompetitors(value),
     });

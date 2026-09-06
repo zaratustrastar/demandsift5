@@ -25,7 +25,7 @@ export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropU
   const stop = new Error("fixture_stop_at_qualification");
   const result = (value, operation = "conversation_triage") => ({ value, model: "fixture-model", operation, usage: { inputTokens: 0, outputTokens: 0 }, estimatedCostUsd: 0 });
   const state = {
-    crawlCalls: [], analysisCalls: [],
+    crawlCalls: [], analysisCalls: [], competitorSuggestionCalls: [],
     crawlWebsite: async (url, options) => {
       if (inputMode === "context") throw new Error("A context fixture must not crawl");
       state.crawlCalls.push({ url, options });
@@ -52,6 +52,10 @@ export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropU
           if (value && typeof value === "object" && "provenanceIds" in value) value.provenanceIds = request.pages.map(page => page.sourceId);
         }
         return result(analyzedBusiness);
+      },
+      suggestCompetitorsFromCrawl: async request => {
+        state.competitorSuggestionCalls.push(structuredClone(request));
+        return result([], "competitor_suggestion");
       },
       analyzeBusinessFromContext: async () => result(structuredClone(business)),
       triageConversations: async request => {
@@ -95,7 +99,7 @@ export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropU
     "lib/server/http.ts": "export class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }",
     "lib/server/funnel.ts": "export async function captureFunnelEvent() {}",
     "lib/server/ai-visibility-workflow.ts": "export async function ensureAiVisibilityTrackingStarted() {}",
-    "lib/security/website-crawler.ts": `export class UnsafeWebsiteUrlError extends Error {} export const crawlWebsite = (...args) => ${ref}.crawlWebsite(...args);`,
+    "lib/security/website-crawler.ts": `export class UnsafeWebsiteUrlError extends Error {} export const crawlWebsite = (...args) => ${ref}.crawlWebsite(...args); export const validatePublicWebsiteUrl = async () => { throw new Error("validatePublicWebsiteUrl is not stubbed in this test harness -- if a test needs it, add a real stub instead of relying on this throwing"); };`,
     "lib/providers/openai.server.ts": `export const createOpenAiProviderFromEnv = (env, options) => ${ref}.createAiProvider ? ${ref}.createAiProvider(env, options) : ${ref}.ai; export const openAiModelsFromEnv = () => ${ref}.models; export const isUsableTriageJudgment = ${ref}.isUsableTriageJudgment;`,
     "lib/providers/reddit.server.ts": `export const createRedditProviderFromEnv = () => ${ref}.reddit;`,
   } });

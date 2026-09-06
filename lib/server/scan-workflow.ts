@@ -78,6 +78,8 @@ import { replyInputVersion } from "../ai/reply-checkpoint";
 import { ApifyRunRecovery } from "../providers/apify-run-recovery";
 import { publishPartialReply, removePartialRepliesExcept, replaceCandidatePreviews, replaceQualifiedPartialResults, stableScanOutputId } from "./partial-results";
 import { globallyBoundedAiRequestGate, sharedProviderCapacity } from "./provider-capacity";
+import { resolveCompetitorUrlsFromCrawl, buildCompactCompetitorEvidence } from "./competitor-url-resolution";
+import { normalizedBusinessHostname } from "./business-access";
 
 const scanTraces = new WeakMap<ScanRecord, { trace: ScanTrace; stages: Map<string, ReturnType<ScanTrace["start"]>> }>();
 const scanExecutions = new WeakMap<ScanRecord, { owner: ScanExecutionOwner; guard: ReturnType<typeof maintainScanExecution> }>();
@@ -604,6 +606,15 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   profile: ScanBusinessProfile;
   analysisMode: ScanResult["analysisMode"];
   diagnostics: WebsiteUnderstandingDiagnostics;
+  /** Computed concurrently with analyzeBusiness (see below), not
+   * sequentially after it -- present whenever an AI provider ran, so the
+   * Competitors screen never has to wait on its own separate round-trip:
+   * by the time this scan reaches awaiting_review, both are already
+   * done. A competitor-suggestion failure here never affects
+   * business/profile/analysisMode or the retry loop below -- it
+   * degrades to an empty array, same as the existing "no suggestions"
+   * fallback the Competitors screen already handles. */
+  competitorSuggestions: Array<{ name: string; url: string }>;
 }> {
   const businessId = createId("biz");
   const env = scan.runConfiguration ? environmentForScan(scan.runConfiguration) : process.env;
@@ -613,6 +624,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   let crawlMs = 0;
   let analyzeBusinessMs = 0;
   let attempts = 0;
+  let competitorSuggestions: Array<{ name: string; url: string }> = [];
 
   if (aiProvider) {
     const models = openAiModelsFromEnv(env);
@@ -627,17 +639,37 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
         crawlMs += performance.now() - crawlStarted;
         const { pages } = pagesFromCrawl(crawl);
         const analyzeStarted = performance.now();
-        const analyzed = await aiProvider.analyzeBusiness({
-          workspaceId: scan.workspaceId,
-          businessId,
-          websiteUrl: crawl.canonicalUrl,
-          canonicalDomain: crawl.canonicalDomain,
-          pages,
-          models,
-        });
+        // Branch A (analyzeBusiness) and branch B (suggestCompetitorsFromCrawl
+        // + verification) both only need the crawl above -- neither depends
+        // on the other's output -- so they run concurrently here instead of
+        // B waiting for A's ~38s to finish first. allSettled specifically
+        // (not all): a competitor-suggestion failure must never fail this
+        // attempt or trigger a retry of analyzeBusiness, which already has
+        // its own success/failure handling below.
+        const [analyzedOutcome, competitorOutcome] = await Promise.allSettled([
+          aiProvider.analyzeBusiness({
+            workspaceId: scan.workspaceId,
+            businessId,
+            websiteUrl: crawl.canonicalUrl,
+            canonicalDomain: crawl.canonicalDomain,
+            pages,
+            models,
+          }),
+          resolveCompetitorUrlsFromCrawl({
+            websiteUrl: crawl.canonicalUrl,
+            canonicalDomain: crawl.canonicalDomain,
+            pages: buildCompactCompetitorEvidence(crawl),
+            ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
+            aiProvider,
+            models,
+            workspaceId: scan.workspaceId,
+          }),
+        ]);
         analyzeBusinessMs += performance.now() - analyzeStarted;
-        assertWebsiteProfileEvidence(scan, analyzed.value);
-        business = analyzed.value;
+        competitorSuggestions = competitorOutcome.status === "fulfilled" ? competitorOutcome.value.suggestions : [];
+        if (analyzedOutcome.status === "rejected") throw analyzedOutcome.reason;
+        assertWebsiteProfileEvidence(scan, analyzedOutcome.value.value);
+        business = analyzedOutcome.value.value;
         break;
       } catch (error) {
         lastError = error;
@@ -648,7 +680,10 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     }
     if (!business) throw lastError ?? new Error("Website understanding failed.");
     const profile = profileFromBusiness(business);
-    return { business, profile, analysisMode: "openai", diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts } };
+    return {
+      business, profile, analysisMode: "openai", competitorSuggestions,
+      diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts },
+    };
   }
 
   const crawlStarted = performance.now();
@@ -662,7 +697,10 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     businessId,
     canonicalDomain: crawl.canonicalDomain,
   });
-  return { business, profile, analysisMode: "local-fallback", diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts } };
+  return {
+    business, profile, analysisMode: "local-fallback", competitorSuggestions,
+    diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts },
+  };
 }
 
 /** The context-mode counterpart to `runFullWebsiteUnderstanding`. There is no
@@ -1289,6 +1327,16 @@ export async function runScan(
         analyzedAt: new Date().toISOString(),
         profileStage: "full",
         diagnosticTimeline: full.diagnostics,
+        // Computed concurrently with analyzeBusiness above (see
+        // runFullWebsiteUnderstanding), not on the Competitors screen's
+        // own separate round-trip -- already cached by the time this scan
+        // reaches awaiting_review, so GET .../competitor-url-suggestions
+        // is a fast cache read instead of its own ~15-20s computation.
+        // An empty object here (no suggestions verified) is the correct,
+        // existing "not yet resolved" cache shape -- the route still
+        // retries on the next request rather than treating it as
+        // permanently empty.
+        competitorUrlSuggestions: Object.fromEntries(full.competitorSuggestions.map((suggestion) => [suggestion.name, suggestion.url])),
       };
       await setStage(
         scan,

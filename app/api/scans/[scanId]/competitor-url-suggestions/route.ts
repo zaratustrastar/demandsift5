@@ -6,7 +6,7 @@ import { getStateRepository } from "@/lib/server/repository";
 import { aiCapacityFromEnv } from "@/lib/ai/capacity";
 import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
-import { resolveCompetitorUrls, resolveCompetitorUrlsFromCrawl, buildCompactCompetitorEvidence } from "@/lib/server/competitor-url-resolution";
+import { resolveCompetitorUrlsFromCrawl, buildCompactCompetitorEvidence } from "@/lib/server/competitor-url-resolution";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
@@ -24,23 +24,27 @@ type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } }
  * work there would slow that screen down every time, for a result it
  * never uses.
  *
- * Unlike an earlier version of this endpoint, competitor names are not
- * read from BusinessUnderstanding.competitors here at all -- that field's
- * evidence-based semantics (name a competitor only when the website
- * explicitly identifies it) mean it is empty for most real businesses
- * (a company's own marketing site essentially never names its rivals),
- * so it produced no suggestions in practice. Names and URLs are instead
- * proposed together, from the business's own profile, by
- * suggestCompetitors -- see that method's doc comment on AiProvider.
+ * Suggestions are generated from compact crawl evidence (see
+ * buildCompactCompetitorEvidence and resolveCompetitorUrlsFromCrawl), not
+ * from BusinessUnderstanding.competitors (empty for most real businesses)
+ * or from a completed business profile. This has no dependency on
+ * analyzeBusiness finishing first: scan-workflow.ts's
+ * runFullWebsiteUnderstanding now runs analyzeBusiness and this
+ * suggestion+verification pipeline concurrently right after the crawl,
+ * so by the time a scan reaches awaiting_review, competitorUrlSuggestions
+ * is normally already cached below -- this route's own on-demand
+ * computation is now mainly a fallback (an older scan from before this
+ * existed, or a suggestion pass that came back empty and is being
+ * retried).
  *
  * Only successfully verified suggestions are ever cached (see the save
  * below) -- a scan with zero verified suggestions is retried on the next
  * request rather than being permanently remembered as "nothing here."
  *
  * ?debug=1 returns the full per-candidate diagnostic trail from
- * resolveCompetitorUrls (proposed name/URL, validation outcome, homepage
- * identity signals, which one matched) instead of running silently --
- * for diagnosing why a candidate didn't verify, not used by
+ * resolveCompetitorUrlsFromCrawl (proposed name/URL, validation outcome,
+ * homepage identity signals, which one matched) instead of running
+ * silently -- for diagnosing why a candidate didn't verify, not used by
  * CompetitorsSetup.tsx.
  */
 export async function GET(request: Request, context: RouteContext) {
@@ -50,10 +54,10 @@ export async function GET(request: Request, context: RouteContext) {
     const { scanId } = await context.params;
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
     const debug = new URL(request.url).searchParams.get("debug") === "1";
-    const compareSuggestionSource = new URL(request.url).searchParams.get("compareSuggestionSource") === "1";
 
     const business = scan.discoveryProfile?.business;
-    if (!business) {
+    const crawl = scan.websiteSnapshot?.crawl;
+    if (!business || !crawl) {
       throw new ApiError(
         "Analyze the website before suggesting competitor websites.",
         409,
@@ -61,64 +65,13 @@ export async function GET(request: Request, context: RouteContext) {
       );
     }
 
-    // A/B comparison mode: runs both the OLD (business-profile-based) and
-    // NEW (crawl-evidence-based) suggestion sources side by side, against
-    // the already-persisted crawl snapshot -- no re-crawl, and never
-    // writes to the suggestion cache, since this is purely a read-only
-    // comparison for evaluating whether to switch. Not used by
-    // CompetitorsSetup.tsx.
-    if (compareSuggestionSource) {
-      const crawl = scan.websiteSnapshot?.crawl;
-      if (!crawl) {
-        throw new ApiError("No crawl snapshot is available for this scan to compare against.", 409, "no_crawl_snapshot");
-      }
-      const capacity = aiCapacityFromEnv();
-      const aiProvider = process.env.OPENAI_API_KEY?.trim()
-        ? createOpenAiProviderFromEnv(process.env, {
-            requestGate: globallyBoundedAiRequestGate({
-              workspaceId: actor.workspaceId,
-              localLimit: capacity.requestConcurrency,
-              holderPrefix: `competitor-url-compare:${actor.workspaceId}:${scanId}`,
-            }),
-          })
-        : null;
-      if (!aiProvider) throw new ApiError("AI is not configured; cannot run the comparison.", 409, "ai_not_configured");
-      const models = openAiModelsFromEnv();
-      const ownDomain = normalizedBusinessHostname(scan.websiteUrl) ?? "";
-      const compactEvidence = buildCompactCompetitorEvidence(crawl);
-      const [oldResult, newResult] = await Promise.all([
-        resolveCompetitorUrls({
-          businessName: business.name.value, websiteUrl: scan.websiteUrl, summary: business.summary.value,
-          productCategory: business.productCategory.value,
-          targetAudience: business.targetAudiences.value.map((segment) => segment.name),
-          problemsSolved: business.problemsSolved.value, ownDomain, aiProvider, models, workspaceId: actor.workspaceId,
-        }),
-        resolveCompetitorUrlsFromCrawl({
-          websiteUrl: scan.websiteUrl, canonicalDomain: crawl.canonicalDomain, pages: compactEvidence,
-          ownDomain, aiProvider, models, workspaceId: actor.workspaceId,
-        }),
-      ]);
-      return Response.json(
-        {
-          businessName: business.name.value,
-          old: { suggestions: oldResult.suggestions, diagnostics: oldResult.diagnostics, instrumentation: oldResult.instrumentation },
-          new: { suggestions: newResult.suggestions, diagnostics: newResult.diagnostics, instrumentation: newResult.instrumentation },
-          compactEvidencePromptChars: JSON.stringify({ websiteUrl: scan.websiteUrl, canonicalDomain: crawl.canonicalDomain, pages: compactEvidence }).length,
-          oldPromptChars: JSON.stringify({
-            businessName: business.name.value, websiteUrl: scan.websiteUrl, summary: business.summary.value,
-            productCategory: business.productCategory.value, targetAudience: business.targetAudiences.value.map((segment) => segment.name),
-            problemsSolved: business.problemsSolved.value,
-          }).length,
-        },
-        { headers: { "Cache-Control": "no-store" } },
-      );
-    }
-
     // Cached suggestions are keyed by whatever names the model proposed
     // on a prior successful run; there's no fixed expected-name list to
     // check against here (the model decides the names), so "anything
     // cached at all" is the fast-path condition instead of "every
-    // expected name is present."
+    // expected name is present." Normally already populated by
+    // runFullWebsiteUnderstanding by the time this is ever called -- see
+    // the class doc comment above.
     const cached = scan.discoveryProfile?.competitorUrlSuggestions;
     if (!debug && cached && Object.keys(cached).length > 0) {
       return Response.json(
@@ -142,13 +95,10 @@ export async function GET(request: Request, context: RouteContext) {
     // everywhere else in this funnel: every field stays empty and
     // editable, not an error.
     const resolution = aiProvider
-      ? await resolveCompetitorUrls({
-          businessName: business.name.value,
+      ? await resolveCompetitorUrlsFromCrawl({
           websiteUrl: scan.websiteUrl,
-          summary: business.summary.value,
-          productCategory: business.productCategory.value,
-          targetAudience: business.targetAudiences.value.map((segment) => segment.name),
-          problemsSolved: business.problemsSolved.value,
+          canonicalDomain: crawl.canonicalDomain,
+          pages: buildCompactCompetitorEvidence(crawl),
           ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
           aiProvider,
           models: openAiModelsFromEnv(),

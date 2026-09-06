@@ -272,30 +272,22 @@ export interface AiProvider {
   ): Promise<AiProviderResult<VisibilityMentionAnalysis[]>>;
   /**
    * Proposes up to 3 direct competitors -- name and likely official
-   * homepage URL together, in one request -- from the business's own
-   * context (name, summary, product category, audience, problems
-   * solved), not from BusinessUnderstanding.competitors. That field's
-   * evidence-based semantics (name a competitor only when the website
-   * itself explicitly identifies it) are deliberately left untouched --
-   * most businesses' own marketing sites never name a rival, so that
-   * field is usually empty, which is why this exists as a separate,
-   * more speculative path specifically for CompetitorsSetup.tsx's
-   * suggestions. The caller (lib/server/competitor-url-resolution.ts)
-   * still independently verifies every returned URL before ever
-   * auto-filling it; this method's job is only to propose candidates.
-   */
-  suggestCompetitors(
-    request: SuggestCompetitorsRequest,
-  ): Promise<AiProviderResult<SuggestedCompetitor[]>>;
-  /**
-   * Under A/B evaluation as a replacement for suggestCompetitors above:
-   * same output shape and same "propose, don't trust" contract, but reads
-   * compact crawl evidence (title/description/text excerpt per page)
-   * directly instead of a completed BusinessUnderstanding -- see
-   * lib/server/competitor-url-resolution.ts's buildCompactCompetitorEvidence
-   * and resolveCompetitorUrlsFromCrawl. The point is letting this run
-   * concurrently with analyzeBusiness right after the crawl finishes,
-   * rather than waiting on it.
+   * homepage URL together, in one request -- directly from compact
+   * crawled evidence (title/description/text excerpt per page), not
+   * from BusinessUnderstanding.competitors and not from a completed
+   * business profile. That field's evidence-based semantics (name a
+   * competitor only when the website itself explicitly identifies it)
+   * are deliberately left untouched -- most businesses' own marketing
+   * sites never name a rival, so that field is usually empty, which is
+   * why this exists as a separate, more speculative path specifically
+   * for CompetitorsSetup.tsx's suggestions. Reading crawl evidence
+   * directly (rather than waiting for a completed business profile)
+   * means this can run concurrently with analyzeBusiness right after
+   * the crawl finishes -- see scan-workflow.ts's
+   * runFullWebsiteUnderstanding. The caller
+   * (lib/server/competitor-url-resolution.ts) still independently
+   * verifies every returned URL before ever auto-filling it; this
+   * method's job is only to propose candidates.
    */
   suggestCompetitorsFromCrawl(
     request: SuggestCompetitorsFromCrawlRequest,
@@ -307,17 +299,6 @@ export interface SuggestCompetitorsFromCrawlRequest {
   websiteUrl: string;
   canonicalDomain: string;
   pages: Array<{ url: string; title: string; description?: string; textExcerpt: string }>;
-  models: ModelConfiguration;
-}
-
-export interface SuggestCompetitorsRequest {
-  workspaceId: EntityId;
-  businessName: string;
-  websiteUrl: string;
-  summary: string;
-  productCategory?: string;
-  targetAudience: string[];
-  problemsSolved: string[];
   models: ModelConfiguration;
 }
 

@@ -192,64 +192,6 @@ async function verifyProposedCompetitors(
   return { suggestions, diagnostics, verificationMs };
 }
 
-/**
- * OLD path: suggests competitors from a completed BusinessUnderstanding's
- * distilled profile fields. Kept temporarily alongside
- * resolveCompetitorUrlsFromCrawl for a direct A/B comparison -- see that
- * function's doc comment for why a crawl-evidence-only path is being
- * evaluated as a replacement (it would let competitor suggestion run
- * concurrently with analyzeBusiness instead of waiting for it).
- */
-export async function resolveCompetitorUrls(params: {
-  businessName: string;
-  websiteUrl: string;
-  summary: string;
-  productCategory?: string;
-  targetAudience: string[];
-  problemsSolved: string[];
-  ownDomain: string;
-  aiProvider: AiProvider;
-  models: ModelConfiguration;
-  workspaceId: string;
-  resolver?: HostResolver;
-  fetchImpl?: PinnedWebsiteFetch;
-}): Promise<CompetitorUrlResolutionResult> {
-  const totalStarted = performance.now();
-  const modelStarted = performance.now();
-  let proposed: Array<{ name: string; url: string | null }> = [];
-  try {
-    const result = await params.aiProvider.suggestCompetitors({
-      workspaceId: params.workspaceId,
-      businessName: params.businessName,
-      websiteUrl: params.websiteUrl,
-      summary: params.summary,
-      productCategory: params.productCategory,
-      targetAudience: params.targetAudience,
-      problemsSolved: params.problemsSolved,
-      models: params.models,
-    });
-    proposed = result.value;
-  } catch {
-    // A model-lookup failure degrades to "no suggestions" -- the
-    // Competitors screen falls back to its own single empty row.
-  }
-  const modelLookupMs = performance.now() - modelStarted;
-
-  const { suggestions, diagnostics, verificationMs } = await verifyProposedCompetitors(proposed, params);
-  const totalMs = performance.now() - totalStarted;
-
-  console.info(JSON.stringify({
-    type: "competitor_suggestion", source: "business_understanding", workspaceId: params.workspaceId,
-    modelLookupMs: Math.round(modelLookupMs), candidatesReturned: proposed.length,
-    verificationMs: Math.round(verificationMs), verifiedCount: suggestions.length, totalMs: Math.round(totalMs),
-  }));
-
-  return {
-    suggestions, diagnostics,
-    instrumentation: { modelLookupMs, candidatesReturned: proposed.length, verificationMs, verifiedCount: suggestions.length, totalMs },
-  };
-}
-
 const MAX_EVIDENCE_PAGES = 4;
 const MAX_TEXT_EXCERPT_CHARS = 600;
 
@@ -277,14 +219,13 @@ export function buildCompactCompetitorEvidence(crawl: WebsiteCrawlResult): Compa
 }
 
 /**
- * NEW path, under A/B evaluation: suggests competitors directly from
- * compact crawl evidence (see buildCompactCompetitorEvidence), with no
- * dependency on BusinessUnderstanding at all. The point is latency, not
- * a redesign for its own sake -- analyzeBusiness and this can then run
- * concurrently right after the crawl finishes, instead of this waiting
- * for analyzeBusiness's ~38s to complete first. Not yet used by the
- * production route; see the ?compareSuggestionSource=1 debug mode that
- * runs this alongside resolveCompetitorUrls for direct comparison.
+ * Suggests competitors directly from compact crawl evidence (see
+ * buildCompactCompetitorEvidence), with no dependency on
+ * BusinessUnderstanding at all -- adopted after an A/B comparison against
+ * the prior BusinessUnderstanding-based approach showed comparable-to-
+ * better results across several different business types, while letting
+ * this run concurrently with analyzeBusiness in
+ * scan-workflow.ts's runFullWebsiteUnderstanding instead of waiting on it.
  */
 export async function resolveCompetitorUrlsFromCrawl(params: {
   websiteUrl: string;

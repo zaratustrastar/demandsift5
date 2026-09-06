@@ -42,7 +42,6 @@ import type {
   GenerateVisibilityQuestionsRequest,
   QualifyConversationsRequest,
   SuggestCompetitorsFromCrawlRequest,
-  SuggestCompetitorsRequest,
   SuggestedCompetitor,
   TriagedConversation,
   TriageConversationsRequest,
@@ -2387,58 +2386,11 @@ export class OpenAiProvider implements AiProvider {
   }
 
   /**
-   * Proposes a homepage URL per competitor name in one batched request --
-   * see the AiProvider interface doc comment for why this is a proposal,
-   * not a verified answer. Uses the economy model: this is a small lookup
-   * task, not full business analysis, and low latency/cost matters more
-   * than reasoning depth here.
-   */
-  /**
    * See the AiProvider interface doc comment for why this exists
-   * separately from BusinessUnderstanding.competitors. One request,
-   * economy model: business context in, up to 3 {name, url} candidates
-   * out, url null where the model isn't confident.
-   */
-  async suggestCompetitors(
-    request: SuggestCompetitorsRequest,
-  ): Promise<AiProviderResult<SuggestedCompetitor[]>> {
-    return this.structured({
-      model: request.models.economyModel,
-      operation: "competitor_suggestion",
-      schemaName: "competitor_suggestions",
-      schema: COMPETITOR_SUGGESTIONS_SCHEMA,
-      maxOutputTokens: 500,
-      reasoningEffort: "low",
-      context: { workspaceId: request.workspaceId },
-      system:
-        "Given a business's own profile, name up to 3 of its closest direct competitors or meaningful " +
-        "alternatives -- specific companies a real customer would actually compare it against, not broad " +
-        "category giants unrelated to its actual size or niche. If the business is location-dependent (serves a " +
-        "specific city/region/country), only suggest competitors serving that same geographic market. If it's " +
-        "online/global, prioritize product similarity and target-customer overlap over geography. For each one, " +
-        "return its likely official homepage URL only if you are reasonably confident which specific company is " +
-        "meant and what its real domain is -- set url to null rather than guessing when unsure; a wrong domain is " +
-        "worse than none. Never invent a domain by pattern-matching the name (e.g. just appending .com); only " +
-        "return a domain you have concrete reason to believe is that company's actual official site. Return fewer " +
-        "than 3 results, or none, if you don't have that many genuine direct competitors in mind -- do not pad " +
-        "the list with a weak guess just to reach 3.",
-      user: JSON.stringify({
-        businessName: request.businessName,
-        websiteUrl: request.websiteUrl,
-        summary: request.summary,
-        productCategory: request.productCategory,
-        targetAudience: request.targetAudience,
-        problemsSolved: request.problemsSolved,
-      }),
-      parse: (value) => parseSuggestedCompetitors(value),
-    });
-  }
-
-  /**
-   * Under A/B evaluation as a replacement for suggestCompetitors above --
-   * see that interface method's doc comment. Same schema/parse/system
-   * intent, reading compact crawled evidence instead of a completed
-   * business profile.
+   * separately from BusinessUnderstanding.competitors and reads compact
+   * crawl evidence rather than a completed business profile. One
+   * request, economy model: crawl evidence in, up to 3 {name, url}
+   * candidates out, url null where the model isn't confident.
    */
   async suggestCompetitorsFromCrawl(
     request: SuggestCompetitorsFromCrawlRequest,

@@ -6,14 +6,14 @@ import test from "node:test";
  * A hallucinated-but-real domain can pass SSRF/public-URL validation, so
  * that check alone is not sufficient proof a resolved URL is the actual
  * competitor's site. These tests pin the invariants that keep this
- * feature from ever auto-filling an unverified guess, and the specific
- * design constraints from the pivot away from
- * BusinessUnderstanding.competitors (which turned out to be empty for
- * most real businesses, since a company's own marketing site essentially
- * never names its rivals) to a single combined name+URL suggestion call:
- * one request, not two sequential model calls; BusinessUnderstanding and
- * CompetitorReference untouched; every candidate independently verified;
- * an unverified candidate dropped entirely, not shown partially.
+ * feature from ever auto-filling an unverified guess, plus the final
+ * adopted architecture after an A/B comparison (crawl-evidence-based
+ * suggestion vs. the original BusinessUnderstanding-based one, across
+ * several different business types) showed comparable-to-better results:
+ * one combined name+URL request from compact crawl evidence, run
+ * concurrently with analyzeBusiness right after the crawl (not
+ * sequentially after it), with no dependency on BusinessUnderstanding or
+ * CompetitorReference at all.
  */
 
 const read = async (path) => readFile(new URL(path, import.meta.url), "utf8");
@@ -25,23 +25,18 @@ const route = await read("../app/api/scans/[scanId]/competitor-url-suggestions/r
 const setup = await read("../components/CompetitorsSetup.tsx");
 const serverContracts = await read("../lib/server/contracts.ts");
 const domainTypes = await read("../lib/domain/types.ts");
+const workflow = await read("../lib/server/scan-workflow.ts");
 
 test("competitor name and URL are proposed together in one request, not two sequential model calls", () => {
-  assert.match(provider, /async suggestCompetitors\(/);
-  // No separate "generate names" step feeding a second "resolve URLs"
-  // call -- one call, business context in, {name, url} pairs out.
+  assert.match(provider, /async suggestCompetitorsFromCrawl\(/);
   assert.doesNotMatch(provider, /async (?:generateCompetitorNames|suggestCompetitorNames)\(/);
-  assert.match(resolution, /aiProvider\.suggestCompetitors\(\{/);
+  assert.match(resolution, /aiProvider\.suggestCompetitorsFromCrawl\(\{/);
 });
 
-test("suggestions are generated from the business's own profile, not from BusinessUnderstanding.competitors", () => {
-  assert.doesNotMatch(resolution, /business\.competitors\.value|competitorNames:/);
-  assert.doesNotMatch(route, /business\.competitors\.value/);
-  assert.match(route, /businessName: business\.name\.value/);
-  assert.match(route, /summary: business\.summary\.value/);
-  assert.match(route, /productCategory: business\.productCategory\.value/);
-  assert.match(route, /targetAudience: business\.targetAudiences\.value\.map/);
-  assert.match(route, /problemsSolved: business\.problemsSolved\.value/);
+test("suggestions are generated from compact crawl evidence, not from BusinessUnderstanding.competitors or a completed business profile", () => {
+  assert.doesNotMatch(resolution, /business\.competitors\.value|competitorNames:|businessName:/);
+  assert.doesNotMatch(route, /business\.competitors\.value|businessName: business\.name\.value,\s*\n\s*websiteUrl/);
+  assert.match(route, /pages: buildCompactCompetitorEvidence\(crawl\)/);
 });
 
 test("the model proposal is never trusted alone -- every candidate is independently verified against its own homepage before being kept", () => {
@@ -64,8 +59,8 @@ test("candidates are validated through the existing public-URL/SSRF check, rejec
   assert.match(resolution, /seenHostnames\.has\(target\.canonicalHostname\)/);
 });
 
-test("a model-lookup failure degrades to no suggestions rather than throwing -- the Competitors screen must still render with its own empty, editable fallback row", () => {
-  assert.match(resolution, /try \{\s*const result = await params\.aiProvider\.suggestCompetitors/);
+test("a model-lookup failure degrades to no suggestions rather than throwing", () => {
+  assert.match(resolution, /try \{\s*const result = await params\.aiProvider\.suggestCompetitorsFromCrawl/);
 });
 
 test("homepage verification fetches run in parallel across the batch, not sequentially", () => {
@@ -77,14 +72,14 @@ test("competitor suggestion uses the economy model and one batched request, not 
 });
 
 test("the model is explicitly told not to guess a domain from the name alone, and not to pad the list to reach 3", () => {
-  const method = provider.slice(provider.indexOf("async suggestCompetitors"), provider.indexOf("async suggestCompetitors") + 3000);
+  const method = provider.slice(provider.indexOf("async suggestCompetitorsFromCrawl"), provider.indexOf("async suggestCompetitorsFromCrawl") + 3500);
   assert.match(method, /set url to null rather than guessing/i);
-  assert.match(method, /never invent a domain by pattern-matching/i);
+  assert.match(method, /never[\s\S]*?invent a domain by pattern-matching/i);
   assert.match(method, /do not pad[\s\S]*to reach 3/i);
 });
 
 test("the model is asked to consider geography for location-dependent businesses and product/audience similarity for online ones", () => {
-  const method = provider.slice(provider.indexOf("async suggestCompetitors"), provider.indexOf("async suggestCompetitors") + 3000);
+  const method = provider.slice(provider.indexOf("async suggestCompetitorsFromCrawl"), provider.indexOf("async suggestCompetitorsFromCrawl") + 3500);
   assert.match(method, /location-dependent/i);
   assert.match(method, /online\/global/i);
 });
@@ -105,8 +100,6 @@ test("the route serves from cache when anything is already cached, instead of re
 
 test("only successfully-verified suggestions are cached -- a scan with zero verified suggestions is retried on the next request, not permanently remembered as empty", () => {
   assert.match(route, /resolution\.suggestions\.length > 0/);
-  // The cache write merges with what was already there rather than
-  // replacing it outright.
   assert.match(route, /competitorUrlSuggestions: \{ \.\.\.cached, \.\.\.resolvedOnly \}/);
 });
 
@@ -126,14 +119,14 @@ test("suggested URLs remain a normal editable input value, not a locked/disabled
 
 test("no new external search/AI provider was introduced -- the new AiProvider method is implemented on the existing OpenAiProvider class", () => {
   assert.doesNotMatch(resolution, /perplexity|serpapi|bing|google.*search.*api/i);
-  assert.match(contracts, /suggestCompetitors\(/);
+  assert.match(contracts, /suggestCompetitorsFromCrawl\(/);
 });
 
 test("instrumentation covers model latency, candidates returned, verification latency, and verified count", () => {
   assert.match(resolution, /modelLookupMs, candidatesReturned: proposed\.length, verificationMs, verifiedCount: suggestions\.length, totalMs/);
 });
 
-test("the new crawl-evidence path has no dependency on BusinessUnderstanding -- it only takes websiteUrl/canonicalDomain/pages", () => {
+test("resolveCompetitorUrlsFromCrawl has no dependency on BusinessUnderstanding -- it only takes websiteUrl/canonicalDomain/pages", () => {
   const fnStart = resolution.indexOf("export async function resolveCompetitorUrlsFromCrawl");
   const fnBody = resolution.slice(fnStart, resolution.indexOf("\n}\n", fnStart));
   assert.doesNotMatch(fnBody, /business\.|BusinessUnderstanding|businessName:/);
@@ -146,18 +139,28 @@ test("compact evidence is capped well below what analyzeBusiness receives, per p
   assert.match(resolution, /textExcerpt: page\.text\.slice\(0, MAX_TEXT_EXCERPT_CHARS\)/);
 });
 
-test("both suggestion sources share the same verification pipeline, not two separate implementations", () => {
-  const oldCallsShared = resolution.indexOf("resolveCompetitorUrls(params") < resolution.indexOf("verifyProposedCompetitors(proposed, params)", resolution.indexOf("export async function resolveCompetitorUrls"));
-  assert.ok(oldCallsShared);
-  const newFnStart = resolution.indexOf("export async function resolveCompetitorUrlsFromCrawl");
-  assert.match(resolution.slice(newFnStart), /verifyProposedCompetitors\(proposed, params\)/);
+test("there is exactly one acquisition path left -- the old BusinessUnderstanding-based one and the A/B comparison mode were removed once the new path was adopted", () => {
+  assert.doesNotMatch(resolution, /export async function resolveCompetitorUrls\(/);
+  assert.doesNotMatch(provider, /async suggestCompetitors\(/);
+  assert.doesNotMatch(contracts, /suggestCompetitors\(/);
+  assert.doesNotMatch(route, /compareSuggestionSource/);
 });
 
-test("the A/B comparison endpoint runs both sources against the same already-persisted crawl snapshot, without writing to the suggestion cache", () => {
-  assert.match(route, /compareSuggestionSource/);
-  assert.match(route, /scan\.websiteSnapshot\?\.crawl/);
-  const compareStart = route.indexOf("if (compareSuggestionSource)");
-  const compareEnd = route.indexOf("\n    }", compareStart);
-  const compareBody = route.slice(compareStart, compareEnd);
-  assert.doesNotMatch(compareBody, /saveScan/);
+test("analyzeBusiness and competitor suggestion run concurrently right after the crawl, not sequentially", () => {
+  const fnStart = workflow.indexOf("async function runFullWebsiteUnderstanding");
+  const fnBody = workflow.slice(fnStart, workflow.indexOf("\n}\n", fnStart));
+  assert.match(fnBody, /await Promise\.allSettled\(\[/);
+  assert.match(fnBody, /aiProvider\.analyzeBusiness\(\{/);
+  assert.match(fnBody, /resolveCompetitorUrlsFromCrawl\(\{/);
+});
+
+test("a competitor-suggestion failure never fails the analyzeBusiness retry loop -- allSettled, not all", () => {
+  const fnStart = workflow.indexOf("async function runFullWebsiteUnderstanding");
+  const fnBody = workflow.slice(fnStart, workflow.indexOf("\n}\n", fnStart));
+  assert.match(fnBody, /competitorSuggestions = competitorOutcome\.status === "fulfilled" \? competitorOutcome\.value\.suggestions : \[\];/);
+  assert.match(fnBody, /if \(analyzedOutcome\.status === "rejected"\) throw analyzedOutcome\.reason;/);
+});
+
+test("competitor suggestions computed during understanding are persisted onto discoveryProfile immediately, not left for the Competitors screen's own round-trip", () => {
+  assert.match(workflow, /competitorUrlSuggestions: Object\.fromEntries\(full\.competitorSuggestions\.map/);
 });

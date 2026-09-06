@@ -41,8 +41,8 @@ import type {
   GenerateReplyRequest,
   GenerateVisibilityQuestionsRequest,
   QualifyConversationsRequest,
-  ResolveCompetitorDomainsRequest,
-  ResolvedCompetitorDomain,
+  SuggestCompetitorsRequest,
+  SuggestedCompetitor,
   TriagedConversation,
   TriageConversationsRequest,
   TriageConversationsResult,
@@ -333,7 +333,7 @@ const VISIBILITY_QUESTIONS_SCHEMA: JsonSchema = {
 // (brandRecommended): every other field of an answer (mentions, citations,
 // domains) is decided by deterministic string/URL matching in
 // lib/server/ai-visibility-analysis.ts, never by the model.
-const COMPETITOR_DOMAINS_SCHEMA: JsonSchema = {
+const COMPETITOR_SUGGESTIONS_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
     results: {
@@ -766,22 +766,19 @@ function parseVisibilityQuestions(raw: unknown): GeneratedVisibilityQuestions {
   return { questions };
 }
 
-function parseResolvedCompetitorDomains(raw: unknown, expectedNames: ReadonlySet<string>): ResolvedCompetitorDomain[] {
-  const object = objectValue(raw, "competitor domains response");
+function parseSuggestedCompetitors(raw: unknown): SuggestedCompetitor[] {
+  const object = objectValue(raw, "competitor suggestions response");
   const seen = new Set<string>();
-  const results = arrayValue(object.results, "results").map((entry, position) => {
+  const results: SuggestedCompetitor[] = [];
+  for (const [position, entry] of arrayValue(object.results, "results").entries()) {
     const label = `results[${position}]`;
     const item = objectValue(entry, label);
     const name = stringValue(item.name, `${label}.name`);
-    if (!expectedNames.has(name)) {
-      throw new OpenAiProviderError(`OpenAI returned an unknown competitor name "${name}" in competitor domains.`);
-    }
-    if (seen.has(name)) {
-      throw new OpenAiProviderError(`OpenAI returned duplicate competitor name "${name}" in competitor domains.`);
-    }
+    if (!name || seen.has(name)) continue; // Silently drop empty/duplicate names rather than failing the whole request.
     seen.add(name);
-    return { name, url: nullableStringValue(item.url, `${label}.url`) ?? null };
-  });
+    results.push({ name, url: nullableStringValue(item.url, `${label}.url`) ?? null });
+    if (results.length >= 3) break; // "Up to 3" is a request, not a schema-enforced guarantee.
+  }
   return results;
 }
 
@@ -2395,39 +2392,44 @@ export class OpenAiProvider implements AiProvider {
    * task, not full business analysis, and low latency/cost matters more
    * than reasoning depth here.
    */
-  async resolveCompetitorDomains(
-    request: ResolveCompetitorDomainsRequest,
-  ): Promise<AiProviderResult<ResolvedCompetitorDomain[]>> {
-    if (request.competitorNames.length === 0) {
-      return {
-        value: [],
-        model: request.models.economyModel,
-        operation: "competitor_url_resolution",
-        usage: { inputTokens: 0, outputTokens: 0 },
-        estimatedCostUsd: 0,
-      };
-    }
-    const expectedNames = new Set(request.competitorNames);
+  /**
+   * See the AiProvider interface doc comment for why this exists
+   * separately from BusinessUnderstanding.competitors. One request,
+   * economy model: business context in, up to 3 {name, url} candidates
+   * out, url null where the model isn't confident.
+   */
+  async suggestCompetitors(
+    request: SuggestCompetitorsRequest,
+  ): Promise<AiProviderResult<SuggestedCompetitor[]>> {
     return this.structured({
       model: request.models.economyModel,
-      operation: "competitor_url_resolution",
-      schemaName: "competitor_domains",
-      schema: COMPETITOR_DOMAINS_SCHEMA,
-      maxOutputTokens: Math.max(400, request.competitorNames.length * 150),
+      operation: "competitor_suggestion",
+      schemaName: "competitor_suggestions",
+      schema: COMPETITOR_SUGGESTIONS_SCHEMA,
+      maxOutputTokens: 500,
       reasoningEffort: "low",
       context: { workspaceId: request.workspaceId },
       system:
-        "For each named company, return its official homepage URL only if you are reasonably confident which " +
-        "specific company is meant and what its real domain is. Set url to null rather than guessing when the name " +
-        "is ambiguous, ordinary, or you are not confident -- a wrong domain is worse than none. Never invent a " +
-        "domain by pattern-matching the name (e.g. just appending .com); only return a domain you have concrete " +
-        "reason to believe is that company's actual official site. Return exactly one result per supplied name, " +
-        "using the name text verbatim, and no other names.",
+        "Given a business's own profile, name up to 3 of its closest direct competitors or meaningful " +
+        "alternatives -- specific companies a real customer would actually compare it against, not broad " +
+        "category giants unrelated to its actual size or niche. If the business is location-dependent (serves a " +
+        "specific city/region/country), only suggest competitors serving that same geographic market. If it's " +
+        "online/global, prioritize product similarity and target-customer overlap over geography. For each one, " +
+        "return its likely official homepage URL only if you are reasonably confident which specific company is " +
+        "meant and what its real domain is -- set url to null rather than guessing when unsure; a wrong domain is " +
+        "worse than none. Never invent a domain by pattern-matching the name (e.g. just appending .com); only " +
+        "return a domain you have concrete reason to believe is that company's actual official site. Return fewer " +
+        "than 3 results, or none, if you don't have that many genuine direct competitors in mind -- do not pad " +
+        "the list with a weak guess just to reach 3.",
       user: JSON.stringify({
-        theScannedBusinessSummary: request.ownBusinessSummary,
-        competitorNames: request.competitorNames,
+        businessName: request.businessName,
+        websiteUrl: request.websiteUrl,
+        summary: request.summary,
+        productCategory: request.productCategory,
+        targetAudience: request.targetAudience,
+        problemsSolved: request.problemsSolved,
       }),
-      parse: (value) => parseResolvedCompetitorDomains(value, expectedNames),
+      parse: (value) => parseSuggestedCompetitors(value),
     });
   }
 }

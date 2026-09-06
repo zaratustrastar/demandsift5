@@ -12,7 +12,7 @@ export type AiOperation =
   | "embedding"
   | "visibility_question_generation"
   | "visibility_answer_analysis"
-  | "competitor_url_resolution";
+  | "competitor_suggestion";
 
 export interface TokenUsage {
   inputTokens: number;

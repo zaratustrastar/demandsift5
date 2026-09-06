@@ -7,17 +7,16 @@ import { aiCapacityFromEnv } from "@/lib/ai/capacity";
 import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
 import { resolveCompetitorUrls } from "@/lib/server/competitor-url-resolution";
-import { MAX_COMPETITOR_URLS } from "@/lib/server/competitor-analysis";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
 
 /**
- * Suggested official homepage URLs for the top competitor names the
- * existing website/context analysis already identified -- shown on
- * CompetitorsSetup.tsx as editable, removable, replaceable pre-fills,
- * never as locked values. See lib/server/competitor-url-resolution.ts for
- * the actual resolution + verification pipeline; this route is only the
- * cache-or-compute wrapper around it.
+ * Suggested official homepage URLs for up to 3 likely direct competitors,
+ * shown on CompetitorsSetup.tsx as editable, removable, replaceable
+ * pre-fills, never as locked values. See
+ * lib/server/competitor-url-resolution.ts for the actual suggestion +
+ * verification pipeline; this route is only the cache-or-compute wrapper
+ * around it.
  *
  * Deliberately its own endpoint rather than a field added to the existing
  * GET /api/scans/[scanId]/discovery-terms, which DiscoveryProfile.tsx also
@@ -25,16 +24,24 @@ type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } }
  * work there would slow that screen down every time, for a result it
  * never uses.
  *
- * Only successfully-resolved names are ever cached (see the save below) --
- * a name that resolved to null is retried on the next request rather than
- * being permanently remembered as "nothing here." A model hiccup or a
- * homepage that briefly failed to fetch would otherwise never get a
- * second chance for the lifetime of the scan.
+ * Unlike an earlier version of this endpoint, competitor names are not
+ * read from BusinessUnderstanding.competitors here at all -- that field's
+ * evidence-based semantics (name a competitor only when the website
+ * explicitly identifies it) mean it is empty for most real businesses
+ * (a company's own marketing site essentially never names its rivals),
+ * so it produced no suggestions in practice. Names and URLs are instead
+ * proposed together, from the business's own profile, by
+ * suggestCompetitors -- see that method's doc comment on AiProvider.
+ *
+ * Only successfully verified suggestions are ever cached (see the save
+ * below) -- a scan with zero verified suggestions is retried on the next
+ * request rather than being permanently remembered as "nothing here."
  *
  * ?debug=1 returns the full per-candidate diagnostic trail from
- * resolveCompetitorUrls (proposed URL, validation outcome, homepage
+ * resolveCompetitorUrls (proposed name/URL, validation outcome, homepage
  * identity signals, which one matched) instead of running silently --
- * for diagnosing why a name didn't resolve, not used by CompetitorsSetup.tsx.
+ * for diagnosing why a candidate didn't verify, not used by
+ * CompetitorsSetup.tsx.
  */
 export async function GET(request: Request, context: RouteContext) {
   try {
@@ -53,18 +60,15 @@ export async function GET(request: Request, context: RouteContext) {
       );
     }
 
-    const names = business.competitors.value.map((competitor) => competitor.name).slice(0, MAX_COMPETITOR_URLS);
-    if (names.length === 0) {
-      return Response.json(
-        { suggestions: [], ...(debug ? { debug: { competitorNames: [], source: "no_competitors_detected" } } : {}) },
-        { headers: { "Cache-Control": "no-store" } },
-      );
-    }
-
+    // Cached suggestions are keyed by whatever names the model proposed
+    // on a prior successful run; there's no fixed expected-name list to
+    // check against here (the model decides the names), so "anything
+    // cached at all" is the fast-path condition instead of "every
+    // expected name is present."
     const cached = scan.discoveryProfile?.competitorUrlSuggestions;
-    if (!debug && cached && names.every((name) => name in cached)) {
+    if (!debug && cached && Object.keys(cached).length > 0) {
       return Response.json(
-        { suggestions: names.map((name) => ({ name, url: cached[name] ?? null })) },
+        { suggestions: Object.entries(cached).map(([name, url]) => ({ name, url })) },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
@@ -85,22 +89,24 @@ export async function GET(request: Request, context: RouteContext) {
     // editable, not an error.
     const resolution = aiProvider
       ? await resolveCompetitorUrls({
-          competitorNames: names,
-          ownBusinessSummary: business.summary.value,
+          businessName: business.name.value,
+          websiteUrl: scan.websiteUrl,
+          summary: business.summary.value,
+          productCategory: business.productCategory.value,
+          targetAudience: business.targetAudiences.value.map((segment) => segment.name),
+          problemsSolved: business.problemsSolved.value,
           ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
           aiProvider,
           models: openAiModelsFromEnv(),
           workspaceId: actor.workspaceId,
         })
-      : { suggestions: names.map((name) => ({ name, url: null })), diagnostics: [], instrumentation: null };
+      : { suggestions: [], diagnostics: [], instrumentation: null };
 
-    if (scan.discoveryProfile) {
-      const resolvedOnly = Object.fromEntries(
-        resolution.suggestions.filter((suggestion) => suggestion.url !== null).map((suggestion) => [suggestion.name, suggestion.url]),
-      );
+    if (scan.discoveryProfile && resolution.suggestions.length > 0) {
+      const resolvedOnly = Object.fromEntries(resolution.suggestions.map((suggestion) => [suggestion.name, suggestion.url]));
       // Merge with whatever was already cached (rather than overwrite),
-      // so a name resolved on an earlier visit isn't lost just because
-      // this visit's batch happened to not re-resolve it.
+      // so a suggestion verified on an earlier visit isn't lost just
+      // because this visit's batch happened to propose different names.
       await getStateRepository().saveScan({
         ...scan,
         discoveryProfile: {
@@ -119,8 +125,7 @@ export async function GET(request: Request, context: RouteContext) {
               debug: {
                 source: "fresh_resolution",
                 aiConfigured: Boolean(aiProvider),
-                competitorNames: names,
-                ownBusinessSummary: business.summary.value,
+                businessName: business.name.value,
                 ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
                 diagnostics: resolution.diagnostics,
                 instrumentation: resolution.instrumentation,

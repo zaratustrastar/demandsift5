@@ -18,17 +18,23 @@ import styles from "./DiscoveryProfile.module.css";
  * actually searches.
  *
  * This screen pre-fills suggested competitors from GET
- * /api/scans/[scanId]/competitor-url-suggestions, which independently
- * verifies each proposed domain against its own homepage before ever
- * returning it (see lib/server/competitor-url-resolution.ts) -- a
- * suggested row's URL is only ever pre-filled when that verification
- * succeeded, never a raw guess. A name can still exist with no verified
- * URL (analysis found the competitor but resolution couldn't confirm a
- * domain, or found none at all); that row just shows the name with an
- * empty, editable URL field for the user to complete. DiscoveryProfile.tsx's
- * own chip list for these same names is unaffected; this is a different,
- * complementary use of it (prompting for a URL to crawl, not editing which
- * terms get searched).
+ * /api/scans/[scanId]/competitor-url-suggestions. Both the name and the
+ * URL there are a model's hypothesis about likely direct competitors,
+ * generated from the business's own profile (name, summary, product
+ * category, audience, problems solved) -- not from
+ * BusinessUnderstanding.competitors, whose evidence-based semantics
+ * (name a competitor only when the website explicitly identifies it)
+ * are deliberately left untouched elsewhere in the product and mean that
+ * field is usually empty for real businesses. Every candidate is
+ * independently verified (URL safety/uniqueness, then a lightweight
+ * homepage fetch checked against the proposed name -- see
+ * lib/server/competitor-url-resolution.ts) before ever being returned, so
+ * a suggested row's name and URL are both already confirmed, not a raw
+ * guess -- an unverified candidate is dropped entirely rather than shown
+ * partially. DiscoveryProfile.tsx's own "Competitors & alternatives" chip
+ * list for named competitors is unaffected by any of this; that is a
+ * different, unrelated feature (editing which terms get searched, not
+ * suggesting a URL to crawl).
  *
  * Skipping this step, or entering nothing, leaves scan behavior identical
  * to not having this feature at all: it continues with category/problem
@@ -117,13 +123,13 @@ export function CompetitorsSetup({
           if (!cancelled) setRows([{ id: nextRowId(), url: "" }]);
           return;
         }
-        const payload = (await response.json()) as { suggestions?: Array<{ name: string; url: string | null }> };
+        const payload = (await response.json()) as { suggestions?: Array<{ name: string; url: string }> };
         if (cancelled) return;
         const suggestions = (payload.suggestions ?? []).slice(0, MAX_COMPETITOR_URLS);
         setSuggestionCount(suggestions.length);
         setRows(
           suggestions.length > 0
-            ? suggestions.map(({ name, url }) => ({ id: nextRowId(), suggestedName: name, url: url ? cleanDomain(url) : "" }))
+            ? suggestions.map(({ name, url }) => ({ id: nextRowId(), suggestedName: name, url: cleanDomain(url) }))
             : [{ id: nextRowId(), url: "" }],
         );
       } catch {

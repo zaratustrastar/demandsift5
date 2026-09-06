@@ -271,31 +271,38 @@ export interface AiProvider {
     request: AnalyzeVisibilityMentionsRequest,
   ): Promise<AiProviderResult<VisibilityMentionAnalysis[]>>;
   /**
-   * Proposes an official homepage URL for each of a small batch of named
-   * competitors, in one request -- not a URL to trust on its own. The
-   * caller (lib/server/competitor-url-resolution.ts) still independently
-   * validates the result as a safe public URL and verifies its homepage
-   * actually identifies as that company before ever auto-filling it;
-   * this method's job is only to propose a candidate, not to be the
-   * source of truth that a domain is correct.
+   * Proposes up to 3 direct competitors -- name and likely official
+   * homepage URL together, in one request -- from the business's own
+   * context (name, summary, product category, audience, problems
+   * solved), not from BusinessUnderstanding.competitors. That field's
+   * evidence-based semantics (name a competitor only when the website
+   * itself explicitly identifies it) are deliberately left untouched --
+   * most businesses' own marketing sites never name a rival, so that
+   * field is usually empty, which is why this exists as a separate,
+   * more speculative path specifically for CompetitorsSetup.tsx's
+   * suggestions. The caller (lib/server/competitor-url-resolution.ts)
+   * still independently verifies every returned URL before ever
+   * auto-filling it; this method's job is only to propose candidates.
    */
-  resolveCompetitorDomains(
-    request: ResolveCompetitorDomainsRequest,
-  ): Promise<AiProviderResult<ResolvedCompetitorDomain[]>>;
+  suggestCompetitors(
+    request: SuggestCompetitorsRequest,
+  ): Promise<AiProviderResult<SuggestedCompetitor[]>>;
 }
 
-export interface ResolveCompetitorDomainsRequest {
+export interface SuggestCompetitorsRequest {
   workspaceId: EntityId;
-  /** What the scanned business itself sells, so the model can disambiguate a
-   * common competitor name (e.g. which "Notion" in this market). */
-  ownBusinessSummary: string;
-  competitorNames: string[];
+  businessName: string;
+  websiteUrl: string;
+  summary: string;
+  productCategory?: string;
+  targetAudience: string[];
+  problemsSolved: string[];
   models: ModelConfiguration;
 }
 
-export interface ResolvedCompetitorDomain {
+export interface SuggestedCompetitor {
   name: string;
-  /** Null when the model isn't reasonably confident -- never a low-confidence guess. */
+  /** Null when the model isn't reasonably confident of a URL -- never a low-confidence guess. */
   url: string | null;
 }
 

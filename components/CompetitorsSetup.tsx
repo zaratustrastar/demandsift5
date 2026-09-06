@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { OnboardingHeader } from "./OnboardingHeader";
 import styles from "./DiscoveryProfile.module.css";
 
 /**
- * "Competitors & alternatives" -- a dedicated, optional step between
- * submitting a website (or a freeform description) and reviewing the
- * business profile.
+ * "Who do people compare you with?" (formerly "Competitors & alternatives")
+ * -- a dedicated, optional step between submitting a website (or a freeform
+ * description) and reviewing the business profile.
  *
  * This is a sidecar to the business-profile pipeline, not part of it: the
  * competitors analyzed here are stored completely separately
@@ -17,11 +17,16 @@ import styles from "./DiscoveryProfile.module.css";
  * this raw analysis -- is what scan-workflow.ts's reviewCompetitorTerms
  * actually searches.
  *
- * Named competitors the AI already extracted from a context-mode
- * description (BusinessUnderstanding.competitors) used to have their own
- * editable chip list here too, duplicating the "Competitors & alternatives"
- * card the very next screen (DiscoveryProfile.tsx) already shows for that
- * same data -- removed in favor of editing it once, there.
+ * This screen now pre-fills suggested competitor *names* from that same
+ * AI analysis (GET /api/scans/[scanId]/discovery-terms's derived.competitors
+ * -- see business.competitors in scan-workflow.ts), reusing the existing
+ * endpoint rather than adding a second competitor-generation path. That
+ * data has never included a domain/URL for a named competitor -- only a
+ * name -- so a suggested row shows the name Scooptr already found and
+ * leaves the URL empty for the user to complete, rather than guessing one.
+ * DiscoveryProfile.tsx's own chip list for these same names is unaffected;
+ * this is a different, complementary use of it (prompting for a URL to
+ * crawl, not editing which terms get searched).
  *
  * Skipping this step, or entering nothing, leaves scan behavior identical
  * to not having this feature at all: it continues with category/problem
@@ -40,7 +45,26 @@ export type CompetitorProfileView = {
   error?: string;
 };
 
+type CompetitorRow = {
+  id: string;
+  /** A name Scooptr's own website analysis already suggested -- shown as a
+   * label the user confirms/completes with a URL, never as a fabricated
+   * domain guess (the backend has no domain for these, only a name). */
+  suggestedName?: string;
+  url: string;
+};
+
 const MAX_COMPETITOR_URLS = 3;
+
+let rowIdCounter = 0;
+function nextRowId(): string {
+  rowIdCounter += 1;
+  return `competitor-row-${rowIdCounter}`;
+}
+
+function cleanDomain(value: string): string {
+  return value.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+}
 
 export function CompetitorsSetup({
   scanId,
@@ -53,9 +77,9 @@ export function CompetitorsSetup({
   onContinue: () => void;
   onBack: () => void;
 }) {
-  const [competitorUrls, setCompetitorUrls] = useState<string[]>(
-    Array.from({ length: MAX_COMPETITOR_URLS }, () => ""),
-  );
+  const [rows, setRows] = useState<CompetitorRow[]>([]);
+  const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
+  const [suggestionCount, setSuggestionCount] = useState(0);
   const [competitorProfiles, setCompetitorProfiles] = useState<CompetitorProfileView[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState("");
@@ -65,14 +89,49 @@ export function CompetitorsSetup({
   // press first.
   const [analyzedUrlsKey, setAnalyzedUrlsKey] = useState("");
 
-  // Still used for the header copy below ("Analyzed your description" vs.
-  // the website), even though the named-competitor chip editor that used to
-  // live here (context mode only) has moved to DiscoveryProfile.tsx's
-  // "Competitors & alternatives" card, the very next screen.
   const isContextMode = !websiteUrl;
 
-  function updateCompetitorUrl(index: number, value: string) {
-    setCompetitorUrls((current) => current.map((url, i) => (i === index ? value : url)));
+  // Reuses the same discovery-terms endpoint DiscoveryProfile.tsx already
+  // calls -- derived.competitors is exactly the named competitors
+  // business.competitors.value.map(name) already produces from the
+  // website/description analysis, not a second AI call of its own. If this
+  // fails or returns nothing, the fallback single-empty-row state below is
+  // indistinguishable from "there were never any suggestions to fetch."
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(`/api/scans/${encodeURIComponent(scanId)}/discovery-terms`, { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = (await response.json()) as { derived?: { competitors?: string[] } | null };
+        if (cancelled) return;
+        const names = (payload.derived?.competitors ?? []).slice(0, MAX_COMPETITOR_URLS);
+        setSuggestionCount(names.length);
+        if (names.length > 0) {
+          setRows(names.map((name) => ({ id: nextRowId(), suggestedName: name, url: "" })));
+        }
+      } catch {
+        // Suggestions are a nice-to-have -- the single-empty-row fallback
+        // below covers this the same as a genuine zero-suggestions result.
+      } finally {
+        if (!cancelled) setSuggestionsLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [scanId]);
+
+  function updateRowUrl(id: string, value: string) {
+    setRows((current) => current.map((row) => (row.id === id ? { ...row, url: value } : row)));
+  }
+
+  function removeRow(id: string) {
+    setRows((current) => current.filter((row) => row.id !== id));
+  }
+
+  function addRow() {
+    setRows((current) => (current.length >= MAX_COMPETITOR_URLS ? current : [...current, { id: nextRowId(), url: "" }]));
   }
 
   // Returns the analyzed profiles (whatever their per-URL status), or null
@@ -106,7 +165,7 @@ export function CompetitorsSetup({
     }
   }
 
-  const pendingUrls = competitorUrls.map((url) => url.trim()).filter(Boolean);
+  const pendingUrls = rows.map((row) => row.url.trim()).filter(Boolean);
   const needsAnalysis = pendingUrls.length > 0 && pendingUrls.join("|") !== analyzedUrlsKey;
 
   // Analysis output (name, summary, keyphrases, ...) is context DemandSift
@@ -124,35 +183,68 @@ export function CompetitorsSetup({
     onContinue();
   }
 
+  const hasSuggestions = rows.some((row) => row.suggestedName);
+
   return (
-    <main className={styles.screen}>
+    <main className={`${styles.screen} ${styles.competitorsScreen}`}>
       <OnboardingHeader activeIndex={2} />
       <header className={styles.head}>
         <div>
           <div className={styles.kicker}>
-            {isContextMode ? "Analyzed your description" : `Analyzed ${websiteUrl.replace(/^https?:\/\//, "")}`}
+            {isContextMode ? (
+              <>Analyzed your description <span aria-hidden="true">✓</span></>
+            ) : (
+              <>Analyzed {cleanDomain(websiteUrl)} <span aria-hidden="true">✓</span></>
+            )}
           </div>
-          <h1 className={styles.title}>Competitors & alternatives</h1>
+          <h1 className={styles.title}>Who do people compare you with?</h1>
           <p className={styles.lead}>
-            Optional. We&rsquo;ll watch Reddit for mentions of them alongside the keywords we
-            generate from your own description. You can always add more later.
+            Add competitors or alternatives to help Scooptr find Reddit conversations where people
+            are deciding between products like yours.
           </p>
         </div>
       </header>
 
       <section className={styles.competitors}>
-        <div className={styles.urlList}>
-          {competitorUrls.map((url, index) => (
-            <div className={styles.urlRow} key={index}>
-              <span className={styles.urlPrefix}>https://</span>
-              <input
-                value={url}
-                placeholder="competitor.com"
-                onChange={(event) => updateCompetitorUrl(index, event.target.value)}
-              />
+        {suggestionsLoaded && (
+          <>
+            {rows.length > 0 && (
+              <div className={styles.suggestedLabel}>
+                {hasSuggestions ? "Suggested from your website" : "Add a competitor or alternative"}
+                {hasSuggestions && suggestionCount > 0 && (
+                  <span>{suggestionCount} competitor{suggestionCount === 1 ? "" : "s"} detected</span>
+                )}
+              </div>
+            )}
+            <div className={styles.urlList}>
+              {rows.map((row) => (
+                <div className={styles.urlRow} key={row.id}>
+                  {row.suggestedName && <span className={styles.suggestedName}>{row.suggestedName}</span>}
+                  <span className={styles.urlPrefix}>https://</span>
+                  <input
+                    value={row.url}
+                    placeholder="competitor.com"
+                    onChange={(event) => updateRowUrl(row.id, event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className={styles.removeRow}
+                    onClick={() => removeRow(row.id)}
+                    aria-label={`Remove ${row.suggestedName || "this competitor"}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+            {rows.length < MAX_COMPETITOR_URLS && (
+              <button type="button" className={styles.addRow} onClick={addRow}>
+                + Add {rows.length > 0 ? "another" : "a"} competitor
+              </button>
+            )}
+            <p className={styles.optionalNote}>Optional — you can edit these later.</p>
+          </>
+        )}
         {error && <p className={styles.error}>{error}</p>}
 
         {/*
@@ -185,10 +277,10 @@ export function CompetitorsSetup({
           Back
         </button>
         <button className={styles.skipLink} type="button" onClick={onContinue}>
-          Skip
+          Skip for now
         </button>
         <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={analyzing}>
-          {analyzing ? "Analyzing competitors…" : "Continue"}
+          {analyzing ? "Analyzing competitors…" : "Continue to keywords →"}
         </button>
       </footer>
     </main>

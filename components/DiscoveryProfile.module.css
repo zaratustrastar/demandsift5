@@ -151,6 +151,76 @@
   gap: 16px;
 }
 
+/* Scoped narrower width for this screen only (760-820px), without
+ * touching .head/.competitors/.actions' own 880px rule, which
+ * DiscoveryProfile.tsx also uses -- see CompetitorsSetup.tsx's top
+ * comment. Descendant selectors, not a redefinition of those classes. */
+.competitorsScreen .head,
+.competitorsScreen .competitors,
+.competitorsScreen .actions {
+  max-width: 800px;
+}
+
+.suggestedLabel {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.suggestedLabel span {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #a1a1aa;
+}
+
+.suggestedName {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  background: var(--mint);
+  color: var(--green-dark);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  border-right: 1px solid var(--line);
+}
+
+.removeRow {
+  flex: 0 0 auto;
+  width: 36px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.removeRow:hover { color: var(--ink); background: var(--paper); }
+
+.addRow {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.addRow:hover { color: var(--green-dark); text-decoration: underline; }
+
+.optionalNote {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .namedCompetitors {
   padding: 16px;
   border: 1px solid var(--border, #e2e6e2);

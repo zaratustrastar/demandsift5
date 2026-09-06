@@ -196,7 +196,7 @@ test("provenance rendering treats user_supplied as its own kind, never as a Redd
 });
 
 test("the Competitors & alternatives step never requires competitors", () => {
-  assert.match(competitorsSetup, /Competitors & alternatives/);
+  assert.match(competitorsSetup, /Who do people compare you with\?/);
   assert.match(competitorsSetup, /className=\{styles\.skipLink\} type="button" onClick=\{onContinue\}/);
   // Skip must not be gated on any competitor state.
   const footerStart = competitorsSetup.indexOf("<footer");

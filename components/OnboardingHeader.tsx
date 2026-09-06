@@ -18,7 +18,7 @@
 
 import styles from "./OnboardingHeader.module.css";
 
-export const ONBOARDING_STEPS = ["Website", "Understanding", "Competitors", "Search setup", "Reddit scan"] as const;
+export const ONBOARDING_STEPS = ["Website", "Understanding", "Competitors", "Keywords", "Scan"] as const;
 
 export function OnboardingHeader({
   activeIndex,

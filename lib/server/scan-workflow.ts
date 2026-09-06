@@ -598,6 +598,12 @@ export interface WebsiteUnderstandingDiagnostics {
   crawlMs: number;
   pageTraces: PageCrawlTrace[];
   analyzeBusinessMs: number;
+  /** Measured around the same Promise.allSettled call as analyzeBusinessMs,
+   * so the two are directly comparable -- confirms actual overlap and the
+   * real background competitor-pipeline duration, rather than the
+   * separately-measured (and cache-bypassing) numbers ?debug=1 on the
+   * competitor-url-suggestions route reports from its own fresh recompute. */
+  competitorSuggestionMs: number;
   attempts: number;
 }
 
@@ -623,6 +629,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   const crawlStartedAtIso = new Date().toISOString();
   let crawlMs = 0;
   let analyzeBusinessMs = 0;
+  let competitorSuggestionMsTotal = 0;
   let attempts = 0;
   let competitorSuggestions: Array<{ name: string; url: string }> = [];
 
@@ -645,27 +652,35 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
         // B waiting for A's ~38s to finish first. allSettled specifically
         // (not all): a competitor-suggestion failure must never fail this
         // attempt or trigger a retry of analyzeBusiness, which already has
-        // its own success/failure handling below.
+        // its own success/failure handling below. Each branch is timed
+        // independently (not just the aggregate Promise.allSettled wall
+        // time) so competitorSuggestionMs reflects that branch's own
+        // duration even though it finishes well before analyzeBusinessMs.
+        let competitorSuggestionMs = 0;
+        const timedAnalyzeBusiness = aiProvider.analyzeBusiness({
+          workspaceId: scan.workspaceId,
+          businessId,
+          websiteUrl: crawl.canonicalUrl,
+          canonicalDomain: crawl.canonicalDomain,
+          pages,
+          models,
+        });
+        const competitorStarted = performance.now();
+        const timedCompetitorSuggestion = resolveCompetitorUrlsFromCrawl({
+          websiteUrl: crawl.canonicalUrl,
+          canonicalDomain: crawl.canonicalDomain,
+          pages: buildCompactCompetitorEvidence(crawl),
+          ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
+          aiProvider,
+          models,
+          workspaceId: scan.workspaceId,
+        }).finally(() => { competitorSuggestionMs = performance.now() - competitorStarted; });
         const [analyzedOutcome, competitorOutcome] = await Promise.allSettled([
-          aiProvider.analyzeBusiness({
-            workspaceId: scan.workspaceId,
-            businessId,
-            websiteUrl: crawl.canonicalUrl,
-            canonicalDomain: crawl.canonicalDomain,
-            pages,
-            models,
-          }),
-          resolveCompetitorUrlsFromCrawl({
-            websiteUrl: crawl.canonicalUrl,
-            canonicalDomain: crawl.canonicalDomain,
-            pages: buildCompactCompetitorEvidence(crawl),
-            ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
-            aiProvider,
-            models,
-            workspaceId: scan.workspaceId,
-          }),
+          timedAnalyzeBusiness,
+          timedCompetitorSuggestion,
         ]);
         analyzeBusinessMs += performance.now() - analyzeStarted;
+        competitorSuggestionMsTotal += competitorSuggestionMs;
         competitorSuggestions = competitorOutcome.status === "fulfilled" ? competitorOutcome.value.suggestions : [];
         if (analyzedOutcome.status === "rejected") throw analyzedOutcome.reason;
         assertWebsiteProfileEvidence(scan, analyzedOutcome.value.value);
@@ -682,7 +697,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     const profile = profileFromBusiness(business);
     return {
       business, profile, analysisMode: "openai", competitorSuggestions,
-      diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts },
+      diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, competitorSuggestionMs: competitorSuggestionMsTotal, attempts },
     };
   }
 
@@ -699,7 +714,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   });
   return {
     business, profile, analysisMode: "local-fallback", competitorSuggestions,
-    diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts },
+    diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, competitorSuggestionMs: competitorSuggestionMsTotal, attempts },
   };
 }
 

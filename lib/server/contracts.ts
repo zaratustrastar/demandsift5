@@ -592,6 +592,11 @@ export type ScanRecord = {
         outcome: "succeeded" | "failed";
       }>;
       analyzeBusinessMs: number;
+      /** Measured independently of analyzeBusinessMs, even though both
+       * run inside the same Promise.allSettled -- confirms the real
+       * background competitor-pipeline duration, not a debug-mode
+       * recompute's timing. */
+      competitorSuggestionMs: number;
       attempts: number;
     };
   } | null;

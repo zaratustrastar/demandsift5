@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: add end-to-end critical-path timing capture
-# (crawl/per-page/analyzeBusiness/competitor-suggestion/verification) to
-# measure the real Scan-click -> Competitors-screen timeline (2026-09-06).
+# Release marker: add precise client-side poll/mount/fetch timestamps
+# (window.__scanPollLog) to trace the analyzeBusiness-complete ->
+# Competitors-visible gap, testing the hidden-tab polling hypothesis (2026-09-06).
 
 on:
   push:

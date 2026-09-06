@@ -18,7 +18,7 @@
 
 import styles from "./OnboardingHeader.module.css";
 
-export const ONBOARDING_STEPS = ["Website", "Reading", "Competitors", "Keywords", "Scanning"] as const;
+export const ONBOARDING_STEPS = ["Website", "Understanding", "Competitors", "Search setup", "Reddit scan"] as const;
 
 export function OnboardingHeader({
   activeIndex,
@@ -57,7 +57,7 @@ export function OnboardingHeader({
                   index === activeIndex ? styles.stepActive : index < activeIndex ? styles.stepDone : ""
                 }`}
               >
-                <span className={styles.stepDot} />
+                <span className={styles.stepDot} aria-hidden="true">{index < activeIndex ? "\u2713" : ""}</span>
                 <span>{label}</span>
               </div>
             ))}

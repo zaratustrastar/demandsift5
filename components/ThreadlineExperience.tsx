@@ -173,7 +173,7 @@ function useProgressClock(): number {
   return now;
 }
 
-function StageProgress({ rows, scan, connected }: { rows: StageRow[]; scan?: ApiScanResponse["scan"]; connected: boolean }) {
+function StageProgress({ rows, scan, connected, account }: { rows: StageRow[]; scan?: ApiScanResponse["scan"]; connected: boolean; account?: LandingAccount | null }) {
   const progress = scan?.runtimeProgress;
   const now = useProgressClock();
   const elapsed = scanElapsedMs(progress, now);
@@ -228,21 +228,33 @@ function StageProgress({ rows, scan, connected }: { rows: StageRow[]; scan?: Api
       {progress && progress.insights !== "unknown" && rows.some(row => row.id === "qualification") && (
         <p className={styles.progressStatus}>Findings summary: {progress.insights === "fallback" ? "sourced fallback ready" : progress.insights === "active" ? "being prepared" : progress.insights}.</p>
       )}
-      {elapsed !== null && !stoppedForGood && (
-        <p className={styles.scanRunningLabel}>Scan running · {durationLabel(elapsed)}</p>
-      )}
-      <div className={styles.stageFooter}>
-        {elapsed !== null && <span>Scan time: {durationLabel(elapsed)} · excludes time awaiting your review</span>}
-        {lastWork && <span>Last saved progress: {lastWork} ago</span>}
-        {heartbeat && <span>Worker last seen: {heartbeat} ago</span>}
+      <div className={styles.workingNote}>
+        <strong>Working in the background</strong>
+        <p>{scan?.durable
+          ? "You can leave this page — your progress is saved and the scan will keep running."
+          : "Keep this tab open until background work is confirmed. This session has not confirmed durable acceptance."}</p>
       </div>
-      <p className={styles.stageCloseNote}>{scan?.durable
-        ? "You can leave this page. Your scan keeps running on the server -- return in this browser, or on another device if you signed in, and your saved progress will be waiting."
-        : "Keep this tab open until background work is confirmed. This session has not confirmed durable acceptance."}</p>
-      {scan?.durable && <button className={styles.returnLink} type="button" onClick={async () => {
-        const link = new URL(window.location.pathname, window.location.origin); link.searchParams.set("scan_id", scan.id);
-        setCopied(await copyText(link.toString()));
-      }}>{copied ? "Return link copied" : "Copy private return link"}</button>}
+      {scan?.durable && (
+        <>
+          <button className={styles.returnLink} type="button" onClick={async () => {
+            const link = new URL(window.location.pathname, window.location.origin); link.searchParams.set("scan_id", scan.id);
+            setCopied(await copyText(link.toString()));
+          }}>{copied ? "Return link copied" : "Copy link to return later"}</button>
+          {!account && <p className={styles.returnLinkHint}>Keep this link if you&rsquo;re scanning without an account.</p>}
+        </>
+      )}
+      {(elapsed !== null || lastWork || heartbeat) && (
+        <details className={styles.scanDetails}>
+          <summary>Scan details</summary>
+          <div className={styles.scanDetailsBody}>
+            {elapsed !== null && !stoppedForGood && <span>Scan running · {durationLabel(elapsed)}</span>}
+            {elapsed !== null && <span>Scan time: {durationLabel(elapsed)} · excludes time awaiting your review</span>}
+            {lastWork && <span>Last saved progress: {lastWork} ago</span>}
+            {heartbeat && <span>Worker last seen: {heartbeat} ago</span>}
+            {scan?.status && <span>Scan state: {scan.status}</span>}
+          </div>
+        </details>
+      )}
     </>
   );
 }
@@ -1290,6 +1302,7 @@ function Scanning({
   stageIds,
   scan,
   connected,
+  account,
 }: {
   url: string;
   inputMode: "website" | "context";
@@ -1299,14 +1312,45 @@ function Scanning({
   stageIds: string[];
   scan?: ApiScanResponse["scan"];
   connected: boolean;
+  account?: LandingAccount | null;
 }) {
   const isContext = inputMode === "context";
   const domain = useMemo(() => safeDomain(url), [url]);
-  const rows = stageRowsFor(stageIds, progress).map(row => isContext && row.id === "website"
-    ? { ...row, label: "Using your business description", detail: row.status === "complete" ? row.detail : "Using your description; no website crawl is needed." }
-    : row);
+  // Presentation-only relabeling -- STAGE_META/the backend's own reported
+  // labels are untouched; this is the same pattern the isContext override
+  // below already used for just the "website" row, extended to both
+  // pre-input rows so their copy matches the user-benefit framing this
+  // screen asks for without changing what scan-workflow.ts actually reports.
+  const rows = stageRowsFor(stageIds, progress).map((row) => {
+    if (isContext && row.id === "website") {
+      return { ...row, label: "Using your business description", detail: row.status === "complete" ? row.detail : "Using your description; no website crawl is needed." };
+    }
+    if (row.id === "website") {
+      return { ...row, label: "Reading your website", detail: "Finding the pages that explain your product and positioning." };
+    }
+    if (row.id === "understanding") {
+      return { ...row, label: "Understanding what you solve", detail: "Identifying your product, audience, use cases and customer problems." };
+    }
+    return row;
+  });
   const allDone = rows.length > 0 && rows.every((row) => row.status === "complete");
   const isPreInput = stageIds === PRE_INPUT_STAGE_IDS;
+  // The full business profile (product/audience/problems) is produced by
+  // one AI call and arrives all at once -- see runFullWebsiteUnderstanding
+  // in scan-workflow.ts -- not field by field. scan.discoveryProfile (and
+  // the approvedProfile it's exposed as here) is only ever set once that
+  // whole call has already succeeded, so there is no genuine intermediate
+  // state where, say, the product is known but the audience isn't: only
+  // "not yet" and "all of it." Showing anything more granular than that
+  // would be inventing progress the backend never reported.
+  //
+  // approvedProfile (see presentScanLifecycle in lib/server/presenter.ts)
+  // is a deliberately narrowed { name, summary, targetAudience,
+  // problemsSolved } -- not the full ScanBusinessProfile, and not nested
+  // under a further .profile -- productCategory specifically is not sent
+  // to the client at all, so "Product" below is the business summary,
+  // the closest real field actually available here.
+  const foundProfile = scan?.approvedProfile;
 
   return (
     <main className={styles.scanScreen}>
@@ -1316,20 +1360,72 @@ function Scanning({
           <div className={styles.orbit}><i /><i /><i /></div>
           <span>↗</span>
         </div>
-        <div className={styles.scanKicker}>{isPreInput ? (isContext ? "Analyzing your description" : `Analyzing ${domain}`) : "Your Market Scan"}</div>
-        <h1>{isPreInput ? "Understanding your business" : "Finding and checking relevant conversations"}</h1>
-        <p>
-          {isPreInput
-            ? "We’ll prepare the complete business profile for your review before searching Reddit."
-            : "Search and AI response times vary. We keep the full search and review depth, and show completed checks below."}
-        </p>
+        {isPreInput ? (
+          <>
+            <div className={styles.scanKicker}>
+              {isContext ? "Learning about your business" : `Learning about ${domain}`}
+            </div>
+            <h1>First, we learn what you actually sell.</h1>
+            <p>
+              Scooptr is reading your website to understand your product, audience and the problems
+              you solve. You&rsquo;ll review what we found before we search Reddit.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className={styles.scanKicker}>Your Market Scan</div>
+            <h1>Finding and checking relevant conversations</h1>
+            <p>
+              Search and AI response times vary. We keep the full search and review depth, and show
+              completed checks below.
+            </p>
+          </>
+        )}
         <StageProgress
           rows={rows}
           scan={scan}
           connected={connected}
+          account={account}
         />
+        {isPreInput && (
+          <section className={styles.findingsSection} aria-label="What we're finding">
+            <h2>What we&rsquo;re finding</h2>
+            {foundProfile ? (
+              <div className={styles.findingsList}>
+                {foundProfile.summary && (
+                  <div className={styles.findingsItem}>
+                    <span aria-hidden="true">✓</span>
+                    <div><strong>Product</strong><small>{foundProfile.summary}</small></div>
+                  </div>
+                )}
+                {foundProfile.targetAudience.length > 0 && (
+                  <div className={styles.findingsItem}>
+                    <span aria-hidden="true">✓</span>
+                    <div><strong>Likely audience</strong><small>{foundProfile.targetAudience.join(", ")}</small></div>
+                  </div>
+                )}
+                {foundProfile.problemsSolved.length > 0 && (
+                  <div className={styles.findingsItem}>
+                    <span aria-hidden="true">✓</span>
+                    <div><strong>Problems</strong><small>{foundProfile.problemsSolved.slice(0, 2).join("; ")}</small></div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className={styles.findingsList}>
+                <div className={styles.findingsItem}>
+                  <span aria-hidden="true">●</span>
+                  <div><strong>Product, audience and problems</strong><small>Analyzing your business…</small></div>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+        {isPreInput && !allDone && (
+          <p className={styles.upNextNote}><strong>Up next:</strong> Competitors and search setup</p>
+        )}
         {!isContext && (
-          <div className={styles.domainSafety}><span>⌁</span> Crawl boundary locked to <b>{domain}</b></div>
+          <div className={styles.domainSafety}>🔒 We only read public pages on <b>{domain}</b></div>
         )}
       </section>
     </main>
@@ -2790,6 +2886,7 @@ export function ThreadlineExperience() {
         stageIds={PRE_INPUT_STAGE_IDS}
         scan={scanResponse?.scan}
         connected={scanConnected}
+        account={account}
       />
     );
   }

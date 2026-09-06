@@ -66,6 +66,12 @@
   border-radius: 7px;
   background: #e4e4e7;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0;
+  line-height: 1;
+  color: transparent;
 }
 
 .stepDone {
@@ -73,7 +79,12 @@
 }
 
 .stepDone .stepDot {
+  width: 13px;
+  height: 13px;
   background: #2563eb;
+  font-size: 8.5px;
+  font-weight: 700;
+  color: #fff;
 }
 
 .stepActive {

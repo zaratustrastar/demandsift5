@@ -129,6 +129,10 @@ export async function GET(request: Request, context: RouteContext) {
                 ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
                 diagnostics: resolution.diagnostics,
                 instrumentation: resolution.instrumentation,
+                websiteUnderstandingTimeline: scan.discoveryProfile?.diagnosticTimeline,
+                scanCreatedAtIso: scan.createdAt,
+                analysisCompletedAtIso: scan.analysisCompletedAt,
+                competitorSuggestionRequestCompletedAtIso: new Date().toISOString(),
               },
             }
           : {}),

@@ -40,7 +40,7 @@ import { createOpenAiProviderFromEnv, openAiModelsFromEnv, isUsableTriageJudgmen
 import type { TriageProcessingOutcome } from "@/lib/providers/contracts";
 import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
 import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
-import type { WebsiteCrawlResult } from "@/lib/security/website-crawler";
+import type { WebsiteCrawlResult, PageCrawlTrace } from "@/lib/security/website-crawler";
 import type {
   CompetitorProfile,
   CompetitorWeaknessRecord,
@@ -128,7 +128,16 @@ function scanAiProvider(scan: ScanRecord, env: NodeJS.ProcessEnv) {
   }), trace, ["analyzeBusiness", "analyzeBusinessFromContext", "embed", "triageConversations", "qualifyConversations", "generateInsights", "generateReply"]);
 }
 
-async function observedCrawl(scan: ScanRecord): Promise<WebsiteCrawlResult> {
+/**
+ * pageTraces is an optional out-parameter (not a return-type change, so
+ * the other two call sites are unaffected): when provided, every
+ * crawlWebsite onPageTrace event is also pushed there, verbatim, for a
+ * caller that needs the raw per-page timing data itself rather than only
+ * the console-logged trace.milestone summary -- currently only
+ * runFullWebsiteUnderstanding's temporary diagnosticTimeline capture uses
+ * this (see below).
+ */
+async function observedCrawl(scan: ScanRecord, pageTraces?: PageCrawlTrace[]): Promise<WebsiteCrawlResult> {
   const boundSnapshotId = scan.discoveryProfile?.websiteSnapshotId;
   const snapshot = scan.websiteSnapshot;
   if (snapshot && reusableWebsiteSnapshot(snapshot, scan.id, scan.websiteUrl)) {
@@ -150,19 +159,20 @@ async function observedCrawl(scan: ScanRecord): Promise<WebsiteCrawlResult> {
     return crawlWebsite(scan.websiteUrl, {
       maxPages: 4,
       signal: execution?.guard.signal,
-      onPageTrace: trace
-        ? (event) => trace.milestone("website.page", {
-            headlessTriggered: event.headlessTriggered,
-            completionReason: event.completionReason,
-            staticFetchMs: Math.round(event.staticFetchMs),
-            staticChars: event.staticChars,
-            browserStartupMs: event.browserStartupMs !== undefined ? Math.round(event.browserStartupMs) : undefined,
-            renderMs: event.renderMs !== undefined ? Math.round(event.renderMs) : undefined,
-            finalChars: event.finalChars,
-            totalMs: Math.round(event.totalMs),
-            category: event.outcome,
-          })
-        : undefined,
+      onPageTrace: (event) => {
+        pageTraces?.push(event);
+        trace?.milestone("website.page", {
+          headlessTriggered: event.headlessTriggered,
+          completionReason: event.completionReason,
+          staticFetchMs: Math.round(event.staticFetchMs),
+          staticChars: event.staticChars,
+          browserStartupMs: event.browserStartupMs !== undefined ? Math.round(event.browserStartupMs) : undefined,
+          renderMs: event.renderMs !== undefined ? Math.round(event.renderMs) : undefined,
+          finalChars: event.finalChars,
+          totalMs: Math.round(event.totalMs),
+          category: event.outcome,
+        });
+      },
     });
   };
   const crawl = await (scanTraces.get(scan)?.trace.measure("website.crawl", work) ?? work());
@@ -575,14 +585,34 @@ function contextSource(scanId: string, contextText: string): { source: Provenanc
  * hiccup, same reasoning `refineDiscoveryProfile` used to have: a single
  * network blip should not turn into a hard failure on the very first step
  * of the funnel. */
+/** Temporary end-to-end timing capture for the "Scan click -> Competitors
+ * screen" critical path -- crawl total, every page's trace, and the
+ * analyzeBusiness call's own latency, persisted onto discoveryProfile by
+ * this function's caller so it survives the crawl/analysis running in a
+ * background-worker process separate from whatever web-server process
+ * later serves a debug request for it. */
+export interface WebsiteUnderstandingDiagnostics {
+  crawlStartedAtIso: string;
+  crawlMs: number;
+  pageTraces: PageCrawlTrace[];
+  analyzeBusinessMs: number;
+  attempts: number;
+}
+
 async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   business: BusinessUnderstanding;
   profile: ScanBusinessProfile;
   analysisMode: ScanResult["analysisMode"];
+  diagnostics: WebsiteUnderstandingDiagnostics;
 }> {
   const businessId = createId("biz");
   const env = scan.runConfiguration ? environmentForScan(scan.runConfiguration) : process.env;
   const aiProvider = scanAiProvider(scan, env);
+  const pageTraces: PageCrawlTrace[] = [];
+  const crawlStartedAtIso = new Date().toISOString();
+  let crawlMs = 0;
+  let analyzeBusinessMs = 0;
+  let attempts = 0;
 
   if (aiProvider) {
     const models = openAiModelsFromEnv(env);
@@ -590,9 +620,13 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     let business: BusinessUnderstanding | undefined;
     let lastError: unknown;
     for (let attempt = 0; attempt < UNDERSTANDING_ATTEMPTS; attempt += 1) {
+      attempts += 1;
       try {
-        const crawl = await observedCrawl(scan);
+        const crawlStarted = performance.now();
+        const crawl = await observedCrawl(scan, pageTraces);
+        crawlMs += performance.now() - crawlStarted;
         const { pages } = pagesFromCrawl(crawl);
+        const analyzeStarted = performance.now();
         const analyzed = await aiProvider.analyzeBusiness({
           workspaceId: scan.workspaceId,
           businessId,
@@ -601,6 +635,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
           pages,
           models,
         });
+        analyzeBusinessMs += performance.now() - analyzeStarted;
         assertWebsiteProfileEvidence(scan, analyzed.value);
         business = analyzed.value;
         break;
@@ -613,10 +648,12 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     }
     if (!business) throw lastError ?? new Error("Website understanding failed.");
     const profile = profileFromBusiness(business);
-    return { business, profile, analysisMode: "openai" };
+    return { business, profile, analysisMode: "openai", diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts } };
   }
 
-  const crawl = await observedCrawl(scan);
+  const crawlStarted = performance.now();
+  const crawl = await observedCrawl(scan, pageTraces);
+  crawlMs += performance.now() - crawlStarted;
   const { pages } = pagesFromCrawl(crawl);
   const profile = conservativeProfile(crawl.canonicalUrl, pages);
   const business = toBusinessUnderstanding({
@@ -625,7 +662,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     businessId,
     canonicalDomain: crawl.canonicalDomain,
   });
-  return { business, profile, analysisMode: "local-fallback" };
+  return { business, profile, analysisMode: "local-fallback", diagnostics: { crawlStartedAtIso, crawlMs, pageTraces, analyzeBusinessMs, attempts } };
 }
 
 /** The context-mode counterpart to `runFullWebsiteUnderstanding`. There is no
@@ -1251,6 +1288,7 @@ export async function runScan(
         analysisMode: full.analysisMode,
         analyzedAt: new Date().toISOString(),
         profileStage: "full",
+        diagnosticTimeline: full.diagnostics,
       };
       await setStage(
         scan,

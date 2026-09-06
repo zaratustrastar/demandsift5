@@ -566,6 +566,34 @@ export type ScanRecord = {
      * cache be trusted without a separate "have we tried" flag.
      */
     competitorUrlSuggestions?: Record<string, string | null>;
+    /**
+     * Temporary end-to-end timing capture for the "Scan click ->
+     * Competitors screen visible" critical path -- see
+     * scan-workflow.ts's WebsiteUnderstandingDiagnostics, which this is
+     * structurally identical to (kept as its own inline type here rather
+     * than importing that one, to avoid a new contracts.ts ->
+     * scan-workflow.ts dependency for what may end up a short-lived
+     * diagnostic field). Only present for a website-mode scan that ran
+     * the full crawl+analysis path.
+     */
+    diagnosticTimeline?: {
+      crawlStartedAtIso: string;
+      crawlMs: number;
+      pageTraces: Array<{
+        url: string;
+        staticFetchMs: number;
+        staticChars: number;
+        headlessTriggered: boolean;
+        browserStartupMs?: number;
+        renderMs?: number;
+        completionReason?: "content-ready" | "networkidle2" | "timeout";
+        finalChars: number;
+        totalMs: number;
+        outcome: "succeeded" | "failed";
+      }>;
+      analyzeBusinessMs: number;
+      attempts: number;
+    };
   } | null;
   /**
    * Checkpoint of a successful Reddit discovery call, persisted the same way

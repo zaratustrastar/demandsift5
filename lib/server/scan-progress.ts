@@ -4,6 +4,7 @@ import { scanPhase } from "./scan-lifecycle";
 
 type ProgressSource = Pick<ScanRecord, "runtimeProgress" | "phase" | "status" | "createdAt" | "analysisCompletedAt" | "redditDiscovery" | "triageCoverage"> & {
   discoveryProfile?: { profileStage?: "fast" | "full" } | null;
+  competitorSuggestions?: { status: "ready" | "failed" } | null;
   approval?: unknown;
   durableJob?: { acceptedAt: string };
   timing?: { finishedAt?: string };
@@ -54,6 +55,15 @@ export function refreshRuntimeProgress(scan: ProgressSource): ScanRuntimeProgres
 export type ScanStatusSnapshot = Pick<ScanRecord, "id" | "workspaceId" | "websiteUrl" | "inputMode" | "status" | "progress" | "createdAt" | "updatedAt" | "error" | "errorCode"> & {
   phase: ScanRuntimeProgress["phase"];
   analysisReady: boolean;
+  /** True once the competitor-suggestion branch has settled -- see
+   * contracts.ts's scan.competitorSuggestions doc comment. Deliberately
+   * separate from analysisReady, which continues to mean only "the
+   * complete analyzeBusiness() output (discoveryProfile) is available."
+   * This is "the branch finished," not "it found something": zero
+   * verified suggestions ("ready") and an unexpected failure ("failed")
+   * both count, specifically so an error here can never leave the
+   * Competitors screen permanently unreachable. */
+  competitorsReady: boolean;
   durableAccepted: boolean;
   runtimeProgress: ScanRuntimeProgress;
   completionNotice: ScanRecord["completionNotice"] | null;
@@ -65,6 +75,8 @@ export function scanStatusSnapshot(scan: ScanStatusSource): ScanStatusSnapshot {
   return { id: scan.id, workspaceId: scan.workspaceId, websiteUrl: scan.websiteUrl, inputMode: scan.inputMode ?? "website",
     status: scan.status, phase: scanPhase(scan), progress: scan.progress, createdAt: scan.createdAt, updatedAt: scan.updatedAt,
     error: scan.error, errorCode: scan.errorCode ?? null,
-    analysisReady: !!scan.discoveryProfile && scan.discoveryProfile.profileStage !== "fast", durableAccepted: !!scan.durableJob,
+    analysisReady: !!scan.discoveryProfile && scan.discoveryProfile.profileStage !== "fast",
+    competitorsReady: !!scan.competitorSuggestions,
+    durableAccepted: !!scan.durableJob,
     runtimeProgress: refreshRuntimeProgress(scan), completionNotice: scan.completionNotice ?? null };
 }

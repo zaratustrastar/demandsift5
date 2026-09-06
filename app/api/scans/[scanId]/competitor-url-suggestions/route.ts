@@ -25,21 +25,26 @@ type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } }
  * never uses.
  *
  * Suggestions are generated from compact crawl evidence (see
- * buildCompactCompetitorEvidence and resolveCompetitorUrlsFromCrawl), not
- * from BusinessUnderstanding.competitors (empty for most real businesses)
- * or from a completed business profile. This has no dependency on
- * analyzeBusiness finishing first: scan-workflow.ts's
- * runFullWebsiteUnderstanding now runs analyzeBusiness and this
- * suggestion+verification pipeline concurrently right after the crawl,
- * so by the time a scan reaches awaiting_review, competitorUrlSuggestions
- * is normally already cached below -- this route's own on-demand
- * computation is now mainly a fallback (an older scan from before this
- * existed, or a suggestion pass that came back empty and is being
- * retried).
+ * buildCompactCompetitorEvidence and resolveCompetitorUrlsFromCrawl), with
+ * no dependency on BusinessUnderstanding.competitors, a completed business
+ * profile, or analyzeBusiness finishing at all. This route only requires
+ * the crawl -- not scan.discoveryProfile.business -- specifically so the
+ * Competitors screen can appear (see the UX-level parallelization in
+ * scan-workflow.ts's runFullWebsiteUnderstanding, which persists
+ * scan.competitorSuggestions the moment that branch settles, well before
+ * analyzeBusiness typically finishes) without waiting on analysis.
+ *
+ * scan.competitorSuggestions (a top-level field, never discoveryProfile --
+ * see its doc comment in contracts.ts for why analysisReady's meaning must
+ * never be put at risk here) is the primary read path; this route's own
+ * on-demand computation is now mainly a fallback (an older scan from
+ * before this existed, or a background pass that hit an unexpected error
+ * and never got to mark itself ready).
  *
  * Only successfully verified suggestions are ever cached (see the save
- * below) -- a scan with zero verified suggestions is retried on the next
- * request rather than being permanently remembered as "nothing here."
+ * below) -- a scan whose fallback computation here found zero verified
+ * suggestions is retried on the next request rather than being
+ * permanently remembered as "nothing here."
  *
  * ?debug=1 returns the full per-candidate diagnostic trail from
  * resolveCompetitorUrlsFromCrawl (proposed name/URL, validation outcome,
@@ -55,27 +60,25 @@ export async function GET(request: Request, context: RouteContext) {
     const scan = await requireOwnedScan(actor.workspaceId, scanId);
     const debug = new URL(request.url).searchParams.get("debug") === "1";
 
-    const business = scan.discoveryProfile?.business;
     const crawl = scan.websiteSnapshot?.crawl;
-    if (!business || !crawl) {
+    if (!crawl) {
       throw new ApiError(
-        "Analyze the website before suggesting competitor websites.",
+        "Crawl the website before suggesting competitor websites.",
         409,
         "website_not_analyzed",
       );
     }
 
-    // Cached suggestions are keyed by whatever names the model proposed
-    // on a prior successful run; there's no fixed expected-name list to
-    // check against here (the model decides the names), so "anything
-    // cached at all" is the fast-path condition instead of "every
-    // expected name is present." Normally already populated by
-    // runFullWebsiteUnderstanding by the time this is ever called -- see
-    // the class doc comment above.
-    const cached = scan.discoveryProfile?.competitorUrlSuggestions;
-    if (!debug && cached && Object.keys(cached).length > 0) {
+    // Cached suggestions are keyed by whatever names the model proposed;
+    // there's no fixed expected-name list to check against here (the
+    // model decides the names), so "already marked ready" is the
+    // fast-path condition instead of "every expected name is present."
+    // Normally already populated by runFullWebsiteUnderstanding well
+    // before this is ever called -- see the class doc comment above.
+    const cached = scan.competitorSuggestions;
+    if (!debug && cached?.status === "ready") {
       return Response.json(
-        { suggestions: Object.entries(cached).map(([name, url]) => ({ name, url })) },
+        { suggestions: Object.entries(cached.suggestions).map(([name, url]) => ({ name, url })) },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
@@ -106,16 +109,17 @@ export async function GET(request: Request, context: RouteContext) {
         })
       : { suggestions: [], diagnostics: [], instrumentation: null };
 
-    if (scan.discoveryProfile && resolution.suggestions.length > 0) {
+    if (resolution.suggestions.length > 0) {
       const resolvedOnly = Object.fromEntries(resolution.suggestions.map((suggestion) => [suggestion.name, suggestion.url]));
       // Merge with whatever was already cached (rather than overwrite),
       // so a suggestion verified on an earlier visit isn't lost just
       // because this visit's batch happened to propose different names.
       await getStateRepository().saveScan({
         ...scan,
-        discoveryProfile: {
-          ...scan.discoveryProfile,
-          competitorUrlSuggestions: { ...cached, ...resolvedOnly },
+        competitorSuggestions: {
+          status: "ready",
+          suggestions: { ...cached?.suggestions, ...resolvedOnly },
+          readyAt: new Date().toISOString(),
         },
         updatedAt: new Date().toISOString(),
       });
@@ -129,7 +133,7 @@ export async function GET(request: Request, context: RouteContext) {
               debug: {
                 source: "fresh_resolution",
                 aiConfigured: Boolean(aiProvider),
-                businessName: business.name.value,
+                businessName: scan.discoveryProfile?.business.name.value ?? crawl.canonicalDomain,
                 ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
                 diagnostics: resolution.diagnostics,
                 instrumentation: resolution.instrumentation,

@@ -190,6 +190,7 @@ export type ApiScanResponse = {
     id: string;
     phase?: "created" | "analysis_queued" | "analyzing" | "awaiting_review" | "scan_queued" | "scanning" | "complete" | "failed";
     analysisReady?: boolean;
+    competitorsReady?: boolean;
     durable?: boolean;
     approvedProfile?: {
       name: string;

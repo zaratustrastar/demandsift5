@@ -541,6 +541,37 @@ export type ScanRecord = {
    * because a result only exists once the scan it was meant to configure has
    * already run.
    */
+  /**
+   * The competitor-suggestion branch's own completion state, persisted the
+   * moment that branch settles -- independent of, and normally well before,
+   * discoveryProfile below (which means the complete analyzeBusiness()
+   * output is available and must never be set early or partially just to
+   * unblock this). Kept as its own top-level field specifically so
+   * analysisReady's meaning is never at risk of drifting: analysisReady is
+   * exactly "discoveryProfile exists and is a full profileStage," full
+   * stop, and this field never touches that computation.
+   * `suggestions` is name -> url for every *verified* suggestion (see
+   * lib/server/competitor-url-resolution.ts) -- zero entries is a normal,
+   * complete outcome, not a sign the branch hasn't finished, which is
+   * exactly why `status` exists as an explicit completion signal rather
+   * than inferring readiness from whether the array is non-empty.
+   * "pending" is never written explicitly -- this field's absence already
+   * means that, and writing it would just be one more state to keep in
+   * sync for no benefit. Both "ready" and "failed" mean the branch has
+   * settled; the UI gate (competitorsReady, see scan-progress.ts) must
+   * treat them the same way, since the alternative -- only "ready"
+   * unblocking entry -- deadlocks the Competitors screen forever on any
+   * unexpected competitor-branch error (it would never mount, so the
+   * route's own on-demand retry would never get a chance to run either).
+   * "failed" always has an empty suggestions object; the route's cache
+   * check (only "ready" serves directly from here) still lets it retry
+   * fresh on the next request rather than being stuck.
+   */
+  competitorSuggestions?: {
+    status: "ready" | "failed";
+    suggestions: Record<string, string>;
+    readyAt: string;
+  } | null;
   discoveryProfile?: {
     /** Exact evidence version used to produce the approved business profile. */
     websiteSnapshotId?: string;
@@ -556,16 +587,6 @@ export type ScanRecord = {
      * review screen's polling logic keep working without a migration.
      */
     profileStage?: "fast" | "full";
-    /**
-     * Cached result of resolveCompetitorUrls (lib/server/competitor-url-resolution.ts),
-     * computed lazily on the first GET to /api/scans/[scanId]/competitor-url-suggestions
-     * and reused after that so repeated visits to the Competitors screen don't
-     * re-run the model lookup and homepage fetches. Keyed by competitor name;
-     * a null value means resolution was attempted and did not verify a URL for
-     * that name, not "not yet attempted" -- that distinction is what lets the
-     * cache be trusted without a separate "have we tried" flag.
-     */
-    competitorUrlSuggestions?: Record<string, string | null>;
     /**
      * Temporary end-to-end timing capture for the "Scan click ->
      * Competitors screen visible" critical path -- see

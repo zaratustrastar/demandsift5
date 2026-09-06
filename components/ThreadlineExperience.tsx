@@ -1934,6 +1934,14 @@ export function ThreadlineExperience() {
   const [scanProgress, setScanProgress] = useState<ApiScanResponse["scan"]["progress"]>([]);
   /** Set once the website is analyzed and the profile is awaiting review. */
   const [reviewScanId, setReviewScanId] = useState("");
+  // Set when the user presses Continue on the Competitors screen while
+  // analyzeBusiness is still running (analysisReady false) -- read by the
+  // same polling loop that's already running to skip straight to
+  // "profile" once analysisReady flips, instead of routing back through
+  // "competitors" (already reviewed) or leaving the user stuck on the
+  // waiting screen. A ref, not state: it must be visible inside the
+  // polling closure without retriggering the effect that sets it up.
+  const continueRequestedWhileAnalyzingRef = useRef(false);
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("free");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
@@ -2078,6 +2086,19 @@ export function ThreadlineExperience() {
             setView(userAccount ? (justSignedIn ? "done" : "report") : "results");
           } else if (latest.scan.phase === "awaiting_review") {
             if (!latest.scan.analysisReady) throw new Error("This older scan has an incomplete profile. Start a new scan to review the full analysis.");
+            setView("competitors");
+          } else if (latest.scan.competitorsReady) {
+            // Reloaded mid-flight, after the competitor branch settled but
+            // before analyzeBusiness finished -- go straight to
+            // Competitors rather than the progress screen first; the main
+            // polling effect (gated on view === "analyzing") would also
+            // self-correct on its own next tick, but this avoids an
+            // unnecessary flash of that screen on a reload. Still set
+            // analysisScanRef so that if the user presses Continue before
+            // analysisReady and that effect takes over, it resumes this
+            // existing scan instead of creating a new one (same reason
+            // the "analyzing" branch below sets it).
+            analysisScanRef.current = Promise.resolve(latest);
             setView("competitors");
           } else if (["created", "analysis_queued", "analyzing"].includes(latest.scan.phase ?? "")) {
             analysisScanRef.current = Promise.resolve(latest);
@@ -2336,6 +2357,12 @@ export function ThreadlineExperience() {
         keepStableScanUrl(created.scan.id);
         let requestAnalysis = !created.scan.phase || created.scan.phase === "created";
         let acceptanceAttempted = false;
+        // Set the first time competitorsReady is observed true, so the
+        // early transition to "competitors" below only ever fires once --
+        // afterward, further polls just update scanResponse (read by
+        // CompetitorsSetup's onContinue for analysisReady) without moving
+        // the view again on their own.
+        let shownCompetitorsEarly = false;
         polling = startScanPolling({
           onConnectionChange: setScanConnected,
           onError: fail,
@@ -2370,10 +2397,38 @@ export function ThreadlineExperience() {
             if (latest.scan.phase === "created" && acceptanceAttempted) {
               throw new Error("Your scan was saved, but background work was not accepted. Reload this saved scan to retry acceptance.");
             }
+            // Competitor suggestions are ready well before analyzeBusiness
+            // typically finishes (see scan-workflow.ts's
+            // runFullWebsiteUnderstanding) -- competitorsReady means that
+            // branch settled at all (ready or failed both count; see its
+            // doc comment), not that it succeeded, since a stricter
+            // condition would leave the screen unreachable on any
+            // unexpected competitor-branch error. Polling keeps running
+            // after this (no `return true` here) so analysisReady can
+            // still be observed later, for CompetitorsSetup's Continue
+            // and the auto-advance below.
+            if (!shownCompetitorsEarly && latest.scan.competitorsReady && latest.scan.phase !== "awaiting_review") {
+              shownCompetitorsEarly = true;
+              setReviewScanId(created.scan.id);
+              setView("competitors");
+            }
             if (latest.scan.phase === "awaiting_review") {
               if (!latest.scan.analysisReady) throw new Error("This older scan has an incomplete profile. Start a new scan to review the full analysis.");
               setReviewScanId(created.scan.id);
-              setView("competitors");
+              if (continueRequestedWhileAnalyzingRef.current) {
+                // The user already reviewed competitors and pressed
+                // Continue while analysis was still running -- go
+                // straight to the next screen instead of back through
+                // Competitors, which they've already handled.
+                continueRequestedWhileAnalyzingRef.current = false;
+                setView("profile");
+              } else if (!shownCompetitorsEarly) {
+                // Fallback for the rare case both branches settle within
+                // the same poll (or an older code path/scan that never
+                // separately reported competitorsReady) -- same
+                // destination as before this change.
+                setView("competitors");
+              }
               return true;
             }
             return false;
@@ -2904,7 +2959,25 @@ export function ThreadlineExperience() {
       <CompetitorsSetup
         scanId={reviewScanId}
         websiteUrl={url}
-        onContinue={() => setView("profile")}
+        onContinue={() => {
+          // This lifecycle decision belongs here, not inside
+          // CompetitorsSetup, which has no reason to know about
+          // analysisReady/scan-phase semantics at all -- it only manages
+          // its own editable competitor rows.
+          if (scanResponse?.scan.analysisReady) {
+            setView("profile");
+          } else {
+            // Competitor choices aren't lost: CompetitorsSetup's own
+            // saveAndContinue() has already persisted them (same as
+            // today) before onContinue ever fires. The main polling
+            // effect (gated on view === "analyzing", already running or
+            // resumed via analysisScanRef) will observe analysisReady
+            // and, seeing this flag, advance straight to "profile"
+            // instead of back through "competitors".
+            continueRequestedWhileAnalyzingRef.current = true;
+            setView("analyzing");
+          }
+        }}
         onBack={returnToSetup}
       />
     );

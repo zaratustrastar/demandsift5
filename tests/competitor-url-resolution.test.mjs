@@ -26,6 +26,7 @@ const setup = await read("../components/CompetitorsSetup.tsx");
 const serverContracts = await read("../lib/server/contracts.ts");
 const domainTypes = await read("../lib/domain/types.ts");
 const workflow = await read("../lib/server/scan-workflow.ts");
+const serverProgress = await read("../lib/server/scan-progress.ts");
 
 test("competitor name and URL are proposed together in one request, not two sequential model calls", () => {
   assert.match(provider, /async suggestCompetitorsFromCrawl\(/);
@@ -90,17 +91,23 @@ test("this feature adds no new fields to BusinessUnderstanding or CompetitorRefe
   assert.doesNotMatch(competitorReferenceBody, /\burl\b|\bdomain\b/i);
 });
 
-test("the suggestions cache lives on discoveryProfile, keyed by name", () => {
-  assert.match(serverContracts, /competitorUrlSuggestions\?:\s*Record<string, string \| null>/);
+test("the suggestions cache lives on scan.competitorSuggestions, a top-level field separate from discoveryProfile", () => {
+  assert.match(serverContracts, /competitorSuggestions\?:\s*\{\s*\n\s*status: "ready" \| "failed";\s*\n\s*suggestions: Record<string, string>;/);
+  assert.doesNotMatch(serverContracts, /discoveryProfile\?: \{[\s\S]*competitorUrlSuggestions/);
 });
 
-test("the route serves from cache when anything is already cached, instead of re-running the model+fetch pipeline", () => {
-  assert.match(route, /if \(!debug && cached && Object\.keys\(cached\)\.length > 0\)/);
+test("the route serves from cache only when the branch is marked ready, instead of re-running the model+fetch pipeline", () => {
+  assert.match(route, /if \(!debug && cached\?\.status === "ready"\)/);
 });
 
-test("only successfully-verified suggestions are cached -- a scan with zero verified suggestions is retried on the next request, not permanently remembered as empty", () => {
+test("only successfully-verified suggestions are written into the cache's suggestions map -- a scan with zero verified suggestions still marks the branch ready, just with nothing to show", () => {
   assert.match(route, /resolution\.suggestions\.length > 0/);
-  assert.match(route, /competitorUrlSuggestions: \{ \.\.\.cached, \.\.\.resolvedOnly \}/);
+  assert.match(route, /suggestions: \{ \.\.\.cached\?\.suggestions, \.\.\.resolvedOnly \}/);
+});
+
+test("the route only requires the crawl, not a completed business profile, to serve or compute suggestions", () => {
+  assert.doesNotMatch(route, /const business = scan\.discoveryProfile\?\.business;\s*\n\s*if \(!business/);
+  assert.match(route, /if \(!crawl\)/);
 });
 
 test("the route is its own endpoint, not a field bolted onto the shared discovery-terms route DiscoveryProfile.tsx also polls for unrelated data", () => {
@@ -154,13 +161,20 @@ test("analyzeBusiness and competitor suggestion run concurrently right after the
   assert.match(fnBody, /resolveCompetitorUrlsFromCrawl\(\{/);
 });
 
-test("a competitor-suggestion failure never fails the analyzeBusiness retry loop -- allSettled, not all", () => {
+test("a competitor-suggestion failure never fails the analyzeBusiness retry loop -- allSettled, not all -- and is still marked settled (never left permanently pending)", () => {
   const fnStart = workflow.indexOf("async function runFullWebsiteUnderstanding");
   const fnBody = workflow.slice(fnStart, workflow.indexOf("\n}\n", fnStart));
-  assert.match(fnBody, /competitorSuggestions = competitorOutcome\.status === "fulfilled" \? competitorOutcome\.value\.suggestions : \[\];/);
+  assert.match(fnBody, /scan\.competitorSuggestions = \{ status: "failed", suggestions: \{\}, readyAt: new Date\(\)\.toISOString\(\) \};/);
   assert.match(fnBody, /if \(analyzedOutcome\.status === "rejected"\) throw analyzedOutcome\.reason;/);
 });
 
-test("competitor suggestions computed during understanding are persisted onto discoveryProfile immediately, not left for the Competitors screen's own round-trip", () => {
-  assert.match(workflow, /competitorUrlSuggestions: Object\.fromEntries\(full\.competitorSuggestions\.map/);
+test("competitor suggestions are persisted the moment that branch settles, independent of analyzeBusiness -- not written onto discoveryProfile, and not left for the Competitors screen's own round-trip", () => {
+  assert.match(workflow, /scan\.competitorSuggestions = \{\s*\n\s*status: "ready",/);
+  assert.match(workflow, /await persistScan\(scan\);\s*\n\s*return result;/);
+  assert.doesNotMatch(workflow, /discoveryProfile = \{[\s\S]{0,300}competitorSuggestions/);
+});
+
+test("a failed competitor branch still unblocks entry into the Competitors screen -- competitorsReady means the branch settled, not that it succeeded", () => {
+  assert.match(serverProgress, /competitorsReady: !!scan\.competitorSuggestions,/);
+  assert.doesNotMatch(serverProgress, /competitorsReady:.*status === "ready"[^|]*$/m);
 });

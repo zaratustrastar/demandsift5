@@ -10,6 +10,7 @@ import type { ScanPartialResults } from "./partial-results";
 
 export function presentScanLifecycle(scan: ScanRecord) {
   return { phase: scanPhase(scan), analysisReady: !!scan.discoveryProfile && scan.discoveryProfile.profileStage !== "fast",
+    competitorsReady: !!scan.competitorSuggestions,
     runtimeProgress: refreshRuntimeProgress(scan),
     durable: !!scan.durableJob && getStateRepository().kind === "postgres",
     completionNotice: scan.completionNotice ?? null,

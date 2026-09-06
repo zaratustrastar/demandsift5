@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: replace competitor URL resolution with one combined
-# name+URL suggestion call, sourced from business context instead of
-# the usually-empty BusinessUnderstanding.competitors (2026-09-06).
+# Release marker: add end-to-end critical-path timing capture
+# (crawl/per-page/analyzeBusiness/competitor-suggestion/verification) to
+# measure the real Scan-click -> Competitors-screen timeline (2026-09-06).
 
 on:
   push:

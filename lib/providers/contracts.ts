@@ -264,6 +264,33 @@ export interface AiProvider {
   analyzeVisibilityMentions(
     request: AnalyzeVisibilityMentionsRequest,
   ): Promise<AiProviderResult<VisibilityMentionAnalysis[]>>;
+  /**
+   * Proposes an official homepage URL for each of a small batch of named
+   * competitors, in one request -- not a URL to trust on its own. The
+   * caller (lib/server/competitor-url-resolution.ts) still independently
+   * validates the result as a safe public URL and verifies its homepage
+   * actually identifies as that company before ever auto-filling it;
+   * this method's job is only to propose a candidate, not to be the
+   * source of truth that a domain is correct.
+   */
+  resolveCompetitorDomains(
+    request: ResolveCompetitorDomainsRequest,
+  ): Promise<AiProviderResult<ResolvedCompetitorDomain[]>>;
+}
+
+export interface ResolveCompetitorDomainsRequest {
+  workspaceId: EntityId;
+  /** What the scanned business itself sells, so the model can disambiguate a
+   * common competitor name (e.g. which "Notion" in this market). */
+  ownBusinessSummary: string;
+  competitorNames: string[];
+  models: ModelConfiguration;
+}
+
+export interface ResolvedCompetitorDomain {
+  name: string;
+  /** Null when the model isn't reasonably confident -- never a low-confidence guess. */
+  url: string | null;
 }
 
 export interface RedditSearchQueries {

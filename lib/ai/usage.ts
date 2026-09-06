@@ -11,7 +11,8 @@ export type AiOperation =
   | "reply_generation"
   | "embedding"
   | "visibility_question_generation"
-  | "visibility_answer_analysis";
+  | "visibility_answer_analysis"
+  | "competitor_url_resolution";
 
 export interface TokenUsage {
   inputTokens: number;

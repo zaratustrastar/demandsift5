@@ -556,6 +556,16 @@ export type ScanRecord = {
      * review screen's polling logic keep working without a migration.
      */
     profileStage?: "fast" | "full";
+    /**
+     * Cached result of resolveCompetitorUrls (lib/server/competitor-url-resolution.ts),
+     * computed lazily on the first GET to /api/scans/[scanId]/competitor-url-suggestions
+     * and reused after that so repeated visits to the Competitors screen don't
+     * re-run the model lookup and homepage fetches. Keyed by competitor name;
+     * a null value means resolution was attempted and did not verify a URL for
+     * that name, not "not yet attempted" -- that distinction is what lets the
+     * cache be trusted without a separate "have we tried" flag.
+     */
+    competitorUrlSuggestions?: Record<string, string | null>;
   } | null;
   /**
    * Checkpoint of a successful Reddit discovery call, persisted the same way

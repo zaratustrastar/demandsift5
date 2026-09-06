@@ -41,6 +41,8 @@ import type {
   GenerateReplyRequest,
   GenerateVisibilityQuestionsRequest,
   QualifyConversationsRequest,
+  ResolveCompetitorDomainsRequest,
+  ResolvedCompetitorDomain,
   TriagedConversation,
   TriageConversationsRequest,
   TriageConversationsResult,
@@ -331,6 +333,26 @@ const VISIBILITY_QUESTIONS_SCHEMA: JsonSchema = {
 // (brandRecommended): every other field of an answer (mentions, citations,
 // domains) is decided by deterministic string/URL matching in
 // lib/server/ai-visibility-analysis.ts, never by the model.
+const COMPETITOR_DOMAINS_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    results: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: stringSchema,
+          url: nullableStringSchema,
+        },
+        required: ["name", "url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["results"],
+  additionalProperties: false,
+};
+
 const VISIBILITY_MENTIONS_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
@@ -742,6 +764,25 @@ function parseVisibilityQuestions(raw: unknown): GeneratedVisibilityQuestions {
     );
   }
   return { questions };
+}
+
+function parseResolvedCompetitorDomains(raw: unknown, expectedNames: ReadonlySet<string>): ResolvedCompetitorDomain[] {
+  const object = objectValue(raw, "competitor domains response");
+  const seen = new Set<string>();
+  const results = arrayValue(object.results, "results").map((entry, position) => {
+    const label = `results[${position}]`;
+    const item = objectValue(entry, label);
+    const name = stringValue(item.name, `${label}.name`);
+    if (!expectedNames.has(name)) {
+      throw new OpenAiProviderError(`OpenAI returned an unknown competitor name "${name}" in competitor domains.`);
+    }
+    if (seen.has(name)) {
+      throw new OpenAiProviderError(`OpenAI returned duplicate competitor name "${name}" in competitor domains.`);
+    }
+    seen.add(name);
+    return { name, url: nullableStringValue(item.url, `${label}.url`) ?? null };
+  });
+  return results;
 }
 
 function parseVisibilityMentions(raw: unknown, expectedIndices: ReadonlySet<number>): VisibilityMentionAnalysis[] {
@@ -2344,6 +2385,49 @@ export class OpenAiProvider implements AiProvider {
         answers: request.answers,
       }),
       parse: (value) => parseVisibilityMentions(value, expectedIndices),
+    });
+  }
+
+  /**
+   * Proposes a homepage URL per competitor name in one batched request --
+   * see the AiProvider interface doc comment for why this is a proposal,
+   * not a verified answer. Uses the economy model: this is a small lookup
+   * task, not full business analysis, and low latency/cost matters more
+   * than reasoning depth here.
+   */
+  async resolveCompetitorDomains(
+    request: ResolveCompetitorDomainsRequest,
+  ): Promise<AiProviderResult<ResolvedCompetitorDomain[]>> {
+    if (request.competitorNames.length === 0) {
+      return {
+        value: [],
+        model: request.models.economyModel,
+        operation: "competitor_url_resolution",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        estimatedCostUsd: 0,
+      };
+    }
+    const expectedNames = new Set(request.competitorNames);
+    return this.structured({
+      model: request.models.economyModel,
+      operation: "competitor_url_resolution",
+      schemaName: "competitor_domains",
+      schema: COMPETITOR_DOMAINS_SCHEMA,
+      maxOutputTokens: Math.max(400, request.competitorNames.length * 150),
+      reasoningEffort: "low",
+      context: { workspaceId: request.workspaceId },
+      system:
+        "For each named company, return its official homepage URL only if you are reasonably confident which " +
+        "specific company is meant and what its real domain is. Set url to null rather than guessing when the name " +
+        "is ambiguous, ordinary, or you are not confident -- a wrong domain is worse than none. Never invent a " +
+        "domain by pattern-matching the name (e.g. just appending .com); only return a domain you have concrete " +
+        "reason to believe is that company's actual official site. Return exactly one result per supplied name, " +
+        "using the name text verbatim, and no other names.",
+      user: JSON.stringify({
+        theScannedBusinessSummary: request.ownBusinessSummary,
+        competitorNames: request.competitorNames,
+      }),
+      parse: (value) => parseResolvedCompetitorDomains(value, expectedNames),
     });
   }
 }

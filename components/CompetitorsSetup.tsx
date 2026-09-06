@@ -48,9 +48,14 @@ export type CompetitorProfileView = {
 type CompetitorRow = {
   id: string;
   /** A name Scooptr's own website analysis already suggested -- shown as a
-   * label the user confirms/completes with a URL, never as a fabricated
-   * domain guess (the backend has no domain for these, only a name). */
+   * label alongside the URL field, which the user can edit, replace, or
+   * clear either way. */
   suggestedName?: string;
+  /** Pre-filled only when /api/scans/[scanId]/competitor-url-suggestions
+   * independently verified a homepage actually identifies as this company
+   * (see lib/server/competitor-url-resolution.ts) -- never a raw model
+   * guess. Editable like any other value in this field; the user can
+   * change or clear it freely. */
   url: string;
 };
 
@@ -91,24 +96,27 @@ export function CompetitorsSetup({
 
   const isContextMode = !websiteUrl;
 
-  // Reuses the same discovery-terms endpoint DiscoveryProfile.tsx already
-  // calls -- derived.competitors is exactly the named competitors
-  // business.competitors.value.map(name) already produces from the
-  // website/description analysis, not a second AI call of its own. If this
-  // fails or returns nothing, the fallback single-empty-row state below is
-  // indistinguishable from "there were never any suggestions to fetch."
+  // The names come from the same place discovery-terms' derived.competitors
+  // does (business.competitors.value from the website/description
+  // analysis), but this hits its own endpoint rather than discovery-terms
+  // itself: that endpoint is also polled by DiscoveryProfile.tsx for
+  // unrelated fields, and URL resolution/verification (model lookup +
+  // homepage fetches) is real extra latency this screen wants but that one
+  // never should pay. If this fails or returns nothing, the fallback
+  // single-empty-row state below is indistinguishable from "there were
+  // never any suggestions to fetch."
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch(`/api/scans/${encodeURIComponent(scanId)}/discovery-terms`, { cache: "no-store" });
+        const response = await fetch(`/api/scans/${encodeURIComponent(scanId)}/competitor-url-suggestions`, { cache: "no-store" });
         if (!response.ok) return;
-        const payload = (await response.json()) as { derived?: { competitors?: string[] } | null };
+        const payload = (await response.json()) as { suggestions?: Array<{ name: string; url: string | null }> };
         if (cancelled) return;
-        const names = (payload.derived?.competitors ?? []).slice(0, MAX_COMPETITOR_URLS);
-        setSuggestionCount(names.length);
-        if (names.length > 0) {
-          setRows(names.map((name) => ({ id: nextRowId(), suggestedName: name, url: "" })));
+        const suggestions = (payload.suggestions ?? []).slice(0, MAX_COMPETITOR_URLS);
+        setSuggestionCount(suggestions.length);
+        if (suggestions.length > 0) {
+          setRows(suggestions.map(({ name, url }) => ({ id: nextRowId(), suggestedName: name, url: url ? cleanDomain(url) : "" })));
         }
       } catch {
         // Suggestions are a nice-to-have -- the single-empty-row fallback

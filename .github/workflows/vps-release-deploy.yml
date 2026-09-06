@@ -1,7 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: add A/B comparison infrastructure for crawl-evidence
-# vs. BusinessUnderstanding-based competitor suggestion, gated behind
-# ?compareSuggestionSource=1, not yet used in production (2026-09-06).
+# Release marker: adopt crawl-evidence competitor suggestion permanently
+# -- runs concurrently with analyzeBusiness right after the crawl,
+# persisted before awaiting_review so the Competitors screen reads from
+# cache instead of its own round-trip (2026-09-06).
 
 on:
   push:

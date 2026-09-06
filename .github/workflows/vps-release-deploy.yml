@@ -1,6 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: remove hero microcopy line ("No card required ...
-# Nothing posts without your approval") (2026-09-05).
+# Release marker: website crawler optimization batch -- shared browser
+# instance, same-host image/font/media blocking, content-readiness
+# racing (15s ceiling unchanged), noscript extraction, full per-page
+# instrumentation (2026-09-06).
 
 on:
   push:

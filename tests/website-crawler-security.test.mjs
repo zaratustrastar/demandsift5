@@ -314,3 +314,114 @@ test("a render fallback that also comes back too thin still surfaces the origina
     /did not contain enough readable public text/,
   );
 });
+
+test("<noscript> fallback text is extracted instead of discarded", async () => {
+  const result = await crawlWebsite("https://example.com", {
+    maxPages: 1,
+    resolver: async () => [PUBLIC_V4],
+    fetchImpl: async () => new Response(
+      `<html><head><title>Acme</title></head><body>` +
+        `<script>var x = 1;</script>` +
+        `<noscript>Acme provides automated invoicing for freelance consultants and small agencies.</noscript>` +
+        `<div id="root"></div>` +
+        `</body></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    ),
+    renderImpl: async () => {
+      throw new Error("the noscript text alone should already clear the 80-character bar");
+    },
+  });
+
+  assert.equal(result.pages.length, 1);
+  assert.match(result.pages[0].text, /automated invoicing for freelance consultants/);
+});
+
+test("onPageTrace reports the full per-page diagnostic breakdown, success and failure alike", async () => {
+  const traces = [];
+  const result = await crawlWebsite("https://example.com", {
+    maxPages: 1,
+    resolver: async () => [PUBLIC_V4],
+    fetchImpl: async () => new Response(
+      `<html><head><title>PMFI</title></head><body><div id="root"></div></body></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    ),
+    renderImpl: async () => ({
+      html: `<html><body>PMFI runs automated vaults for prediction market arbitrage across many exchanges.</body></html>`,
+      completionReason: "content-ready",
+      renderMs: 1234,
+      browserStartupMs: 567,
+    }),
+    onPageTrace: (event) => traces.push(event),
+  });
+
+  assert.equal(result.pages.length, 1);
+  assert.equal(traces.length, 1);
+  const [trace] = traces;
+  assert.equal(trace.outcome, "succeeded");
+  assert.equal(trace.headlessTriggered, true);
+  assert.equal(trace.completionReason, "content-ready");
+  assert.equal(trace.renderMs, 1234);
+  assert.equal(trace.browserStartupMs, 567);
+  assert.ok(trace.staticChars < 80, "static extraction should have been the thin one that triggered rendering");
+  assert.ok(trace.finalChars >= 80, "the rendered text is what should count as the final result");
+  assert.ok(trace.totalMs >= 0);
+
+  const failureTraces = [];
+  await assert.rejects(
+    crawlWebsite("https://example.com", {
+      maxPages: 1,
+      resolver: async () => [PUBLIC_V4],
+      fetchImpl: async () => new Response(
+        `<html><head><title>PMFI</title></head><body><div id="root"></div></body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      ),
+      renderImpl: async () => {
+        throw new Error("headless rendering is not configured on this server");
+      },
+      onPageTrace: (event) => failureTraces.push(event),
+    }),
+  );
+  assert.equal(failureTraces.length, 1);
+  assert.equal(failureTraces[0].outcome, "failed");
+  assert.equal(failureTraces[0].headlessTriggered, true);
+});
+
+test("a shared browser launcher is reused across multiple pages in one crawl, not relaunched per page", async () => {
+  const getBrowserCalls = [];
+  await crawlWebsite("https://example.com", {
+    maxPages: 2,
+    resolver: async () => [PUBLIC_V4],
+    fetchImpl: async (input) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/") {
+        return new Response(
+          `<html><head><title>Acme</title></head><body><div id="root"></div><a href="/pricing">Pricing</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } },
+        );
+      }
+      return new Response(
+        `<html><head><title>Acme pricing</title></head><body><div id="root"></div></body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      );
+    },
+    renderImpl: async (url, target, options) => {
+      getBrowserCalls.push(options.getBrowser);
+      const isHomepage = url.pathname === "/";
+      const link = isHomepage ? `<a href="/pricing">Pricing</a>` : "";
+      // The link must survive into the *rendered* HTML too, not just the
+      // static fetch above: extractInternalLinks runs on whichever HTML
+      // ends up used for this page, and once rendering replaces it (as it
+      // does here, since this fake always returns thin static markup),
+      // the static-only copy of the link would never be discovered.
+      return `<html><body>Acme is a fictional example business with enough rendered text to pass the threshold check.${link}</body></html>`;
+    },
+  });
+
+  // Both pages needed the render fallback (see the always-thin static HTML
+  // above); every call must have received the exact same getBrowser
+  // function reference, since crawlWebsite defines it once per crawl, not
+  // once per page -- this is what makes the actual browser instance (once
+  // getBrowser is ever called for real) shared rather than relaunched.
+  assert.equal(getBrowserCalls.length, 2);
+  assert.equal(getBrowserCalls[0], getBrowserCalls[1]);
+});

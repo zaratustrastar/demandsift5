@@ -6,6 +6,7 @@ import { isIP, type LookupFunction } from "node:net";
 import { Readable } from "node:stream";
 
 import type { WebsiteEvidencePage } from "@/lib/providers/contracts";
+import type { Browser } from "puppeteer-core";
 
 const DEFAULT_MAX_PAGES = 6;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
@@ -56,6 +57,28 @@ export interface WebsiteCrawlResult {
   totalBytes: number;
 }
 
+/**
+ * One page's full timing/diagnostic breakdown, emitted as each page
+ * finishes (success or failure) so a caller can attribute a slow crawl to
+ * a specific cause instead of only seeing one lump total. Deliberately a
+ * plain callback rather than requiring the scan-observability TraceEvent
+ * shape directly: this module has no dependency on that package, and
+ * analyzeOneCompetitor (lib/server/competitor-analysis.ts) calls
+ * crawlWebsite with no ScanTrace in scope at all.
+ */
+export interface PageCrawlTrace {
+  url: string;
+  staticFetchMs: number;
+  staticChars: number;
+  headlessTriggered: boolean;
+  browserStartupMs?: number;
+  renderMs?: number;
+  completionReason?: "content-ready" | "networkidle2" | "timeout";
+  finalChars: number;
+  totalMs: number;
+  outcome: "succeeded" | "failed";
+}
+
 export interface CrawlWebsiteOptions {
   maxPages?: number;
   maxResponseBytes?: number;
@@ -67,6 +90,7 @@ export interface CrawlWebsiteOptions {
   renderImpl?: HeadlessRenderFn;
   resolver?: HostResolver;
   signal?: AbortSignal;
+  onPageTrace?: (event: PageCrawlTrace) => void;
 }
 
 /**
@@ -601,6 +625,15 @@ function extractPage(html: string): { title: string; description?: string; text:
     metaContent(html, ["og:title", "twitter:title"]),
     ...extractJsonLdEvidence(html),
   ];
+  // <noscript> fallback text is genuine human-readable content -- often
+  // written deliberately for SEO/no-JS visitors -- unlike script/style/
+  // template/svg, which are never text. Extracted separately (its own
+  // nested tags stripped) before the generic pass below removes the
+  // wrapping element from bodyText, so this content is no longer
+  // silently discarded along with the actual non-text elements.
+  const noscriptText = Array.from(html.matchAll(/<noscript\b[^>]*>([\s\S]*?)<\/noscript>/gi))
+    .map((match) => decodeHtmlEntities(match[1].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim())
+    .filter((text) => text.length > 0);
   const bodyText = decodeHtmlEntities(
     html
       .replace(/<!--[\s\S]*?-->/g, " ")
@@ -609,7 +642,7 @@ function extractPage(html: string): { title: string; description?: string; text:
   )
     .replace(/\s+/g, " ")
     .trim();
-  const text = [...new Set([title, description, ...metadata, bodyText].filter(Boolean))]
+  const text = [...new Set([title, description, ...metadata, ...noscriptText, bodyText].filter(Boolean))]
     .join(". ")
     .replace(/\s+/g, " ")
     .trim()
@@ -654,11 +687,26 @@ function sha256(value: string): string {
  * uses `renderWithHeadlessBrowser` below; custom implementations must not
  * perform their own DNS resolution and must return the fully rendered HTML.
  */
+/**
+ * Return type kept as a union (a bare string still works) specifically so
+ * existing test doubles that return `Promise<string>` (see
+ * tests/website-crawler-security.test.mjs) keep working unchanged --
+ * only the real implementation below needs to report the richer
+ * diagnostics, and it opts in by returning the object form instead.
+ */
+export type HeadlessRenderOutcome =
+  | string
+  | {
+      html: string;
+      completionReason: "content-ready" | "networkidle2" | "timeout";
+      renderMs: number;
+      browserStartupMs: number;
+    };
 export type HeadlessRenderFn = (
   url: URL,
   target: ValidatedWebsiteTarget,
-  options: { timeoutMs: number; userAgent: string },
-) => Promise<string>;
+  options: { timeoutMs: number; userAgent: string; getBrowser: () => Promise<Browser> },
+) => Promise<HeadlessRenderOutcome>;
 
 /**
  * Renders a page with a real (headless) browser so JavaScript-only sites --
@@ -678,39 +726,19 @@ export type HeadlessRenderFn = (
 async function renderWithHeadlessBrowser(
   url: URL,
   target: ValidatedWebsiteTarget,
-  options: { timeoutMs: number; userAgent: string },
-): Promise<string> {
-  const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
-  if (!executablePath) {
-    throw new Error("Headless rendering is not configured on this server.");
-  }
-  const puppeteer = (await import("puppeteer-core")).default;
-
+  options: { timeoutMs: number; userAgent: string; getBrowser: () => Promise<Browser> },
+): Promise<HeadlessRenderOutcome> {
+  const renderStarted = performance.now();
+  const browserWaitStarted = renderStarted;
+  const browser = await options.getBrowser();
+  // Near-zero for every page after the first in a crawl, since the shared
+  // browser (see crawlWebsite's ensureBrowser) is already resolved by
+  // then -- only whichever page actually triggers the lazy launch pays
+  // (and reports) real startup time here.
+  const browserStartupMs = performance.now() - browserWaitStarted;
   const bareHostname = canonicalHostname(target.url.hostname);
-  const pinnedAddress =
-    target.resolvedAddresses.find((entry) => entry.family === 4)?.address ??
-    target.resolvedAddresses[0]?.address;
-  if (!pinnedAddress) {
-    throw new Error("No validated address is available for rendering.");
-  }
-  const hostResolverRules = [
-    `MAP ${bareHostname} ${pinnedAddress}`,
-    `MAP www.${bareHostname} ${pinnedAddress}`,
-  ].join(",");
-
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      `--host-resolver-rules=${hostResolverRules}`,
-    ],
-  });
+  const page = await browser.newPage();
   try {
-    const page = await browser.newPage();
     await page.setUserAgent(options.userAgent);
     await page.setRequestInterception(true);
     page.on("request", (request) => {
@@ -724,22 +752,82 @@ async function renderWithHeadlessBrowser(
       const sameHost =
         (requestUrl.protocol === "http:" || requestUrl.protocol === "https:") &&
         equivalentWebsiteHost(requestUrl.hostname, bareHostname);
-      if (sameHost) {
-        void request.continue();
-      } else {
+      if (!sameHost) {
         void request.abort();
+        return;
       }
+      // image/font/media never contribute a single character to the text
+      // this crawl exists to extract -- blocking them (even same-host, where
+      // they were previously allowed through unfiltered) cuts real network
+      // work and, as a side effect, gives networkidle2 fewer in-flight
+      // connections to wait out. Stylesheets are deliberately left alone:
+      // unlike the other three, CSS can affect which DOM text a framework
+      // treats as visible, and that hasn't been established safe to ignore.
+      const resourceType = request.resourceType();
+      if (resourceType === "image" || resourceType === "font" || resourceType === "media") {
+        void request.abort();
+        return;
+      }
+      void request.continue();
     });
+
+    const deadlineAt = renderStarted + options.timeoutMs;
     try {
-      await page.goto(url.toString(), { waitUntil: "networkidle2", timeout: options.timeoutMs });
+      await page.goto(url.toString(), {
+        waitUntil: "domcontentloaded",
+        timeout: Math.max(1_000, deadlineAt - performance.now()),
+      });
     } catch {
-      // A page that never reaches network-idle (long polling, websockets,
-      // analytics beacons) usually has its visible text in the DOM already --
-      // fall through and read whatever rendered instead of failing outright.
+      // Even an incomplete navigation usually leaves a body element in
+      // place -- fall through to the readiness race below rather than
+      // failing outright, matching the previous networkidle2-timeout
+      // fallback's own tolerance for an imperfect navigation.
     }
-    return await page.content();
+
+    const remainingMs = () => Math.max(0, deadlineAt - performance.now());
+    const CONTENT_READY_CHAR_THRESHOLD = 80; // matches the static-extraction threshold
+    const POLL_INTERVAL_MS = 250;
+
+    async function raceToLabel(work: Promise<boolean>, label: "content-ready" | "networkidle2") {
+      const ready = await work.catch(() => false);
+      return ready ? label : ("timeout" as const);
+    }
+
+    const contentReady = (async () => {
+      let previousLength = -1;
+      let sawStableRepeat = false;
+      while (performance.now() < deadlineAt) {
+        const length = await page
+          .evaluate(() => document.body?.innerText?.length ?? 0)
+          .catch(() => 0);
+        if (length >= CONTENT_READY_CHAR_THRESHOLD && length === previousLength) {
+          if (sawStableRepeat) return true;
+          sawStableRepeat = true;
+        } else {
+          sawStableRepeat = false;
+        }
+        previousLength = length;
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      }
+      return false;
+    })();
+
+    const budget = remainingMs();
+    const networkIdle = budget > 0
+      ? page.waitForNetworkIdle({ idleTime: 500, timeout: budget }).then(() => true).catch(() => false)
+      : Promise.resolve(false);
+
+    const completionReason = budget <= 0
+      ? ("timeout" as const)
+      : await Promise.race([
+          raceToLabel(contentReady, "content-ready"),
+          raceToLabel(networkIdle, "networkidle2"),
+        ]);
+
+    const html = await page.content();
+    return { html, completionReason, renderMs: performance.now() - renderStarted, browserStartupMs };
   } finally {
-    await browser.close();
+    await page.close().catch(() => {});
   }
 }
 
@@ -779,6 +867,50 @@ export async function crawlWebsite(
   let totalBytes = 0;
   let canonicalUrl = target.url.toString();
 
+  // Lazily launched on the first page that actually needs the render
+  // fallback, then reused for every subsequent page in this same crawl --
+  // a fresh Chromium process per rendered page was the single largest
+  // fixed cost in a multi-page render-heavy crawl. Every page in one
+  // crawlWebsite call shares the same target host, so the host-resolver
+  // pinning below is valid for all of them, not just whichever page
+  // triggered the launch. Not started at all if no page ever needs it, or
+  // if a test-injected renderImpl never calls getBrowser().
+  let sharedBrowserPromise: Promise<Browser> | undefined;
+  function ensureBrowser(): Promise<Browser> {
+    if (!sharedBrowserPromise) {
+      sharedBrowserPromise = (async () => {
+        const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
+        if (!executablePath) {
+          throw new Error("Headless rendering is not configured on this server.");
+        }
+        const puppeteer = (await import("puppeteer-core")).default;
+        const bareHostname = canonicalHostname(target.url.hostname);
+        const pinnedAddress =
+          target.resolvedAddresses.find((entry) => entry.family === 4)?.address ??
+          target.resolvedAddresses[0]?.address;
+        if (!pinnedAddress) {
+          throw new Error("No validated address is available for rendering.");
+        }
+        const hostResolverRules = [
+          `MAP ${bareHostname} ${pinnedAddress}`,
+          `MAP www.${bareHostname} ${pinnedAddress}`,
+        ].join(",");
+        return puppeteer.launch({
+          executablePath,
+          headless: true,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            `--host-resolver-rules=${hostResolverRules}`,
+          ],
+        });
+      })();
+    }
+    return sharedBrowserPromise;
+  }
+
   /**
    * Fetches and processes exactly one queued URL, mutating the shared
    * pages/failures/totalBytes/queue/queued state above. A failure here
@@ -789,7 +921,16 @@ export async function crawlWebsite(
    * this function does not re-check them itself.
    */
   async function fetchOnePage(next: URL): Promise<void> {
+    const pageStarted = performance.now();
+    let staticFetchMs = 0;
+    let staticChars = 0;
+    let headlessTriggered = false;
+    let browserStartupMs: number | undefined;
+    let renderMs: number | undefined;
+    let completionReason: PageCrawlTrace["completionReason"];
+    let finalChars = 0;
     try {
+      const fetchStarted = performance.now();
       const { response, finalUrl } = await fetchWithValidatedRedirects(next, {
         allowedHostname: target.url.hostname,
         timeoutMs,
@@ -817,9 +958,11 @@ export async function crawlWebsite(
       // enforced exactly (see the `reserved` counter below).
       const remainingBytes = Math.min(maxResponseBytes, maxTotalBytes - totalBytes);
       const loaded = await readLimitedText(response, remainingBytes);
+      staticFetchMs = performance.now() - fetchStarted;
       totalBytes += loaded.bytes;
       let pageHtml = loaded.text;
       let extracted = extractPage(pageHtml);
+      staticChars = extracted.text.length;
       let renderDiagnostic: string | undefined;
       if (extracted.text.length < 80) {
         // Static HTML alone was too thin -- likely a JavaScript-only page.
@@ -828,12 +971,20 @@ export async function crawlWebsite(
         // crash) leaves the too-thin static result in place below, but the
         // reason is kept so the eventual error is diagnosable instead of
         // always reading identically to "no fallback was even attempted."
+        headlessTriggered = true;
         try {
           const renderTarget = await validatePublicWebsiteUrl(finalUrl, resolver);
-          const renderedHtml = await renderImpl(finalUrl, renderTarget, {
+          const renderOutcome = await renderImpl(finalUrl, renderTarget, {
             timeoutMs: renderTimeoutMs,
             userAgent,
+            getBrowser: ensureBrowser,
           });
+          const renderedHtml = typeof renderOutcome === "string" ? renderOutcome : renderOutcome.html;
+          if (typeof renderOutcome !== "string") {
+            completionReason = renderOutcome.completionReason;
+            renderMs = renderOutcome.renderMs;
+            browserStartupMs = renderOutcome.browserStartupMs;
+          }
           const rendered = extractPage(renderedHtml);
           if (rendered.text.length >= 80) {
             extracted = rendered;
@@ -847,6 +998,7 @@ export async function crawlWebsite(
           }`;
         }
       }
+      finalChars = extracted.text.length;
       if (extracted.text.length < 80) {
         throw new Error(
           renderDiagnostic
@@ -871,10 +1023,34 @@ export async function crawlWebsite(
           queue.push(link);
         }
       }
+      options.onPageTrace?.({
+        url: next.toString(),
+        staticFetchMs,
+        staticChars,
+        headlessTriggered,
+        browserStartupMs,
+        renderMs,
+        completionReason,
+        finalChars,
+        totalMs: performance.now() - pageStarted,
+        outcome: "succeeded",
+      });
     } catch (error) {
       failures.push({
         url: next.toString(),
         reason: error instanceof Error ? error.message : "Unknown crawl error",
+      });
+      options.onPageTrace?.({
+        url: next.toString(),
+        staticFetchMs,
+        staticChars,
+        headlessTriggered,
+        browserStartupMs,
+        renderMs,
+        completionReason,
+        finalChars,
+        totalMs: performance.now() - pageStarted,
+        outcome: "failed",
       });
     }
   }
@@ -923,6 +1099,14 @@ export async function crawlWebsite(
     }
   }
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  // Only actually closes anything if some page triggered ensureBrowser()
+  // above; awaiting an undefined sharedBrowserPromise here would be a
+  // no-op anyway, but the explicit check keeps a crawl that never needed
+  // rendering from touching this at all.
+  if (sharedBrowserPromise) {
+    await sharedBrowserPromise.then((browser) => browser.close()).catch(() => {});
+  }
 
   if (pages.length === 0) {
     const detail = failures[0]?.reason ?? "No readable public HTML pages were found.";

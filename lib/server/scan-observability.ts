@@ -4,14 +4,17 @@ import { randomUUID } from "node:crypto";
 export type TraceAttributes = {
   provider?: string; model?: string; route?: string; operation?: string; stage?: string;
   category?: string; configId?: string; revision?: string; actorRunId?: string;
+  completionReason?: string;
   attempt?: number; statusCode?: number; candidates?: number; pages?: number;
   queries?: number; completed?: number; unresolved?: number; inputTokens?: number;
   outputTokens?: number; cachedInputTokens?: number; retryDelayMs?: number;
-  queueWaitMs?: number; firstResult?: boolean;
+  queueWaitMs?: number; firstResult?: boolean; headlessTriggered?: boolean;
   triageBudget?: number; reviewBudget?: number; acquisitionTarget?: number; embeddingFloor?: number;
   requiredFullContext?: number; websitePageBudget?: number; replyConcurrency?: number;
   providerTimeoutMs?: number; triageConcurrency?: number; triageBatchSize?: number;
   actorConcurrency?: number; postsPerQuery?: number;
+  staticFetchMs?: number; staticChars?: number; browserStartupMs?: number; renderMs?: number;
+  finalChars?: number; totalMs?: number;
 };
 export type TraceEvent = {
   version: 1; scanId: string; jobId?: string; executionId: string; jobAttempt: number;
@@ -24,9 +27,11 @@ const numericKeys = new Set([
   "inputTokens", "outputTokens", "cachedInputTokens", "retryDelayMs", "queueWaitMs",
   "triageBudget", "reviewBudget", "acquisitionTarget", "embeddingFloor", "requiredFullContext",
   "websitePageBudget", "replyConcurrency", "providerTimeoutMs", "triageConcurrency", "triageBatchSize", "actorConcurrency", "postsPerQuery",
+  "staticFetchMs", "staticChars", "browserStartupMs", "renderMs", "finalChars", "totalMs",
 ]);
 const stringKeys = new Set([
   "provider", "model", "route", "operation", "stage", "category", "configId", "revision", "actorRunId",
+  "completionReason",
 ]);
 function identifier(value: unknown): string | undefined {
   return typeof value === "string" && /^[a-zA-Z0-9_.:/-]{1,128}$/.test(value)
@@ -37,7 +42,7 @@ function attributes(input: TraceAttributes): TraceAttributes {
   for (const [key, value] of Object.entries(input)) {
     if (numericKeys.has(key) && typeof value === "number" && Number.isFinite(value) && value >= 0) result[key] = value;
     if (stringKeys.has(key)) { const safe = identifier(value); if (safe) result[key] = safe; }
-    if (key === "firstResult" && typeof value === "boolean") result[key] = value;
+    if ((key === "firstResult" || key === "headlessTriggered") && typeof value === "boolean") result[key] = value;
   }
   return result;
 }

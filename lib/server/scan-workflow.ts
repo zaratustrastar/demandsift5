@@ -146,7 +146,24 @@ async function observedCrawl(scan: ScanRecord): Promise<WebsiteCrawlResult> {
   const work = async () => {
     const execution = scanExecutions.get(scan);
     await execution?.guard.check();
-    return crawlWebsite(scan.websiteUrl, { maxPages: 4, signal: execution?.guard.signal });
+    const trace = scanTraces.get(scan)?.trace;
+    return crawlWebsite(scan.websiteUrl, {
+      maxPages: 4,
+      signal: execution?.guard.signal,
+      onPageTrace: trace
+        ? (event) => trace.milestone("website.page", {
+            headlessTriggered: event.headlessTriggered,
+            completionReason: event.completionReason,
+            staticFetchMs: Math.round(event.staticFetchMs),
+            staticChars: event.staticChars,
+            browserStartupMs: event.browserStartupMs !== undefined ? Math.round(event.browserStartupMs) : undefined,
+            renderMs: event.renderMs !== undefined ? Math.round(event.renderMs) : undefined,
+            finalChars: event.finalChars,
+            totalMs: Math.round(event.totalMs),
+            category: event.outcome,
+          })
+        : undefined,
+    });
   };
   const crawl = await (scanTraces.get(scan)?.trace.measure("website.crawl", work) ?? work());
   scan.websiteSnapshot = createWebsiteSnapshot(scan.id, scan.websiteUrl, crawl);

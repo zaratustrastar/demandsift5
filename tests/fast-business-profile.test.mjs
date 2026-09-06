@@ -62,7 +62,7 @@ test("website understanding crawls through the same SSRF-protected crawler, with
   const fnStart = workflow.indexOf("async function runFullWebsiteUnderstanding");
   const fnBody = workflow.slice(fnStart, workflow.indexOf("\n/**", fnStart));
   assert.match(fnBody, /observedCrawl\(scan\)/);
-  assert.match(workflow, /return crawlWebsite\(scan\.websiteUrl, \{ maxPages: 4, signal: execution\?\.guard\.signal \}\)/);
+  assert.match(workflow, /return crawlWebsite\(scan\.websiteUrl, \{\s*maxPages: 4,\s*signal: execution\?\.guard\.signal,/);
   assert.equal(/maxPages: 1/.test(fnBody), false, "the full understanding pass must not use the old homepage-only page budget");
   // No second, unprotected fetch/http/https import or call anywhere in this
   // file -- crawlWebsite is the only network entry point website analysis uses.

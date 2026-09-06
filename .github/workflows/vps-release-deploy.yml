@@ -1,7 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: measure the competitor-suggestion branch's own
-# duration independently of analyzeBusinessMs, to get a real background
-# number for the next UX-parallelization investigation (2026-09-06).
+# Release marker: UX-level parallelization -- enter Competitors as soon
+# as the competitor branch settles (ready or failed), not when
+# analyzeBusiness also finishes; Continue waits for analysisReady only
+# if still needed (2026-09-06).
 
 on:
   push:

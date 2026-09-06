@@ -44,10 +44,10 @@ test("saveAndContinue analyzes first when needed, then navigates on by itself --
   assert.match(fnBody.trimEnd(), /onContinue\(\);$/);
 });
 
-test("the primary button always reads 'Continue to keywords' (or 'Analyzing competitors…' while in flight) -- there is no separate 'Analyze competitors' label to teach the user", () => {
+test("the primary button always reads 'Continue to search setup' (or 'Analyzing competitors…' while in flight) -- there is no separate 'Analyze competitors' label to teach the user", () => {
   const buttonStart = source.indexOf('type="button" onClick={saveAndContinue}');
   const buttonBody = source.slice(buttonStart, buttonStart + 200);
-  assert.match(buttonBody, /"Continue to keywords/);
+  assert.match(buttonBody, /"Continue to search setup/);
   assert.equal(buttonBody.includes("Analyze competitors"), false);
 });
 

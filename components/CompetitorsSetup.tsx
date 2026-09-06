@@ -5,9 +5,9 @@ import { OnboardingHeader } from "./OnboardingHeader";
 import styles from "./DiscoveryProfile.module.css";
 
 /**
- * "Who do people compare you with?" (formerly "Competitors & alternatives")
- * -- a dedicated, optional step between submitting a website (or a freeform
- * description) and reviewing the business profile.
+ * "Who do people compare you with?" -- a dedicated, optional step between
+ * submitting a website (or a freeform description) and reviewing the
+ * business profile.
  *
  * This is a sidecar to the business-profile pipeline, not part of it: the
  * competitors analyzed here are stored completely separately
@@ -17,16 +17,18 @@ import styles from "./DiscoveryProfile.module.css";
  * this raw analysis -- is what scan-workflow.ts's reviewCompetitorTerms
  * actually searches.
  *
- * This screen now pre-fills suggested competitor *names* from that same
- * AI analysis (GET /api/scans/[scanId]/discovery-terms's derived.competitors
- * -- see business.competitors in scan-workflow.ts), reusing the existing
- * endpoint rather than adding a second competitor-generation path. That
- * data has never included a domain/URL for a named competitor -- only a
- * name -- so a suggested row shows the name Scooptr already found and
- * leaves the URL empty for the user to complete, rather than guessing one.
- * DiscoveryProfile.tsx's own chip list for these same names is unaffected;
- * this is a different, complementary use of it (prompting for a URL to
- * crawl, not editing which terms get searched).
+ * This screen pre-fills suggested competitors from GET
+ * /api/scans/[scanId]/competitor-url-suggestions, which independently
+ * verifies each proposed domain against its own homepage before ever
+ * returning it (see lib/server/competitor-url-resolution.ts) -- a
+ * suggested row's URL is only ever pre-filled when that verification
+ * succeeded, never a raw guess. A name can still exist with no verified
+ * URL (analysis found the competitor but resolution couldn't confirm a
+ * domain, or found none at all); that row just shows the name with an
+ * empty, editable URL field for the user to complete. DiscoveryProfile.tsx's
+ * own chip list for these same names is unaffected; this is a different,
+ * complementary use of it (prompting for a URL to crawl, not editing which
+ * terms get searched).
  *
  * Skipping this step, or entering nothing, leaves scan behavior identical
  * to not having this feature at all: it continues with category/problem
@@ -102,25 +104,33 @@ export function CompetitorsSetup({
   // itself: that endpoint is also polled by DiscoveryProfile.tsx for
   // unrelated fields, and URL resolution/verification (model lookup +
   // homepage fetches) is real extra latency this screen wants but that one
-  // never should pay. If this fails or returns nothing, the fallback
-  // single-empty-row state below is indistinguishable from "there were
-  // never any suggestions to fetch."
+  // never should pay. When there are no suggestions at all (analysis found
+  // no named competitors), one empty row is seeded below so the screen
+  // still shows an input to type into, rather than only a "+ Add a
+  // competitor" link with nothing visible until it's clicked.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const response = await fetch(`/api/scans/${encodeURIComponent(scanId)}/competitor-url-suggestions`, { cache: "no-store" });
-        if (!response.ok) return;
+        if (!response.ok) {
+          if (!cancelled) setRows([{ id: nextRowId(), url: "" }]);
+          return;
+        }
         const payload = (await response.json()) as { suggestions?: Array<{ name: string; url: string | null }> };
         if (cancelled) return;
         const suggestions = (payload.suggestions ?? []).slice(0, MAX_COMPETITOR_URLS);
         setSuggestionCount(suggestions.length);
-        if (suggestions.length > 0) {
-          setRows(suggestions.map(({ name, url }) => ({ id: nextRowId(), suggestedName: name, url: url ? cleanDomain(url) : "" })));
-        }
+        setRows(
+          suggestions.length > 0
+            ? suggestions.map(({ name, url }) => ({ id: nextRowId(), suggestedName: name, url: url ? cleanDomain(url) : "" }))
+            : [{ id: nextRowId(), url: "" }],
+        );
       } catch {
-        // Suggestions are a nice-to-have -- the single-empty-row fallback
-        // below covers this the same as a genuine zero-suggestions result.
+        // Suggestions are a nice-to-have -- if the request itself fails,
+        // still seed one empty row rather than leaving the screen with
+        // only a "+ Add a competitor" link and nothing to type into.
+        if (!cancelled) setRows([{ id: nextRowId(), url: "" }]);
       } finally {
         if (!cancelled) setSuggestionsLoaded(true);
       }
@@ -288,7 +298,7 @@ export function CompetitorsSetup({
           Skip for now
         </button>
         <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={analyzing}>
-          {analyzing ? "Analyzing competitors…" : "Continue to keywords →"}
+          {analyzing ? "Analyzing competitors…" : "Continue to search setup →"}
         </button>
       </footer>
     </main>

@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: fix queue-blocking incident -- classify persistent
-# crawl HTTP errors (401/403/404/410/451) as non-retryable so a failing
-# scan releases its worker slot promptly instead of monopolizing it for
-# ~30 minutes via stacked workflow+queue retries (2026-09-07).
+# Release marker: switch competitor-suggestion model from gpt-5.6-luna
+# (deepseek-v4-flash) to gpt-5.6-sol -- real production scan measured
+# 73.6s, reproduced live at 70.4s, same unreliability already
+# documented for analyzeBusiness() (2026-09-07).
 
 on:
   push:

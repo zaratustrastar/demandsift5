@@ -1,7 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: redesign the pre-input understanding screen into a
-# two-column workspace (real scan progress + progressive business-profile
-# reveal), replacing the centered card and orbit loader (2026-09-07).
+# Release marker: fail fast on a sustained (repeated, same-status)
+# website fetch failure like Amazon's persistent 503, and let a scan
+# whose website could not be read recover with a manual description
+# instead of being a dead end (2026-09-07).
 
 on:
   push:

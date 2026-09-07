@@ -845,3 +845,405 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
   flex-direction: column;
   align-items: center;
 }
+
+/* ============================================================
+   Understanding workspace -- redesigned pre-input scan screen.
+   Applied alongside .scanScreen (reuses its --ink/--muted/--paper/
+   --green/--line custom properties) via a separate class so the
+   post-input "Market Scan" screen's existing .scanPanel/.orbit/etc.
+   styles are completely untouched.
+   ============================================================ */
+
+.uwScreen {
+  overflow: visible;
+  background: var(--paper);
+  padding-bottom: 48px;
+}
+
+.uwWorkspace {
+  max-width: 1140px;
+  margin: 0 auto;
+  padding: 0 28px;
+}
+
+.uwHeader {
+  margin-top: 36px;
+  max-width: 700px;
+}
+
+.uwEyebrow {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--green);
+  margin-bottom: 10px;
+}
+
+.uwHeadline {
+  margin: 0 0 12px;
+  max-width: 700px;
+  font-size: 40px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 620;
+  color: var(--ink);
+}
+
+.uwSupport {
+  margin: 0;
+  max-width: 650px;
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* Small activity indicator -- replaces the old large orbit loader. */
+.uwActivity {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin: 24px 0 32px;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.uwActivityDot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: uwPulse 1.6s ease-in-out infinite;
+  align-self: center;
+}
+
+.uwActivityDotDone {
+  animation: none;
+}
+
+.uwActivityDotFailed {
+  animation: none;
+  background: #dc2626;
+}
+
+.uwActivityLabel {
+  font-weight: 560;
+}
+
+.uwActivityHelper {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@keyframes uwPulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+/* Two-column analysis area. */
+.uwColumns {
+  display: grid;
+  grid-template-columns: 42% 1fr;
+  gap: 32px;
+  align-items: start;
+  padding: 28px 0;
+  border-top: 1px solid var(--line);
+}
+
+.uwColumnTitle {
+  margin: 0 0 16px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.uwStepList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.uwStep {
+  display: flex;
+  gap: 12px;
+  padding: 11px 0;
+  position: relative;
+}
+
+.uwStep:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 30px;
+  bottom: -11px;
+  width: 1px;
+  background: var(--line);
+}
+
+.uwStepMarker {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  z-index: 1;
+  background: var(--paper);
+}
+
+.uwStepDone .uwStepMarker {
+  background: var(--green);
+  color: #fff;
+}
+
+.uwStepActive .uwStepMarker {
+  color: var(--green);
+  border: 1.5px solid var(--green);
+}
+
+.uwStepFuture .uwStepMarker {
+  color: #d4d4d8;
+  border: 1.5px solid var(--line);
+}
+
+.uwStep strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.uwStep small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.uwStepFuture strong,
+.uwStepFuture small {
+  color: #a1a1aa;
+}
+
+.uwRightHelper {
+  margin: -10px 0 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.uwFields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.uwField {
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.uwField:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.uwFieldLabel {
+  display: block;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.uwFieldValue {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.uwFieldPending {
+  margin: 0;
+  font-size: 14px;
+  color: #a1a1aa;
+  font-style: italic;
+}
+
+.uwFieldList {
+  margin: 0;
+  padding: 0 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.uwFieldList li {
+  font-size: 14.5px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.uwFieldReady {
+  animation: uwFadeIn 0.4s ease both;
+}
+
+@keyframes uwFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Expectation setter. */
+.uwNextNote {
+  margin: 0 0 24px;
+  padding-top: 4px;
+  font-size: 13.5px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.uwNextNote span {
+  color: var(--green);
+}
+
+/* Footer: background-running reassurance, return link, trust microcopy, scan details. */
+.uwFooter {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.uwFooterRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.uwFooterStatus {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.uwFooterDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+}
+
+.uwCopyLink {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 7px 13px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.uwCopyLink:hover {
+  border-color: #d4d4d8;
+}
+
+.uwFooterHint {
+  margin: 0;
+  font-size: 11.5px;
+  color: #a1a1aa;
+}
+
+.uwTrust {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: #a1a1aa;
+}
+
+.uwDetails {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.uwDetails summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.uwDetailsBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #fafafa;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+@media (max-width: 900px) {
+  .uwColumns {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+  .uwHeadline {
+    font-size: 32px;
+  }
+}
+
+@media (max-width: 640px) {
+  .uwWorkspace {
+    padding: 0 20px;
+  }
+  .uwHeader {
+    margin-top: 24px;
+  }
+  .uwHeadline {
+    font-size: 27px;
+  }
+  .uwSupport {
+    font-size: 15px;
+  }
+  .uwFooterRow {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .uwActivityDot,
+  .uwFieldReady {
+    animation: none;
+  }
+}

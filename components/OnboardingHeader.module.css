@@ -45,7 +45,7 @@
 .steps {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -58,6 +58,18 @@
   font-weight: 500;
   color: #a1a1aa;
   white-space: nowrap;
+  position: relative;
+}
+
+/* A very subtle connector between steps -- understated, not a checkout
+ * wizard's heavy progress bar. Skipped before the first step. */
+.step:not(:first-child)::before {
+  content: "";
+  width: 14px;
+  height: 1px;
+  background: #e4e4e7;
+  margin-right: 7px;
+  flex-shrink: 0;
 }
 
 .stepDot {

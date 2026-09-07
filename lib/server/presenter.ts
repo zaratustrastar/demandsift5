@@ -19,6 +19,10 @@ export function presentScanLifecycle(scan: ScanRecord) {
       summary: scan.discoveryProfile.profile.summary,
       targetAudience: scan.discoveryProfile.profile.targetAudience,
       problemsSolved: scan.discoveryProfile.profile.problemsSolved,
+      // Already produced by analyzeBusiness(); newly exposed here to back
+      // the redesigned understanding screen's "USE CASES" field. See the
+      // matching comment on ApiScanResponse's type in from-scan.ts.
+      jobsToBeDone: scan.discoveryProfile.profile.jobsToBeDone ?? [],
     } : null };
 }
 

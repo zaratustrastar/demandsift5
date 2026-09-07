@@ -197,6 +197,11 @@ export type ApiScanResponse = {
       summary: string;
       targetAudience: string[];
       problemsSolved: string[];
+      /** Already produced by analyzeBusiness() (see ScanBusinessProfile in
+       * lib/server/contracts.ts) but not previously exposed to the client
+       * -- added specifically to back the "USE CASES" field the redesigned
+       * understanding screen shows, not a new backend capability. */
+      jobsToBeDone: string[];
     } | null;
     runtimeProgress?: import("@/lib/domain/scan-progress").ScanRuntimeProgress;
     completionNotice?: {

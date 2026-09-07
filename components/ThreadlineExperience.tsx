@@ -173,7 +173,15 @@ function useProgressClock(): number {
   return now;
 }
 
-function StageProgress({ rows, scan, connected, account }: { rows: StageRow[]; scan?: ApiScanResponse["scan"]; connected: boolean; account?: LandingAccount | null }) {
+/**
+ * Derives the same queued/retrying/stopped/heartbeat-delayed state and
+ * human status message that StageProgress has always computed inline --
+ * extracted so the new pre-input understanding workspace (Scanning's
+ * isPreInput branch) can share it exactly rather than re-deriving (and
+ * risking drifting from) the same logic. Behavior is unchanged: this is
+ * the same computation, just callable from two places.
+ */
+function useScanStatus(scan: ApiScanResponse["scan"] | undefined, connected: boolean) {
   const progress = scan?.runtimeProgress;
   const now = useProgressClock();
   const elapsed = scanElapsedMs(progress, now);
@@ -182,23 +190,24 @@ function StageProgress({ rows, scan, connected, account }: { rows: StageRow[]; s
   const age = (time: string | null | undefined) => time && Number.isFinite(Date.parse(time)) ? durationLabel(now - Date.parse(time)) : null;
   const heartbeat = age(progress?.heartbeatAt), lastWork = age(progress?.lastWorkAt);
   const heartbeatDelayed = !!progress?.heartbeatAt && now - Date.parse(progress.heartbeatAt) > 90_000;
-  // A stopped scan (scan.status === "failed") almost always also has a
-  // stale heartbeat -- nothing is refreshing it anymore -- so this check
-  // must come before heartbeatDelayed below, or a scan that has already
-  // reached its terminal state keeps showing "checking for recovery"
-  // forever even though nothing will ever recover it. See
-  // lib/server/scan-execution.ts's ScanExecutionTimeoutError and
-  // scripts/background-worker.mjs's TERMINAL_SCAN_ERROR_CODES: once a scan
-  // lands on "failed" it is done, not paused.
+  // See StageProgress's original comment: a stopped scan almost always
+  // also has a stale heartbeat, so this must be checked before
+  // heartbeatDelayed or a terminal scan shows "checking for recovery"
+  // forever.
   const stoppedForGood = scan?.status === "failed";
-  const [copied, setCopied] = useState(false);
   const message = !connected ? "Connection interrupted. Showing the last saved status; reconnecting automatically."
-    : queued ? "Accepted and waiting for an available worker."
+    : queued ? "Your scan is queued and will start automatically."
     : retrying ? "A retry is scheduled. Completed work is saved."
     : !scan?.durable && (!scan || scan.phase === "created") ? "Confirming that background work has been accepted…"
     : stoppedForGood ? "This scan stopped and won't retry automatically. Saved progress below is still available."
     : heartbeatDelayed ? "No update in a while. Still working; saved progress is still available."
     : "Updates appear as each check finishes.";
+  return { progress, now, elapsed, queued, retrying, heartbeat, lastWork, heartbeatDelayed, stoppedForGood, message };
+}
+
+function StageProgress({ rows, scan, connected, account }: { rows: StageRow[]; scan?: ApiScanResponse["scan"]; connected: boolean; account?: LandingAccount | null }) {
+  const { progress, elapsed, queued, retrying, heartbeat, lastWork, stoppedForGood, message } = useScanStatus(scan, connected);
+  const [copied, setCopied] = useState(false);
 
   return (
     <>
@@ -239,7 +248,7 @@ function StageProgress({ rows, scan, connected, account }: { rows: StageRow[]; s
           <button className={styles.returnLink} type="button" onClick={async () => {
             const link = new URL(window.location.pathname, window.location.origin); link.searchParams.set("scan_id", scan.id);
             setCopied(await copyText(link.toString()));
-          }}>{copied ? "Return link copied" : "Copy link to return later"}</button>
+          }}>{copied ? "Link copied" : "Copy scan link"}</button>
           {!account && <p className={styles.returnLinkHint}>Keep this link if you&rsquo;re scanning without an account.</p>}
         </>
       )}
@@ -1343,14 +1352,22 @@ function Scanning({
   // state where, say, the product is known but the audience isn't: only
   // "not yet" and "all of it." Showing anything more granular than that
   // would be inventing progress the backend never reported.
-  //
-  // approvedProfile (see presentScanLifecycle in lib/server/presenter.ts)
-  // is a deliberately narrowed { name, summary, targetAudience,
-  // problemsSolved } -- not the full ScanBusinessProfile, and not nested
-  // under a further .profile -- productCategory specifically is not sent
-  // to the client at all, so "Product" below is the business summary,
-  // the closest real field actually available here.
   const foundProfile = scan?.approvedProfile;
+
+  if (isPreInput) {
+    return (
+      <UnderstandingWorkspace
+        isContext={isContext}
+        domain={domain}
+        stepIndex={stepIndex}
+        rows={rows}
+        scan={scan}
+        connected={connected}
+        account={account}
+        foundProfile={foundProfile}
+      />
+    );
+  }
 
   return (
     <main className={styles.scanScreen}>
@@ -1360,75 +1377,228 @@ function Scanning({
           <div className={styles.orbit}><i /><i /><i /></div>
           <span>↗</span>
         </div>
-        {isPreInput ? (
-          <>
-            <div className={styles.scanKicker}>
-              {isContext ? "Learning about your business" : `Learning about ${domain}`}
-            </div>
-            <h1>First, we learn what you actually sell.</h1>
-            <p>
-              Scooptr is reading your website to understand your product, audience and the problems
-              you solve. You&rsquo;ll review what we found before we search Reddit.
-            </p>
-          </>
-        ) : (
-          <>
-            <div className={styles.scanKicker}>Your Market Scan</div>
-            <h1>Finding and checking relevant conversations</h1>
-            <p>
-              Search and AI response times vary. We keep the full search and review depth, and show
-              completed checks below.
-            </p>
-          </>
-        )}
+        <div className={styles.scanKicker}>Your Market Scan</div>
+        <h1>Finding and checking relevant conversations</h1>
+        <p>
+          Search and AI response times vary. We keep the full search and review depth, and show
+          completed checks below.
+        </p>
         <StageProgress
           rows={rows}
           scan={scan}
           connected={connected}
           account={account}
         />
-        {isPreInput && (
-          <section className={styles.findingsSection} aria-label="What we're finding">
-            <h2>What we&rsquo;re finding</h2>
-            {foundProfile ? (
-              <div className={styles.findingsList}>
-                {foundProfile.summary && (
-                  <div className={styles.findingsItem}>
-                    <span aria-hidden="true">✓</span>
-                    <div><strong>Product</strong><small>{foundProfile.summary}</small></div>
-                  </div>
-                )}
-                {foundProfile.targetAudience.length > 0 && (
-                  <div className={styles.findingsItem}>
-                    <span aria-hidden="true">✓</span>
-                    <div><strong>Likely audience</strong><small>{foundProfile.targetAudience.join(", ")}</small></div>
-                  </div>
-                )}
-                {foundProfile.problemsSolved.length > 0 && (
-                  <div className={styles.findingsItem}>
-                    <span aria-hidden="true">✓</span>
-                    <div><strong>Problems</strong><small>{foundProfile.problemsSolved.slice(0, 2).join("; ")}</small></div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className={styles.findingsList}>
-                <div className={styles.findingsItem}>
-                  <span aria-hidden="true">●</span>
-                  <div><strong>Product, audience and problems</strong><small>Analyzing your business…</small></div>
-                </div>
-              </div>
-            )}
-          </section>
-        )}
-        {isPreInput && !allDone && (
-          <p className={styles.upNextNote}><strong>Up next:</strong> Competitors and search setup</p>
-        )}
         {!isContext && (
           <div className={styles.domainSafety}>🔒 We only read public pages on <b>{domain}</b></div>
         )}
       </section>
     </main>
+  );
+}
+
+/**
+ * The redesigned pre-input "understanding" screen: a workspace-style
+ * layout (progress + live business-profile reveal) shown from the moment
+ * a user submits their website/description until they reach the
+ * competitors review screen. Replaces the old centered card + orbit
+ * loader. Deliberately a separate component from Scanning's post-input
+ * branch (the "Market Scan" screen) rather than a shared one with more
+ * conditionals -- that screen's own layout and StageProgress usage are
+ * untouched by this redesign.
+ */
+function UnderstandingWorkspace({
+  isContext,
+  domain,
+  stepIndex,
+  rows,
+  scan,
+  connected,
+  account,
+  foundProfile,
+}: {
+  isContext: boolean;
+  domain: string;
+  stepIndex: number;
+  rows: StageRow[];
+  scan?: ApiScanResponse["scan"];
+  connected: boolean;
+  account?: LandingAccount | null;
+  foundProfile?: ApiScanResponse["scan"]["approvedProfile"];
+}) {
+  const { queued, retrying, stoppedForGood, heartbeatDelayed, elapsed, heartbeat, lastWork } = useScanStatus(scan, connected);
+  const [copied, setCopied] = useState(false);
+
+  const websiteRow = rows.find((row) => row.id === "website");
+  const understandingRow = rows.find((row) => row.id === "understanding");
+  const allDone = websiteRow?.status === "complete" && understandingRow?.status === "complete";
+
+  const activityLabel = stoppedForGood
+    ? "We couldn\u2019t finish this step"
+    : queued
+    ? "Preparing your analysis\u2026"
+    : allDone
+    ? "Analysis complete"
+    : retrying
+    ? "Retry scheduled\u2026"
+    : "Analyzing your business\u2026";
+
+  const eyebrow = isContext ? "ANALYZING YOUR BUSINESS" : `ANALYZING ${domain.toUpperCase()}`;
+
+  const uwRowStatus = (row: StageRow | undefined): "complete" | "active" | "future" =>
+    row?.status === "complete" ? "complete" : row?.status === "active" ? "active" : "future";
+
+  return (
+    <main className={`${styles.scanScreen} ${styles.uwScreen}`}>
+      <OnboardingHeader activeIndex={stepIndex} />
+      <div className={styles.uwWorkspace}>
+        <header className={styles.uwHeader}>
+          <div className={styles.uwEyebrow}>{eyebrow}</div>
+          <h1 className={styles.uwHeadline}>We&rsquo;re learning how your business fits into Reddit.</h1>
+          <p className={styles.uwSupport}>
+            First we understand what you sell, who it&rsquo;s for and what problems you solve. Then
+            we&rsquo;ll find the conversations where your business actually belongs.
+          </p>
+        </header>
+
+        <div className={styles.uwActivity} role="status" aria-live="polite">
+          <span
+            className={`${styles.uwActivityDot} ${allDone ? styles.uwActivityDotDone : ""} ${stoppedForGood ? styles.uwActivityDotFailed : ""}`}
+            aria-hidden="true"
+          />
+          <span className={styles.uwActivityLabel}>{activityLabel}</span>
+          {queued && <span className={styles.uwActivityHelper}>Your scan is queued and will start automatically.</span>}
+          {heartbeatDelayed && !stoppedForGood && (
+            <span className={styles.uwActivityHelper}>Some websites take a little longer to analyze. Your progress is saved.</span>
+          )}
+        </div>
+
+        <div className={styles.uwColumns}>
+          <section className={styles.uwLeft} aria-label="Scan progress">
+            <h2 className={styles.uwColumnTitle}>Scan progress</h2>
+            <ol className={styles.uwStepList}>
+              <UwStep
+                status={uwRowStatus(websiteRow)}
+                label={isContext ? "Business description" : "Website read"}
+                detail={
+                  websiteRow?.status === "complete"
+                    ? websiteRow.detail
+                    : isContext
+                    ? "Using your description; no website crawl is needed"
+                    : "Public pages found and analyzed"
+                }
+              />
+              <UwStep
+                status={uwRowStatus(understandingRow)}
+                label="Understanding your business"
+                detail="Mapping your product, audience and problems"
+              />
+              <UwStep status="future" label="Finding competitors" detail="Identifying the products your buyers compare you with" />
+              <UwStep status="future" label="Building search strategy" detail="Creating the concepts and queries worth monitoring" />
+              <UwStep status="future" label="Searching Reddit" detail="Finding and ranking relevant conversations" />
+            </ol>
+          </section>
+
+          <section className={styles.uwRight} aria-label="What we're learning">
+            <h2 className={styles.uwColumnTitle}>What we&rsquo;re learning</h2>
+            <p className={styles.uwRightHelper}>This becomes the context Scooptr uses to judge every Reddit conversation.</p>
+            <div className={styles.uwFields}>
+              <UwField label="Product" value={foundProfile?.summary} ready={!!foundProfile} />
+              <UwField
+                label="Audience"
+                value={foundProfile && foundProfile.targetAudience.length > 0 ? foundProfile.targetAudience.join(", ") : undefined}
+                ready={!!foundProfile}
+              />
+              <UwField label="Core problems" values={foundProfile?.problemsSolved} ready={!!foundProfile} />
+              <UwField label="Use cases" values={foundProfile?.jobsToBeDone} ready={!!foundProfile} />
+            </div>
+          </section>
+        </div>
+
+        <p className={styles.uwNextNote}>
+          <span aria-hidden="true">→</span> Next: you&rsquo;ll review this before we search Reddit.
+        </p>
+
+        <div className={styles.uwFooter}>
+          <div className={styles.uwFooterRow}>
+            <span className={styles.uwFooterStatus}>
+              <i className={styles.uwFooterDot} aria-hidden="true" />
+              Scan keeps running if you leave this page
+            </span>
+            {scan?.durable && (
+              <button
+                className={styles.uwCopyLink}
+                type="button"
+                onClick={async () => {
+                  const link = new URL(window.location.pathname, window.location.origin);
+                  link.searchParams.set("scan_id", scan.id);
+                  setCopied(await copyText(link.toString()));
+                }}
+              >
+                {copied ? "Link copied" : "Copy scan link"}
+              </button>
+            )}
+          </div>
+          {scan?.durable && !account && <p className={styles.uwFooterHint}>Save this link to return to your scan later.</p>}
+          {!isContext && <p className={styles.uwTrust}>🔒 Only public pages on {domain} are analyzed.</p>}
+          {(elapsed !== null || lastWork || heartbeat) && (
+            <details className={styles.uwDetails}>
+              <summary>Scan details</summary>
+              <div className={styles.uwDetailsBody}>
+                {elapsed !== null && <span>Running for {durationLabel(elapsed)}</span>}
+                {lastWork && <span>Last update {lastWork} ago</span>}
+                {heartbeat && <span>Worker check-in {heartbeat} ago</span>}
+                {scan?.status && <span>Status: {scan.status}</span>}
+              </div>
+            </details>
+          )}
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function UwStep({ status, label, detail }: { status: "complete" | "active" | "future"; label: string; detail: string }) {
+  return (
+    <li
+      className={`${styles.uwStep} ${
+        status === "complete" ? styles.uwStepDone : status === "active" ? styles.uwStepActive : styles.uwStepFuture
+      }`}
+    >
+      <span className={styles.uwStepMarker} aria-hidden="true">{status === "complete" ? "✓" : status === "active" ? "●" : "○"}</span>
+      <div>
+        <strong>{label}</strong>
+        <small>{detail}</small>
+      </div>
+    </li>
+  );
+}
+
+function UwField({ label, value, values, ready }: { label: string; value?: string; values?: string[]; ready: boolean }) {
+  const hasContent = value ? true : !!(values && values.length > 0);
+  // The backend genuinely returned nothing for this specific field (rare,
+  // but possible -- see ScanBusinessProfile's optional fields) -- an empty
+  // box would be worse than omitting it, and showing "Analyzing..."
+  // forever for a field that will never populate would misrepresent the
+  // real state.
+  if (ready && !hasContent) return null;
+  return (
+    <div className={`${styles.uwField} ${hasContent ? styles.uwFieldReady : ""}`}>
+      <span className={styles.uwFieldLabel}>{label}</span>
+      {hasContent ? (
+        values ? (
+          <ul className={styles.uwFieldList}>
+            {values.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className={styles.uwFieldValue}>{value}</p>
+        )
+      ) : (
+        <p className={styles.uwFieldPending}>Analyzing&hellip;</p>
+      )}
+    </div>
   );
 }
 

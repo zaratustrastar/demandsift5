@@ -951,6 +951,8 @@ export class PostgresStateRepository implements StateRepository {
       'analysisCompletedAt', ${runtimeScans.record}->>'analysisCompletedAt',
       'discoveryProfile', case when nullif(${runtimeScans.record}->'discoveryProfile', 'null'::jsonb) is not null
         then jsonb_build_object('profileStage', ${runtimeScans.record}#>>'{discoveryProfile,profileStage}') else null end,
+      'competitorSuggestions', case when nullif(${runtimeScans.record}->'competitorSuggestions', 'null'::jsonb) is not null
+        then jsonb_build_object('status', ${runtimeScans.record}#>>'{competitorSuggestions,status}') else null end,
       'approval', nullif(${runtimeScans.record}->'approval', 'null'::jsonb) is not null,
       'durableJob', case when ${runtimeScans.record}#>>'{durableJob,id}' is not null
         then jsonb_build_object('acceptedAt', ${runtimeScans.record}#>>'{durableJob,acceptedAt}') else null end,

@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix competitorSuggestions missing from the status-poll
-# SQL projection, which was silently defeating the UX parallelization
-# (competitorsReady was always false via that endpoint) (2026-09-07).
+# Release marker: fix background polling stopping the instant the
+# Competitors screen appeared, which broke Continue-before-ready
+# auto-advance to the next screen (2026-09-07).
 
 on:
   push:

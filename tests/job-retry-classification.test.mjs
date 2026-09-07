@@ -112,3 +112,42 @@ test("Reddit enrichment exhaustion remains terminal", () => {
   assert.equal(code, "reddit_enrichment_failed");
   assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), false);
 });
+
+// Real production incident: a site returning a persistent 403 kept a
+// worker slot occupied for ~30 minutes across repeated queue-level
+// retries, each re-running the full crawl, because nothing distinguished
+// "the site is actively refusing this" from an ordinary transient
+// failure. These pin the fix: PermanentWebsiteFetchError's own .code is
+// recognized directly by scanPipelineErrorCode (not by fragile message
+// matching) and lands in the terminal set, while ordinary transient
+// crawl failures (429, 5xx, network errors -- still a plain Error) stay
+// exactly as retryable as before.
+test("a persistent 403/401/404/410/451 from the crawler is classified terminal, not retried", () => {
+  for (const status of [401, 403, 404, 410, 451]) {
+    const error = { name: "PermanentWebsiteFetchError", code: "website_permanently_unreachable", status, message: `Website returned HTTP ${status}.` };
+    const code = scanPipelineErrorCode(error);
+    assert.equal(code, "website_permanently_unreachable", `status ${status} should classify as terminal`);
+    assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), false, `status ${status} should not retry`);
+  }
+});
+
+test("website_permanently_unreachable is in the terminal set (and stays in sync with the worker script's copy, per the test above)", () => {
+  assert.ok(JOB_LEVEL_TERMINAL_ERROR_CODES.has("website_permanently_unreachable"));
+});
+
+test("a repeated 429 or 5xx from the crawler remains retryable, unlike a permanent status", () => {
+  for (const status of [429, 500, 502, 503]) {
+    const error = new Error(`Website returned HTTP ${status}.`);
+    const code = scanPipelineErrorCode(error);
+    assert.equal(code, undefined, `status ${status} should not be classified terminal`);
+    assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), true, `status ${status} should still retry`);
+  }
+});
+
+test("a temporary network error (timeout, DNS, connection reset) during crawling remains retryable", () => {
+  for (const message of ["fetch failed: ETIMEDOUT", "getaddrinfo ENOTFOUND example.com", "socket hang up"]) {
+    const code = scanPipelineErrorCode(new Error(message));
+    assert.equal(code, undefined);
+    assert.equal(jobWillRetryScanFailure({ code, jobAttempts: 1, jobMaxAttempts: 5 }), true);
+  }
+});

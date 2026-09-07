@@ -1182,6 +1182,9 @@ const TERMINAL_SCAN_ERROR_CODES = new Set([
   "apify_start_ambiguous",
   "apify_recovery_exhausted",
   "apify_reconciliation_required",
+  // Kept in sync by hand with lib/server/job-retry-classification.ts's
+  // JOB_LEVEL_TERMINAL_ERROR_CODES -- see that file's doc comment.
+  "website_permanently_unreachable",
 ]);
 
 function executorErrorCode(responseText) {

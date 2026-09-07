@@ -39,7 +39,7 @@ import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv, analysisReasoningEffortFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
 import type { TriageProcessingOutcome } from "@/lib/providers/contracts";
 import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
-import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
+import { crawlWebsite, UnsafeWebsiteUrlError, PermanentWebsiteFetchError } from "@/lib/security/website-crawler";
 import type { WebsiteCrawlResult, PageCrawlTrace } from "@/lib/security/website-crawler";
 import type {
   CompetitorProfile,
@@ -607,6 +607,46 @@ export interface WebsiteUnderstandingDiagnostics {
   attempts: number;
 }
 
+/**
+ * Real production incident: a site returning a persistent 403 kept a
+ * worker slot occupied for ~30 minutes, because nothing bounded how long
+ * a single website-understanding attempt (crawl + analyzeBusiness +
+ * competitor suggestion) could run before the job queue's own retry
+ * disposition even got a chance to act. PermanentWebsiteFetchError
+ * classification (see website-crawler.ts and
+ * job-retry-classification.ts) fixes the specific 401/403/404/410/451
+ * case by making the very next attempt short-circuit, but this timeout
+ * is the defense-in-depth backstop for anything else that could hang
+ * this phase (a slow-drip response, a stuck headless render, some other
+ * failure mode nothing has classified yet): normal completion has
+ * measured at well under 90s across every site benchmarked this
+ * session, so 3 minutes is generous headroom, not a tight budget. Left
+ * retryable (not added to JOB_LEVEL_TERMINAL_ERROR_CODES) since a
+ * timeout alone doesn't prove the cause was permanent -- the existing
+ * queue-level attempt cap and backoff already bound how many times this
+ * can recur.
+ */
+const WEBSITE_UNDERSTANDING_TIMEOUT_MS = 3 * 60_000;
+class WebsiteUnderstandingTimeoutError extends Error {
+  constructor() {
+    super(`Website understanding did not complete within ${WEBSITE_UNDERSTANDING_TIMEOUT_MS / 60_000} minute(s).`);
+    this.name = "WebsiteUnderstandingTimeoutError";
+  }
+}
+async function withWebsiteUnderstandingWatchdog<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new WebsiteUnderstandingTimeoutError()), WEBSITE_UNDERSTANDING_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
   business: BusinessUnderstanding;
   profile: ScanBusinessProfile;
@@ -716,6 +756,14 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
         break;
       } catch (error) {
         lastError = error;
+        // A permanently unreachable site (401/403/404/410/451) will
+        // answer exactly the same way on a second attempt -- retrying
+        // wastes the attempt budget and, more importantly, the wall-clock
+        // time a stuck worker spends before this scan can ever release
+        // its slot. Break immediately; the outer job queue's own
+        // disposition (job-retry-classification.ts) is what actually
+        // stops this from being retried again as a whole new job.
+        if (error instanceof PermanentWebsiteFetchError) break;
         if (attempt < UNDERSTANDING_ATTEMPTS - 1) {
           await new Promise((resolve) => setTimeout(resolve, 1_500));
         }
@@ -1359,7 +1407,7 @@ export async function runScan(
         return scan;
       }
 
-      const full = await runFullWebsiteUnderstanding(scan);
+      const full = await withWebsiteUnderstandingWatchdog(runFullWebsiteUnderstanding(scan));
       const pageCount = scan.websiteSnapshot?.crawl.pages.length ?? 0;
       await setStage(scan, "website", "complete", `${pageCount} public page${pageCount === 1 ? "" : "s"} read from the submitted domain.`);
       scan.discoveryProfile = {

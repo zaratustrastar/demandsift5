@@ -34,6 +34,13 @@ export const JOB_LEVEL_TERMINAL_ERROR_CODES = new Set([
   "apify_start_ambiguous",
   "apify_recovery_exhausted",
   "apify_reconciliation_required",
+  // 401/403/404/410/451 from lib/security/website-crawler.ts's
+  // PermanentWebsiteFetchError -- the site's answer will not change on
+  // retry. See that class's doc comment for the full reasoning; this is
+  // the fix for a real production incident where a site returning a
+  // persistent 403 kept a worker slot occupied for ~30 minutes across
+  // repeated queue-level retries, each re-running the full crawl.
+  "website_permanently_unreachable",
 ]);
 
 export function jobWillRetryScanFailure(input: {

@@ -46,6 +46,14 @@ export interface ValidatedWebsiteTarget {
 export interface CrawlFailure {
   url: string;
   reason: string;
+  /** True when this specific page failed with a PermanentWebsiteFetchError
+   * (401/403/404/410/451) rather than a plain (potentially transient)
+   * Error -- lets the final all-pages-failed throw below preserve that
+   * distinction instead of collapsing every failure into one generic
+   * Error, which is what silently defeated retry classification for a
+   * persistent 403 in a real production incident. */
+  permanent: boolean;
+  status?: number;
 }
 
 export interface WebsiteCrawlResult {
@@ -110,6 +118,38 @@ export class UnsafeWebsiteUrlError extends Error {
     this.name = "UnsafeWebsiteUrlError";
   }
 }
+
+/**
+ * Thrown for an HTTP status that retrying can never fix: the site
+ * actively refused or doesn't have the page, not a transient network/
+ * server condition. Distinct from a plain Error specifically so callers
+ * (scan-workflow.ts's retry loop, job-retry-classification.ts's queue-
+ * level disposition) can tell "retrying this is pointless" apart from
+ * "retrying this might work" (429, 5xx, timeouts, DNS hiccups -- all of
+ * which stay a plain Error and remain retryable, per the same
+ * distinction this file already draws for SSRF-unsafe URLs).
+ */
+export class PermanentWebsiteFetchError extends Error {
+  readonly status: number;
+  /** Recognized directly by lib/server/job-retry-classification.ts's
+   * scanPipelineErrorCode (which checks error.code before falling back
+   * to message-pattern matching) so this reaches
+   * JOB_LEVEL_TERMINAL_ERROR_CODES without needing a fragile regex
+   * against this error's message text. */
+  readonly code = "website_permanently_unreachable";
+  constructor(status: number) {
+    super(`Website returned HTTP ${status}.`);
+    this.name = "PermanentWebsiteFetchError";
+    this.status = status;
+  }
+}
+
+/** 401/403: the site is actively refusing the crawler (auth wall, bot
+ * block). 404/410: the page doesn't exist. 451: blocked for legal
+ * reasons. None of these change on retry -- the site's answer is the
+ * site's answer. Everything else (429, 5xx, and anything not in this
+ * set) stays retryable, since those can genuinely be transient. */
+const PERMANENT_HTTP_STATUS_CODES = new Set([401, 403, 404, 410, 451]);
 
 function normalizeHostname(hostname: string): string {
   return hostname.toLocaleLowerCase("en-US").replace(/^\[|\]$/g, "").replace(/\.$/, "");
@@ -954,6 +994,7 @@ export async function crawlWebsite(
       });
       if (!response.ok) {
         await response.body?.cancel("Non-success response is not crawled.");
+        if (PERMANENT_HTTP_STATUS_CODES.has(response.status)) throw new PermanentWebsiteFetchError(response.status);
         throw new Error(`Website returned HTTP ${response.status}.`);
       }
       const contentType = response.headers.get("content-type")?.toLocaleLowerCase("en-US") ?? "";
@@ -1053,6 +1094,8 @@ export async function crawlWebsite(
       failures.push({
         url: next.toString(),
         reason: error instanceof Error ? error.message : "Unknown crawl error",
+        permanent: error instanceof PermanentWebsiteFetchError,
+        status: error instanceof PermanentWebsiteFetchError ? error.status : undefined,
       });
       options.onPageTrace?.({
         url: next.toString(),
@@ -1123,7 +1166,17 @@ export async function crawlWebsite(
   }
 
   if (pages.length === 0) {
-    const detail = failures[0]?.reason ?? "No readable public HTML pages were found.";
+    const firstFailure = failures[0];
+    const detail = firstFailure?.reason ?? "No readable public HTML pages were found.";
+    // Preserve the permanent/transient distinction through to the final
+    // throw -- collapsing every failure into a generic Error here is what
+    // silently defeated retry classification for a persistent 403 in a
+    // real production incident (the site's own status code never reached
+    // the job queue's disposition logic, so it looked identical to an
+    // ordinary transient failure and kept retrying indefinitely).
+    if (firstFailure?.permanent && typeof firstFailure.status === "number") {
+      throw new PermanentWebsiteFetchError(firstFailure.status);
+    }
     throw new Error(`Website analysis could not read the site: ${detail}`);
   }
 

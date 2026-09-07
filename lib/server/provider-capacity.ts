@@ -39,7 +39,21 @@ export function providerCapacityConfiguration(environment: NodeJS.ProcessEnv = p
   const enabled = environment.PROVIDER_GLOBAL_CAPS === "1";
   return {
     enabled,
-    aiLimit: boundedInteger(environment.AI_GLOBAL_REQUEST_CONCURRENCY, 4, 1, 64),
+    // Raised from 4 to 10 alongside BACKGROUND_WORKER_CONCURRENCY going
+    // from a 1-or-2 ceiling to 1-4: 4 concurrent scans each running
+    // analyzeBusiness + competitor-suggestion concurrently (see
+    // scan-workflow.ts's runFullWebsiteUnderstanding) is 8 simultaneous
+    // AI calls at peak on its own, which would have exactly saturated
+    // the old default of 4 with zero room for anything else -- Reddit
+    // discovery/triage for other scans in later stages, or the
+    // monitoring/reddit/ai-visibility schedulers' own AI usage. 10 gives
+    // 2 slots of headroom above that 8-call peak; env-configurable for
+    // easy reversal (set AI_GLOBAL_REQUEST_CONCURRENCY=4 to restore the
+    // old default without a code change).
+    aiLimit: boundedInteger(environment.AI_GLOBAL_REQUEST_CONCURRENCY, 10, 1, 64),
+    // Deliberately unchanged -- comfortably above the new AI ceiling
+    // already, and this capacity audit found no evidence Apify/Reddit
+    // collection is a bottleneck at the concurrency levels evaluated.
     apifyActorLimit: boundedInteger(environment.APIFY_GLOBAL_ACTOR_CONCURRENCY, 9, 1, 64),
     pollMs: boundedInteger(environment.PROVIDER_CAPACITY_POLL_MS, 250, 50, 5_000),
     aiLeaseMs: boundedInteger(environment.AI_REQUEST_LEASE_SECONDS, 360, 60, 900) * 1_000,

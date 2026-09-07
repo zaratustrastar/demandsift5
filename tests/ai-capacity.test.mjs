@@ -7,6 +7,7 @@ const openai = await loadTsModule("lib/providers/openai.server.ts");
 const capacity = await loadTsModule("lib/ai/capacity.ts");
 const bounded = await loadTsModule("lib/ai/bounded-dispatcher.ts");
 const configuration = await loadTsModule("lib/server/scan-configuration.ts");
+const providerCapacity = await loadTsModule("lib/server/provider-capacity.ts");
 
 function slowResponder(state, delayMs = 15) {
   return async (_url, init) => {
@@ -97,4 +98,18 @@ test("direct option validation uses the same safe ranges", () => {
   assert.deepEqual(capacity.aiCapacityFromOptions({}), { triageBatchSize: 25, requestConcurrency: 4 });
   assert.throws(() => new openai.OpenAiProvider({ apiKey: "fixture", triageBatchSize: 40 }), error => error.code === "scan_configuration_invalid");
   assert.throws(() => new openai.OpenAiProvider({ apiKey: "fixture", requestConcurrency: 12 }), error => error.code === "scan_configuration_invalid");
+});
+
+test("the global AI request ceiling defaults to 10 (raised alongside BACKGROUND_WORKER_CONCURRENCY going to 1-4), stays env-configurable for an easy rollback, and Apify's global ceiling is unchanged at 9", () => {
+  // 4 concurrent scans x 2 concurrent AI calls each (analyzeBusiness +
+  // competitor suggestion) is 8 simultaneous calls at peak -- the old
+  // default of 4 would have been fully saturated with zero headroom for
+  // anything else. 10 leaves 2 slots above that peak.
+  assert.equal(providerCapacity.providerCapacityConfiguration({}).aiLimit, 10);
+  assert.equal(
+    providerCapacity.providerCapacityConfiguration({ AI_GLOBAL_REQUEST_CONCURRENCY: "4" }).aiLimit,
+    4,
+    "must be a one-line env var change to restore the old default, no code change",
+  );
+  assert.equal(providerCapacity.providerCapacityConfiguration({}).apifyActorLimit, 9);
 });

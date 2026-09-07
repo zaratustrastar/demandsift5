@@ -1042,10 +1042,33 @@ export function jobExecutionConfiguration(environment = process.env) {
   };
 }
 
+/**
+ * How many of `concurrency` executor lanes are reserved exclusively for
+ * user-facing scan jobs (scan.run/scan.analyze) rather than sharing with
+ * reddit_monitor_scan/ai_visibility_scan -- see claimJob's `selection`
+ * filter. Kept as its own function specifically so this ratio is
+ * directly testable, not just inline in runQueueWorker's lane setup.
+ */
+export function interactiveLaneCount(concurrency) {
+  return concurrency > 1 ? Math.ceil(concurrency / 2) : 0;
+}
+
 export function workerQueueConfiguration(environment = process.env) {
   const parsedConcurrency = Number(environment.BACKGROUND_WORKER_CONCURRENCY ?? 1);
-  if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1 || parsedConcurrency > 2) {
-    throw new Error("BACKGROUND_WORKER_CONCURRENCY must be 1 or 2.");
+  // Raised from a hard 1-or-2 ceiling to 1-4. See the release notes
+  // accompanying this change for the full capacity audit: the DB
+  // connection pool below already scales with concurrency and needed no
+  // change; the "interactive" lane reservation below is scaled to keep
+  // its original ~50% share of lanes rather than diluting to 1-of-4;
+  // AI_GLOBAL_REQUEST_CONCURRENCY's default was raised separately (see
+  // lib/server/provider-capacity.ts) to give 4 concurrent scans' paired
+  // analyzeBusiness+competitor-suggestion calls real headroom instead of
+  // exactly saturating the old default. Apify's global actor
+  // concurrency (lib/server/provider-capacity.ts) is deliberately
+  // unchanged -- comfortably above the new AI ceiling already, and
+  // Reddit collection wasn't identified as a bottleneck in this audit.
+  if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1 || parsedConcurrency > 4) {
+    throw new Error("BACKGROUND_WORKER_CONCURRENCY must be an integer from 1 to 4.");
   }
   const concurrency = parsedConcurrency;
   const role = String(environment.BACKGROUND_WORKER_ROLE ?? "combined").trim().toLowerCase();
@@ -1053,7 +1076,7 @@ export function workerQueueConfiguration(environment = process.env) {
     throw new Error("BACKGROUND_WORKER_ROLE must be `combined`, `executor`, or `scheduler`.");
   }
   if (role !== "scheduler" && concurrency > 1 && environment.PROVIDER_GLOBAL_CAPS !== "1") {
-    throw new Error("BACKGROUND_WORKER_CONCURRENCY=2 requires PROVIDER_GLOBAL_CAPS=1.");
+    throw new Error("BACKGROUND_WORKER_CONCURRENCY above 1 requires PROVIDER_GLOBAL_CAPS=1.");
   }
   const parsedAgingSeconds = Number(environment.BACKGROUND_JOB_AGING_SECONDS ?? 300);
   if (!Number.isInteger(parsedAgingSeconds) || parsedAgingSeconds < 60 || parsedAgingSeconds > 3_600) {
@@ -1493,7 +1516,16 @@ async function runExecutorLane(sql, queueSignal, pollMs, laneId, selection, agin
 async function runQueueWorker(databaseUrl, signal) {
   const queue = workerQueueConfiguration();
   const sql = postgres(databaseUrl, {
-    max: Math.max(4, queue.concurrency + 3),
+    // The original "+3" margin (on top of concurrency executor lanes)
+    // was sized for a 1-or-2-lane worker plus its 4 schedulers
+    // (monitoring/reddit/ai-visibility/public-stats), which don't hold a
+    // connection continuously. At concurrency=4, 4 lanes + occasional
+    // scheduler queries pushes closer to that margin's original ceiling;
+    // widened to "+5" so the pool doesn't become the bottleneck once
+    // there are simply more lanes contending for it. postgres.js queues
+    // rather than fails when the pool is briefly exhausted, so this is
+    // headroom against added latency, not a correctness requirement.
+    max: Math.max(4, queue.concurrency + 5),
     idle_timeout: 20,
     connect_timeout: 10,
     prepare: false,
@@ -1525,13 +1557,25 @@ async function runQueueWorker(databaseUrl, signal) {
   log("info", "queue_worker_started", { pollMs: boundedPollMs, role: queue.role,
     concurrency: runsExecutors ? queue.concurrency : 0, agingSeconds: queue.agingSeconds });
   try {
+    // Reserves a growing share of lanes exclusively for user-facing scan
+    // jobs (scan.run/scan.analyze), never reddit_monitor_scan/
+    // ai_visibility_scan -- see claimJob's `selection` filter above. The
+    // original design reserved 1 of 2 lanes (50%) once concurrency > 1;
+    // scaling that fraction instead of holding it at a flat "index 0
+    // only" keeps the same guarantee at concurrency 3-4 instead of
+    // diluting to 25% while background job types compete for the rest.
+    // concurrency === 1 keeps its original behavior exactly: the single
+    // lane stays "all", since reserving it would mean reddit_monitor_scan/
+    // ai_visibility_scan jobs could never run at all with no second lane
+    // to pick them up.
+    const interactiveLanes = interactiveLaneCount(queue.concurrency);
     const lanes = runsExecutors
       ? Array.from({ length: queue.concurrency }, (_, index) => runExecutorLane(
           sql,
           queueSignal,
           boundedPollMs,
           `lane-${index + 1}`,
-          queue.concurrency > 1 && index === 0 ? "interactive" : "all",
+          index < interactiveLanes ? "interactive" : "all",
           queue.agingSeconds,
         ))
       : [waitInStandby(queueSignal)];

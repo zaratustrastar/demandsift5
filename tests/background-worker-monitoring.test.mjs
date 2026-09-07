@@ -6,6 +6,7 @@ import {
   claimJob,
   createMonitoringScanRecord,
   assertSuccessfulExecutorPayload,
+  interactiveLaneCount,
   isMonitoringCandidateDue,
   jobExecutionConfiguration,
   jobFailureDisposition,
@@ -22,7 +23,7 @@ import {
 const NOW = new Date("2026-08-05T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
-test("two executor lanes require global provider ceilings and expose scheduler roles", () => {
+test("worker concurrency supports 1-4 lanes, requires global provider ceilings above 1, and exposes scheduler roles", () => {
   assert.deepEqual(workerQueueConfiguration({}), { concurrency: 1, role: "combined", agingSeconds: 300 });
   assert.throws(
     () => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "2" }),
@@ -34,10 +35,34 @@ test("two executor lanes require global provider ceilings and expose scheduler r
     BACKGROUND_WORKER_ROLE: "executor",
     BACKGROUND_JOB_AGING_SECONDS: "120",
   }), { concurrency: 2, role: "executor", agingSeconds: 120 });
+  // Raised from a 1-or-2 ceiling to 1-4 -- see the release notes for the
+  // full capacity audit (DB pool margin, AI_GLOBAL_REQUEST_CONCURRENCY
+  // default, interactive-lane reservation) that moved alongside this.
+  assert.throws(
+    () => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "3" }),
+    /requires PROVIDER_GLOBAL_CAPS=1/u,
+  );
+  assert.deepEqual(workerQueueConfiguration({
+    BACKGROUND_WORKER_CONCURRENCY: "4",
+    PROVIDER_GLOBAL_CAPS: "1",
+  }), { concurrency: 4, role: "combined", agingSeconds: 300 });
   assert.equal(workerQueueConfiguration({ BACKGROUND_WORKER_ROLE: "scheduler" }).role, "scheduler");
   assert.throws(() => workerQueueConfiguration({ BACKGROUND_WORKER_ROLE: "anything" }), /must be/u);
-  assert.throws(() => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "3" }), /must be 1 or 2/u);
+  assert.throws(
+    () => workerQueueConfiguration({ BACKGROUND_WORKER_CONCURRENCY: "5" }),
+    /must be an integer from 1 to 4/u,
+  );
   assert.throws(() => workerQueueConfiguration({ BACKGROUND_JOB_AGING_SECONDS: "2.5" }), /must be an integer/u);
+});
+
+test("interactive lane reservation keeps its original ~50% share as concurrency grows, and its original concurrency=1 behavior exactly", () => {
+  // concurrency=1 must stay 0 -- reserving the single lane would mean
+  // reddit_monitor_scan/ai_visibility_scan jobs could never run at all,
+  // a real behavior change from before this capacity audit.
+  assert.equal(interactiveLaneCount(1), 0);
+  assert.equal(interactiveLaneCount(2), 1);
+  assert.equal(interactiveLaneCount(3), 2);
+  assert.equal(interactiveLaneCount(4), 2);
 });
 
 test("monitoring configuration has launch defaults and bounded overrides", () => {

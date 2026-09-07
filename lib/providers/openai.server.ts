@@ -1763,7 +1763,7 @@ export class OpenAiProvider implements AiProvider {
       schemaName: "company_context_pack",
       schema: BUSINESS_SCHEMA,
       maxOutputTokens: 6_000,
-      reasoningEffort: "medium",
+      reasoningEffort: request.reasoningEffortOverride ?? "medium",
       context: { workspaceId: request.workspaceId, businessId: request.businessId },
       system:
         "Build a source-backed Company Context Pack using only the supplied public website evidence. " +

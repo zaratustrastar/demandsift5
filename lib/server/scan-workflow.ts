@@ -184,7 +184,7 @@ async function observedCrawl(scan: ScanRecord, pageTraces?: PageCrawlTrace[]): P
   return structuredClone(scan.websiteSnapshot.crawl);
 }
 
-function assertWebsiteProfileEvidence(scan: ScanRecord, business: BusinessUnderstanding) {
+export function assertWebsiteProfileEvidence(scan: ScanRecord, business: BusinessUnderstanding) {
   if (!scan.websiteSnapshot || !legacyProfileMatchesSnapshot(businessWebsiteSourceIds(business), scan.websiteSnapshot)) {
     throw new ApiError("The business profile references unavailable website evidence. Retry the website analysis.", 502, "website_snapshot_mismatch");
   }
@@ -521,7 +521,7 @@ function profileFromBusiness(business: BusinessUnderstanding): ScanBusinessProfi
 /** Provenance records + sourceId-tagged pages for a crawl result. Shared by
  * runFullWebsiteUnderstanding and the full pass inside `runScan`, so both
  * attribute evidence the same way. */
-function pagesFromCrawl(crawl: WebsiteCrawlResult): {
+export function pagesFromCrawl(crawl: WebsiteCrawlResult): {
   websiteSources: Provenance[];
   pages: Array<WebsiteCrawlResult["pages"][number] & { sourceId: string }>;
 } {

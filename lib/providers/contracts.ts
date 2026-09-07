@@ -53,6 +53,10 @@ export interface AnalyzeBusinessRequest {
   canonicalDomain: string;
   pages: WebsiteEvidencePage[];
   models: ModelConfiguration;
+  /** Benchmarking-only: overrides the hardcoded "medium" reasoning effort.
+   * Omitted in every production call site, which keeps today's behavior
+   * unchanged -- see lib/providers/openai.server.ts's analyzeBusiness. */
+  reasoningEffortOverride?: "low" | "medium";
 }
 
 /**

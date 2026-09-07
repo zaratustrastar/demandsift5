@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix Scooptr logo asset -- replace the PNG's baked-in
-# opaque white background with a genuinely transparent version, same
-# aspect ratio, no code/CSS changes (2026-09-07).
+# Release marker: redesign the pre-input understanding screen into a
+# two-column workspace (real scan progress + progressive business-profile
+# reveal), replacing the centered card and orbit loader (2026-09-07).
 
 on:
   push:

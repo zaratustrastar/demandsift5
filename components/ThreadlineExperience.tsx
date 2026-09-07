@@ -2439,6 +2439,45 @@ export function ThreadlineExperience() {
     return () => { cancelled = true; polling?.stop(); };
   }, [view, url, contextText, inputMode, scanCreateBody]);
 
+  // The effect above stops polling the moment it sets view to
+  // "competitors" -- view is one of its own dependencies, so React tears
+  // down that effect instance (running its cleanup, which stops polling)
+  // on that very same state change, regardless of what its run callback
+  // returns. This effect picks up where that one left off: while the
+  // user is on the Competitors screen and analysisReady isn't true yet,
+  // it keeps polling in the background so (a) onContinue always reads a
+  // current analysisReady value, and (b) a Continue press before
+  // analysis finishes (continueRequestedWhileAnalyzingRef) can still
+  // auto-advance once it does, via the awaiting_review branch above,
+  // which the resulting view === "analyzing" change re-triggers.
+  useEffect(() => {
+    if (view !== "competitors" || !reviewScanId || scanResponse?.scan.analysisReady) return;
+    let cancelled = false;
+    const polling = startScanPolling({
+      onConnectionChange: setScanConnected,
+      // Best-effort: a transient failure on this background poll
+      // shouldn't interrupt the user actively reviewing Competitors.
+      onError: () => {},
+      run: async signal => {
+        const latest = await readScanResponse<ApiScanResponse>(await fetch(
+          `/api/scans/${encodeURIComponent(reviewScanId)}?statusOnly=1`, { cache: "no-store", signal },
+        ));
+        signal.throwIfAborted();
+        if (cancelled) return true;
+        setScanResponse(current => current ? { ...current, scan: { ...current.scan, ...latest.scan }, access: latest.access } : current);
+        if (latest.scan.status === "failed" || latest.scan.analysisReady) {
+          if (latest.scan.analysisReady && continueRequestedWhileAnalyzingRef.current) {
+            continueRequestedWhileAnalyzingRef.current = false;
+            setView("profile");
+          }
+          return true;
+        }
+        return false;
+      },
+    });
+    return () => { cancelled = true; polling.stop(); };
+  }, [view, reviewScanId, scanResponse?.scan.analysisReady]);
+
   // Only the approval button can submit a Reddit run. Status/focus cannot.
   async function beginRedditScan(reviewVersion: string) {
     const response = await fetch(`/api/scans/${encodeURIComponent(reviewScanId)}/run`, {

@@ -24,12 +24,19 @@ export async function GET(request: Request, context: RouteContext) {
     if (!crawl) throw new ApiError("No crawl snapshot is available for this scan to benchmark against.", 409, "no_crawl_snapshot");
 
     const models = openAiModelsFromEnv();
-    const configs: Array<{ label: string; model: string; reasoningEffort: "low" | "medium" }> = [
+    const allConfigs: Array<{ label: string; model: string; reasoningEffort: "low" | "medium" }> = [
       { label: "sol-medium (current baseline)", model: models.analysisModel, reasoningEffort: "medium" },
       { label: "sol-low", model: models.analysisModel, reasoningEffort: "low" },
       { label: "luna-medium", model: models.economyModel, reasoningEffort: "medium" },
       { label: "luna-low", model: models.economyModel, reasoningEffort: "low" },
     ];
+    // Each config is one analyzeBusiness call that can itself take
+    // 10-50+ seconds; running all 4 in a single request risks exceeding
+    // typical client-side request timeouts. ?configIndex=0..3 runs just
+    // one, so a caller can issue 4 separate requests instead.
+    const configIndexParam = new URL(request.url).searchParams.get("configIndex");
+    const configs = configIndexParam !== null ? [allConfigs[Number(configIndexParam)]] : allConfigs;
+    if (configIndexParam !== null && !configs[0]) throw new ApiError("configIndex must be 0-3.", 400, "invalid_config_index");
 
     const { pages } = pagesFromCrawl(crawl);
     const inputCharCount = pages.reduce((sum, page) => sum + page.text.length, 0);

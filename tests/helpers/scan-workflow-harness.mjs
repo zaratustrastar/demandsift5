@@ -3,7 +3,7 @@ import { loadTsModule } from "./load-ts-module.mjs";
 import { business, candidate, triage } from "../fixtures/scan-replay/factories.mjs";
 
 /** Executes the real workflow/selection code. Only I/O boundaries are stubs. */
-export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropUnfetched = false, failFetch = false, worthReviewing = true, env = {}, inputMode = "context", analyzed = true, stopAtQualification = true, crawlResult = websiteEvidenceFixture() } = {}) {
+export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropUnfetched = false, failFetch = false, worthReviewing = true, env = {}, inputMode = "context", analyzed = true, stopAtQualification = true, crawlResult = websiteEvidenceFixture(), crawlWebsite } = {}) {
   const key = `scanHarness_${randomUUID().replaceAll("-", "")}`;
   const previous = { ...process.env };
   for (const name of ["OPENAI_API_KEY", "OPENAI_DIRECT_FALLBACK_API_KEY", "OPENAI_BASE_URL", "OPENAI_DIRECT_FALLBACK_BASE_URL", "REDDIT_ENRICHMENT_BUDGET", "REDDIT_DEEP_QUALIFICATION_BUDGET", "REDDIT_MINIMUM_FULL_CONTEXT_REVIEWS", "APIFY_REDDIT_ENRICHMENT_LIMIT"]) delete process.env[name];
@@ -26,11 +26,11 @@ export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropU
   const result = (value, operation = "conversation_triage") => ({ value, model: "fixture-model", operation, usage: { inputTokens: 0, outputTokens: 0 }, estimatedCostUsd: 0 });
   const state = {
     crawlCalls: [], analysisCalls: [], competitorSuggestionCalls: [],
-    crawlWebsite: async (url, options) => {
+    crawlWebsite: crawlWebsite ?? (async (url, options) => {
       if (inputMode === "context") throw new Error("A context fixture must not crawl");
       state.crawlCalls.push({ url, options });
       return structuredClone(crawlResult);
-    },
+    }),
     isUsableTriageJudgment: (await loadTsModule("lib/providers/openai.server.ts")).isUsableTriageJudgment,
     models: { analysisModel: "gpt-5.6-sol", economyModel: "gpt-5.6-luna", embeddingModel: "text-embedding-3-small" },
     repository: {
@@ -99,7 +99,7 @@ export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropU
     "lib/server/http.ts": "export class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }",
     "lib/server/funnel.ts": "export async function captureFunnelEvent() {}",
     "lib/server/ai-visibility-workflow.ts": "export async function ensureAiVisibilityTrackingStarted() {}",
-    "lib/security/website-crawler.ts": `export class UnsafeWebsiteUrlError extends Error {} export class PermanentWebsiteFetchError extends Error { constructor(status) { super("Website returned HTTP " + status + "."); this.name = "PermanentWebsiteFetchError"; this.status = status; this.code = "website_permanently_unreachable"; } } export const crawlWebsite = (...args) => ${ref}.crawlWebsite(...args); export const validatePublicWebsiteUrl = async () => { throw new Error("validatePublicWebsiteUrl is not stubbed in this test harness -- if a test needs it, add a real stub instead of relying on this throwing"); };`,
+    "lib/security/website-crawler.ts": `export class UnsafeWebsiteUrlError extends Error {} export class PermanentWebsiteFetchError extends Error { constructor(status) { super("Website returned HTTP " + status + "."); this.name = "PermanentWebsiteFetchError"; this.status = status; this.code = "website_permanently_unreachable"; } } export class WebsiteFetchStatusError extends Error { constructor(status, message) { super(message ?? ("Website returned HTTP " + status + ".")); this.name = "WebsiteFetchStatusError"; this.status = status; } } export const crawlWebsite = (...args) => ${ref}.crawlWebsite(...args); export const validatePublicWebsiteUrl = async () => { throw new Error("validatePublicWebsiteUrl is not stubbed in this test harness -- if a test needs it, add a real stub instead of relying on this throwing"); };`,
     "lib/providers/openai.server.ts": `export const createOpenAiProviderFromEnv = (env, options) => ${ref}.createAiProvider ? ${ref}.createAiProvider(env, options) : ${ref}.ai; export const openAiModelsFromEnv = () => ${ref}.models; export const analysisReasoningEffortFromEnv = () => "low"; export const competitorSuggestionModelFromEnv = () => "gpt-5.6-sol"; export const isUsableTriageJudgment = ${ref}.isUsableTriageJudgment;`,
     "lib/providers/reddit.server.ts": `export const createRedditProviderFromEnv = () => ${ref}.reddit;`,
   } });

@@ -151,6 +151,36 @@ export class PermanentWebsiteFetchError extends Error {
  * set) stays retryable, since those can genuinely be transient. */
 const PERMANENT_HTTP_STATUS_CODES = new Set([401, 403, 404, 410, 451]);
 
+/**
+ * A non-2xx status that isn't in PERMANENT_HTTP_STATUS_CODES above --
+ * still assumed retryable on its own, but carries the status (unlike a
+ * plain Error) so a caller that sees the *same* status recur across
+ * consecutive attempts can tell that apart from an ordinary one-off
+ * blip. That distinction matters chiefly for 503: real production case,
+ * amazon.com answers every single request with HTTP 503 rather than
+ * 403 -- functionally the same permanent bot-block, just spelled with a
+ * status this file cannot treat as unconditionally permanent, since a
+ * 503 from a site having one genuinely bad moment is common and should
+ * still get its normal retries. See scan-workflow.ts's
+ * runFullWebsiteUnderstanding, which promotes a repeated status from
+ * this class to PermanentWebsiteFetchError.
+ */
+export class WebsiteFetchStatusError extends Error {
+  readonly status: number;
+  /** message defaults to the same bare "Website returned HTTP NNN."
+   * text a single page's fetch failure already used (still what
+   * populates failures[].reason above) -- callers that need the fuller
+   * "Website analysis could not read the site: ..." wrapper (see
+   * crawlWebsite's final aggregation below) pass it explicitly so this
+   * class's introduction doesn't change any user-facing message text,
+   * only which errors carry a structured status. */
+  constructor(status: number, message?: string) {
+    super(message ?? `Website returned HTTP ${status}.`);
+    this.name = "WebsiteFetchStatusError";
+    this.status = status;
+  }
+}
+
 function normalizeHostname(hostname: string): string {
   return hostname.toLocaleLowerCase("en-US").replace(/^\[|\]$/g, "").replace(/\.$/, "");
 }
@@ -995,7 +1025,7 @@ export async function crawlWebsite(
       if (!response.ok) {
         await response.body?.cancel("Non-success response is not crawled.");
         if (PERMANENT_HTTP_STATUS_CODES.has(response.status)) throw new PermanentWebsiteFetchError(response.status);
-        throw new Error(`Website returned HTTP ${response.status}.`);
+        throw new WebsiteFetchStatusError(response.status);
       }
       const contentType = response.headers.get("content-type")?.toLocaleLowerCase("en-US") ?? "";
       if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
@@ -1095,7 +1125,10 @@ export async function crawlWebsite(
         url: next.toString(),
         reason: error instanceof Error ? error.message : "Unknown crawl error",
         permanent: error instanceof PermanentWebsiteFetchError,
-        status: error instanceof PermanentWebsiteFetchError ? error.status : undefined,
+        status:
+          error instanceof PermanentWebsiteFetchError || error instanceof WebsiteFetchStatusError
+            ? error.status
+            : undefined,
       });
       options.onPageTrace?.({
         url: next.toString(),
@@ -1176,6 +1209,16 @@ export async function crawlWebsite(
     // ordinary transient failure and kept retrying indefinitely).
     if (firstFailure?.permanent && typeof firstFailure.status === "number") {
       throw new PermanentWebsiteFetchError(firstFailure.status);
+    }
+    // Preserve the status here too (not just the permanent branch above)
+    // so a non-auto-permanent status like 503 still reaches
+    // runFullWebsiteUnderstanding's retry loop as a typed
+    // WebsiteFetchStatusError instead of a bare Error -- that loop needs
+    // the numeric status to detect the same code recurring across
+    // consecutive attempts. The user-facing message is unchanged either
+    // way; only the thrown error's type/shape differs.
+    if (typeof firstFailure?.status === "number") {
+      throw new WebsiteFetchStatusError(firstFailure.status, `Website analysis could not read the site: ${detail}`);
     }
     throw new Error(`Website analysis could not read the site: ${detail}`);
   }

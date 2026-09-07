@@ -2115,6 +2115,9 @@ export function ThreadlineExperience() {
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("free");
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [manualDescribeText, setManualDescribeText] = useState("");
+  const [manualDescribeSubmitting, setManualDescribeSubmitting] = useState(false);
+  const [manualDescribeError, setManualDescribeError] = useState("");
   const [scanConnected, setScanConnected] = useState(true);
   const [livePartial, setLivePartial] = useState<LivePartialState | null>(null);
   const [liveReplyEdits, setLiveReplyEdits] = useState<Record<string, string>>({});
@@ -2780,6 +2783,50 @@ export function ThreadlineExperience() {
   }
 
   /**
+   * Recovery path for a scan whose website could not be read at all --
+   * see POST /api/scans/[scanId]/describe and resumeScanWithManualContext's
+   * doc comment in scan-workflow.ts. Switches this exact scan to context
+   * mode with a manual description instead of the person having to start
+   * an entirely new scan from scratch.
+   *
+   * Mirrors exactly what the "resume a saved scan from its URL" effect
+   * already does for a phase: "created" scan (see the useEffect reading
+   * scan_id near the top of this component): seed analysisScanRef with
+   * the resumed scan so the analyzing-view polling effect picks it up
+   * directly instead of creating a new one, then move to "analyzing".
+   * No new polling logic needed -- that effect already handles a
+   * context-mode, phase: "created" scan correctly.
+   */
+  async function submitManualDescription() {
+    const scanId = scanResponse?.scan.id;
+    const trimmed = manualDescribeText.trim();
+    if (!scanId || !trimmed) return;
+    setManualDescribeSubmitting(true);
+    setManualDescribeError("");
+    try {
+      const response = await fetch(`/api/scans/${encodeURIComponent(scanId)}/describe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ contextText: trimmed }),
+      });
+      const latest = await readScanResponse<ApiScanResponse>(response);
+      setUrl("");
+      setInputMode("context");
+      setContextText(latest.scan.contextText ?? "");
+      setScanResponse(latest);
+      setScanProgress(latest.scan.progress);
+      setAccessLevel(effectiveAccessLevel(latest.access));
+      setErrorMessage("");
+      analysisScanRef.current = Promise.resolve(latest);
+      setView("analyzing");
+    } catch (error) {
+      setManualDescribeError(error instanceof Error ? error.message : "We couldn't save that description. Try again.");
+    } finally {
+      setManualDescribeSubmitting(false);
+    }
+  }
+
+  /**
    * "View results" on a completed daily-monitoring run -- loads that run's
    * own scan (see RedditMonitorRunRecord.scanId, created by
    * monitoringScan() in reddit-monitor-workflow.ts) into the same report
@@ -3260,6 +3307,16 @@ export function ThreadlineExperience() {
     );
   }
   if (view === "error") {
+    // Only offer this when the website understanding itself is what
+    // failed -- a scan that already has an analyzed profile (even if a
+    // later stage, e.g. Reddit enrichment, subsequently failed) has
+    // nothing website-related left to recover from a manual description;
+    // see POST /api/scans/[scanId]/describe's own guard for the
+    // server-side version of this same check.
+    const canDescribeInstead =
+      scanResponse?.scan.status === "failed" &&
+      scanResponse.scan.inputMode !== "context" &&
+      !scanResponse.scan.analysisReady;
     return (
       <main className={styles.scanScreen}>
         <OnboardingHeader activeIndex={0} statusLabel={scanResponse?.scan.status === "failed" ? "Market Scan stopped" : "Scan needs attention"} />
@@ -3270,6 +3327,27 @@ export function ThreadlineExperience() {
           <p>{errorMessage}</p>
           <button className={styles.tryAgain} type="button" onClick={returnToSetup}>Run another scan</button>
           {scanResponse?.scan.id && <button className={styles.returnLink} type="button" onClick={() => window.location.reload()}>Reopen this saved scan</button>}
+          {canDescribeInstead && (
+            <div className={styles.describeInstead}>
+              <div className={styles.scanKicker}>Or describe your business instead</div>
+              <p>No website needed &mdash; a couple of sentences is enough, and we&rsquo;ll pick up right from here.</p>
+              <textarea
+                value={manualDescribeText}
+                onChange={(event) => setManualDescribeText(event.target.value)}
+                placeholder="A parental controls app for Android TV with daily time limits and no subscription."
+                disabled={manualDescribeSubmitting}
+              />
+              {manualDescribeError && <p className={styles.slFormError}>{manualDescribeError}</p>}
+              <button
+                className={styles.tryAgain}
+                type="button"
+                disabled={manualDescribeSubmitting || !manualDescribeText.trim()}
+                onClick={submitManualDescription}
+              >
+                {manualDescribeSubmitting ? "Saving…" : "Continue with this description"}
+              </button>
+            </div>
+          )}
           <div className={styles.domainSafety}>Completed stages remain recorded. Unverified findings are never promoted as definitive leads.</div>
         </section>
       </main>

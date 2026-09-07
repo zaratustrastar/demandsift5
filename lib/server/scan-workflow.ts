@@ -39,7 +39,7 @@ import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
 import { createOpenAiProviderFromEnv, openAiModelsFromEnv, analysisReasoningEffortFromEnv, competitorSuggestionModelFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
 import type { TriageProcessingOutcome } from "@/lib/providers/contracts";
 import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
-import { crawlWebsite, UnsafeWebsiteUrlError, PermanentWebsiteFetchError } from "@/lib/security/website-crawler";
+import { crawlWebsite, UnsafeWebsiteUrlError, PermanentWebsiteFetchError, WebsiteFetchStatusError } from "@/lib/security/website-crawler";
 import type { WebsiteCrawlResult, PageCrawlTrace } from "@/lib/security/website-crawler";
 import type {
   CompetitorProfile,
@@ -668,6 +668,19 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
     const UNDERSTANDING_ATTEMPTS = 2;
     let business: BusinessUnderstanding | undefined;
     let lastError: unknown;
+    // Real production case: amazon.com answers every request with HTTP
+    // 503 rather than 401/403/404/410/451, so PermanentWebsiteFetchError
+    // never fires and this loop (plus the outer queue-level retry, see
+    // job-retry-classification.ts) kept re-running the full crawl for
+    // several minutes before probably still failing. A single 503 stays
+    // retryable -- it's a common, often genuine transient state -- but
+    // the *same* status recurring on the very next attempt is no longer
+    // that: a real transient hiccup rarely reproduces an identical
+    // status twice in immediate succession, whereas a sustained
+    // bot-block (503-flavored or otherwise) answers identically every
+    // time. lastFetchStatus tracks the previous attempt's status so the
+    // catch block below can tell the two apart.
+    let lastFetchStatus: number | undefined;
     for (let attempt = 0; attempt < UNDERSTANDING_ATTEMPTS; attempt += 1) {
       attempts += 1;
       try {
@@ -755,15 +768,26 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
         assertWebsiteProfileEvidence(scan, analyzedOutcome.value.value);
         business = analyzedOutcome.value.value;
         break;
-      } catch (error) {
+      } catch (rawError) {
+        // Same status as the previous attempt: promote it the same way
+        // an always-permanent code already is (see lastFetchStatus's
+        // doc comment above), so the queue-level retry budget stops
+        // here instead of repeating this same failure up to several
+        // more times with growing backoff.
+        const error =
+          rawError instanceof WebsiteFetchStatusError && rawError.status === lastFetchStatus
+            ? new PermanentWebsiteFetchError(rawError.status)
+            : rawError;
         lastError = error;
-        // A permanently unreachable site (401/403/404/410/451) will
-        // answer exactly the same way on a second attempt -- retrying
-        // wastes the attempt budget and, more importantly, the wall-clock
-        // time a stuck worker spends before this scan can ever release
-        // its slot. Break immediately; the outer job queue's own
-        // disposition (job-retry-classification.ts) is what actually
-        // stops this from being retried again as a whole new job.
+        lastFetchStatus = rawError instanceof WebsiteFetchStatusError ? rawError.status : undefined;
+        // A permanently unreachable site (401/403/404/410/451, or a
+        // status just promoted above) will answer exactly the same way
+        // on a second attempt -- retrying wastes the attempt budget and,
+        // more importantly, the wall-clock time a stuck worker spends
+        // before this scan can ever release its slot. Break immediately;
+        // the outer job queue's own disposition
+        // (job-retry-classification.ts) is what actually stops this from
+        // being retried again as a whole new job.
         if (error instanceof PermanentWebsiteFetchError) break;
         if (attempt < UNDERSTANDING_ATTEMPTS - 1) {
           await new Promise((resolve) => setTimeout(resolve, 1_500));
@@ -1292,6 +1316,49 @@ export async function createScan(workspaceId: string, input: CreateScanInput, op
 
 export async function enqueueScanRun(scan: ScanRecord, reviewVersion?: string) {
   return getStateRepository().acceptScanJob(scan.id, scan.workspaceId, "scan.run", reviewVersion);
+}
+
+/**
+ * Recovery path for a scan whose website could not be read at all --
+ * PermanentWebsiteFetchError (401/403/404/410/451, or the sustained-
+ * same-status promotion in runFullWebsiteUnderstanding above; a real
+ * production case is amazon.com answering every request with HTTP 503)
+ * -- lets the person switch this exact scan to context mode with a
+ * manual description instead of starting over. This is not a new
+ * analysis path: it reuses the exact inputMode: "context" pipeline a
+ * "Describe your market / idea" scan already runs end to end (see
+ * runContextUnderstanding and createScan's own doc comment above) --
+ * this function only gives an existing, already-failed scan a second
+ * way to reach it.
+ *
+ * The caller (the API route) owns validating contextText and confirming
+ * the scan is actually eligible -- status "failed", no discoveryProfile
+ * yet, not already inputMode "context" -- before calling this. This
+ * function unconditionally resets inputMode/contextText/websiteUrl and
+ * puts status/phase/progress/error back to the same shape
+ * createScan(..., { reviewRequired: true }) produces, so
+ * POST /api/scans/[scanId]/analyze can pick this scan back up exactly
+ * as if it had just been created in context mode -- and, on the client,
+ * the existing "resume a saved scan from its URL" dispatch already
+ * routes a phase: "created" scan straight into the analyzing/polling
+ * flow with no changes needed there either.
+ */
+export async function resumeScanWithManualContext(scan: ScanRecord, contextText: string): Promise<ScanRecord> {
+  scan.inputMode = "context";
+  scan.contextText = contextText;
+  scan.websiteUrl = "";
+  scan.status = "queued";
+  scan.phase = "created";
+  scan.reviewRequired = true;
+  scan.error = null;
+  scan.errorCode = null;
+  scan.progress = cloneStages();
+  scan.discoveryProfile = undefined;
+  scan.competitorSuggestions = undefined;
+  scan.websiteSnapshot = undefined;
+  scan.updatedAt = new Date().toISOString();
+  await persistScan(scan);
+  return scan;
 }
 
 export async function enqueueScanAnalysis(scan: ScanRecord) {

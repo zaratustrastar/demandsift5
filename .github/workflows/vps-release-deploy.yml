@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix benchmark endpoint holderPrefix collision between
-# retried attempts of the same config, which was causing them to queue
-# behind each other and inflate latency (2026-09-07).
+# Release marker: switch production analyzeBusiness() to reasoningEffort
+# low (same gpt-5.6-sol model), configurable via
+# OPENAI_ANALYSIS_REASONING_EFFORT for rollback without a deploy (2026-09-07).
 
 on:
   push:

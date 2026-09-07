@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fail fast on a sustained (repeated, same-status)
-# website fetch failure like Amazon's persistent 503, and let a scan
-# whose website could not be read recover with a manual description
-# instead of being a dead end (2026-09-07).
+# Release marker: fix the manual-description recovery flow -- run the
+# context analysis directly instead of re-triggering a job the queue's
+# own dedup silently no-ops on for an already-failed scan (2026-09-07).
 
 on:
   push:

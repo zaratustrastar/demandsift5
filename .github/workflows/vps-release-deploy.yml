@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: fix background polling stopping the instant the
-# Competitors screen appeared, which broke Continue-before-ready
-# auto-advance to the next screen (2026-09-07).
+# Release marker: add temporary benchmark endpoint for analyzeBusiness()
+# model/reasoning-effort comparison, investigation-only, not used by
+# production UI (2026-09-07).
 
 on:
   push:

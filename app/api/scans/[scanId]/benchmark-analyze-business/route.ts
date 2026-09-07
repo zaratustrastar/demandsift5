@@ -50,7 +50,7 @@ export async function GET(request: Request, context: RouteContext) {
         requestGate: globallyBoundedAiRequestGate({
           workspaceId: actor.workspaceId,
           localLimit: capacity.requestConcurrency,
-          holderPrefix: `benchmark-analyze-business:${actor.workspaceId}:${scanId}:${config.label}`,
+          holderPrefix: `benchmark-analyze-business:${actor.workspaceId}:${scanId}:${config.label}:${createId("attempt")}`,
         }),
         onDiagnostic: (event) => { diagnosticEvents.push(event.kind); },
         onRequest: (event) => { requestEvents.push({ phase: event.phase, attempt: event.attempt, model: event.model }); },

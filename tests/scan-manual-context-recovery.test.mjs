@@ -55,6 +55,8 @@ test("resumeScanWithManualContext switches a failed website scan into a fresh, c
   assert.equal(resumed.discoveryProfile, undefined);
   assert.equal(resumed.competitorSuggestions, undefined);
   assert.equal(resumed.websiteSnapshot, undefined);
+  assert.equal(resumed.durableJob, undefined);
+  assert.equal(resumed.execution, undefined);
   // The stage list is reset clean, not left showing the earlier failed
   // "website" stage -- a fresh context-mode run reports its own progress
   // from scratch, same as any newly created scan.
@@ -65,12 +67,28 @@ test("resumeScanWithManualContext switches a failed website scan into a fresh, c
   assert.equal(fixture.saved.at(-1).inputMode, "context");
 });
 
-test("resumeScanWithManualContext leaves this scan ready for POST /api/scans/[scanId]/analyze to pick up (context branch, no crawl)", async (t) => {
+test("resumeScanWithManualContext + a direct runScan call takes the context branch and reaches awaiting_review, with no crawl", async (t) => {
   const fixture = await scanWorkflowHarness(t, { inputMode: "website", analyzed: false });
   fixture.scan.status = "failed";
   fixture.scan.errorCode = "website_permanently_unreachable";
   await fixture.workflow.resumeScanWithManualContext(fixture.scan, "A B2B invoicing tool for freelance designers.");
 
+  // The describe route (app/api/scans/[scanId]/describe/route.ts) calls
+  // runScan directly, right here, in the same request -- not by resetting
+  // this scan to phase: "created" and leaving a later, separate
+  // POST .../analyze call to pick it up. That deliberately sidesteps a
+  // real bug found via live testing: acceptScanJob/insertScanJob dedupe a
+  // "scan.analyze" job by scanId+type alone (see repository.ts), so a
+  // second acceptance attempt for a scanId that already has one --
+  // exactly this scan, from its original failed website attempt -- would
+  // silently no-op instead of enqueueing anything, leaving the scan stuck
+  // at phase: "created" forever. This harness's fake repository doesn't
+  // implement that dedup constraint at all (its beginScanRun/acceptScanJob
+  // stubs are trivial), so it cannot reproduce that specific failure mode
+  // -- only the real, Postgres-backed repository can, which is how this
+  // was actually caught. What this test does still confirm directly: the
+  // context branch itself (runScan's inputMode === "context" handling)
+  // works correctly when invoked this way, immediately after resume.
   const analyzed = await fixture.workflow.runScan(fixture.scan.id, { stopAfterUnderstanding: true });
 
   assert.equal(analyzed.phase, "awaiting_review");
@@ -78,6 +96,12 @@ test("resumeScanWithManualContext leaves this scan ready for POST /api/scans/[sc
   assert.equal(analyzed.discoveryProfile.analysisMode, "openai");
   // The whole point: no crawl happened for the resumed scan.
   assert.equal(fixture.state.crawlCalls.length, 0);
+});
+
+test("the describe route runs the analysis directly (runScan), rather than resetting the scan for a separate POST .../analyze call to pick up later", () => {
+  assert.match(describeRoute, /import \{ resumeScanWithManualContext, runScan \} from "@\/lib\/server\/scan-workflow";/);
+  assert.match(describeRoute, /await resumeScanWithManualContext\(scan, contextText\);/);
+  assert.match(describeRoute, /analyzed = await runScan\(scan\.id, \{ stopAfterUnderstanding: true \}\);/);
 });
 
 test("the describe route only allows the recovery action for a failed, not-yet-analyzed, non-context scan", () => {

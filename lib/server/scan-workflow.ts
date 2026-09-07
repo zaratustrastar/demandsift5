@@ -1333,15 +1333,24 @@ export async function enqueueScanRun(scan: ScanRecord, reviewVersion?: string) {
  *
  * The caller (the API route) owns validating contextText and confirming
  * the scan is actually eligible -- status "failed", no discoveryProfile
- * yet, not already inputMode "context" -- before calling this. This
- * function unconditionally resets inputMode/contextText/websiteUrl and
- * puts status/phase/progress/error back to the same shape
- * createScan(..., { reviewRequired: true }) produces, so
- * POST /api/scans/[scanId]/analyze can pick this scan back up exactly
- * as if it had just been created in context mode -- and, on the client,
- * the existing "resume a saved scan from its URL" dispatch already
- * routes a phase: "created" scan straight into the analyzing/polling
- * flow with no changes needed there either.
+ * yet, not already inputMode "context" -- before calling this, and owns
+ * actually running the analysis afterward (directly, not through
+ * POST /api/scans/[scanId]/analyze's normal enqueue path -- see that
+ * route's own doc comment for why: a "scan.analyze" job is deduped by
+ * scanId+type alone, so this scan's original, since-failed job would
+ * silently block a second acceptance for the same scanId).
+ *
+ * durableJob and execution are explicitly cleared here (not just
+ * status/phase/progress/error) precisely because of that same stale-
+ * job-reference risk: durableJob still pointing at the original,
+ * long-finished "scan.analyze" job is misleading bookkeeping once this
+ * scan's content has fundamentally changed, and clearing it removes any
+ * doubt about interaction with acceptScanJob's dedup the next time a
+ * job *is* legitimately queued for this scan (e.g. "scan.run" once the
+ * person reviews and continues). execution (the ownership/heartbeat
+ * lease from the original run) is cleared for the same reason, even
+ * though liveExecution's own 90-second staleness window makes it
+ * unlikely to matter in practice by the time anyone acts on this screen.
  */
 export async function resumeScanWithManualContext(scan: ScanRecord, contextText: string): Promise<ScanRecord> {
   scan.inputMode = "context";
@@ -1356,6 +1365,8 @@ export async function resumeScanWithManualContext(scan: ScanRecord, contextText:
   scan.discoveryProfile = undefined;
   scan.competitorSuggestions = undefined;
   scan.websiteSnapshot = undefined;
+  scan.durableJob = undefined;
+  scan.execution = undefined;
   scan.updatedAt = new Date().toISOString();
   await persistScan(scan);
   return scan;

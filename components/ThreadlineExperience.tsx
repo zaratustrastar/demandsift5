@@ -2789,13 +2789,17 @@ export function ThreadlineExperience() {
    * mode with a manual description instead of the person having to start
    * an entirely new scan from scratch.
    *
-   * Mirrors exactly what the "resume a saved scan from its URL" effect
-   * already does for a phase: "created" scan (see the useEffect reading
-   * scan_id near the top of this component): seed analysisScanRef with
-   * the resumed scan so the analyzing-view polling effect picks it up
-   * directly instead of creating a new one, then move to "analyzing".
-   * No new polling logic needed -- that effect already handles a
-   * context-mode, phase: "created" scan correctly.
+   * The route runs the (fast, crawl-free) context analysis synchronously
+   * and returns the fully analyzed scan directly -- not merely reset to
+   * phase: "created" for a separate POST .../analyze call to pick up
+   * later, the way a first-time submission works. That route's own doc
+   * comment explains why: a "scan.analyze" job is deduped by scanId+type
+   * alone, so a second acceptance attempt for this same scanId (this
+   * scan already has one, from its failed website attempt) would
+   * silently no-op instead of actually running anything. So this either
+   * lands on "awaiting_review" already, or -- on a genuine analysis
+   * failure -- surfaces that directly, rather than needing the
+   * analyzing-view polling effect to discover either outcome later.
    */
   async function submitManualDescription() {
     const scanId = scanResponse?.scan.id;
@@ -2817,8 +2821,18 @@ export function ThreadlineExperience() {
       setScanProgress(latest.scan.progress);
       setAccessLevel(effectiveAccessLevel(latest.access));
       setErrorMessage("");
-      analysisScanRef.current = Promise.resolve(latest);
-      setView("analyzing");
+      keepStableScanUrl(latest.scan.id);
+      if (latest.scan.phase === "awaiting_review" && latest.scan.analysisReady) {
+        setReviewScanId(latest.scan.id);
+        analysisScanRef.current = Promise.resolve(latest);
+        setView("competitors");
+      } else {
+        // Unexpected shape (the route is only supposed to return once
+        // analysis has actually finished) -- fall back to the ordinary
+        // analyzing/polling flow rather than getting stuck.
+        analysisScanRef.current = Promise.resolve(latest);
+        setView("analyzing");
+      }
     } catch (error) {
       setManualDescribeError(error instanceof Error ? error.message : "We couldn't save that description. Try again.");
     } finally {

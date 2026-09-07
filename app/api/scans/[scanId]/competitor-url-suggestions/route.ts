@@ -5,7 +5,7 @@ import { assertRateLimit } from "@/lib/server/rate-limit";
 import { getStateRepository } from "@/lib/server/repository";
 import { aiCapacityFromEnv } from "@/lib/ai/capacity";
 import { globallyBoundedAiRequestGate } from "@/lib/server/provider-capacity";
-import { createOpenAiProviderFromEnv, openAiModelsFromEnv } from "@/lib/providers/openai.server";
+import { createOpenAiProviderFromEnv, openAiModelsFromEnv, competitorSuggestionModelFromEnv } from "@/lib/providers/openai.server";
 import { resolveCompetitorUrlsFromCrawl, buildCompactCompetitorEvidence } from "@/lib/server/competitor-url-resolution";
 
 type RouteContext = { params: Promise<{ scanId: string }> | { scanId: string } };
@@ -104,6 +104,7 @@ export async function GET(request: Request, context: RouteContext) {
           pages: buildCompactCompetitorEvidence(crawl),
           ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
           aiProvider,
+          model: competitorSuggestionModelFromEnv(),
           models: openAiModelsFromEnv(),
           workspaceId: actor.workspaceId,
         })

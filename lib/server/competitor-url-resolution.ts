@@ -233,6 +233,7 @@ export async function resolveCompetitorUrlsFromCrawl(params: {
   pages: CompactCompetitorEvidencePage[];
   ownDomain: string;
   aiProvider: AiProvider;
+  model: string;
   models: ModelConfiguration;
   workspaceId: string;
   resolver?: HostResolver;
@@ -247,6 +248,7 @@ export async function resolveCompetitorUrlsFromCrawl(params: {
       websiteUrl: params.websiteUrl,
       canonicalDomain: params.canonicalDomain,
       pages: params.pages,
+      model: params.model,
       models: params.models,
     });
     proposed = result.value;

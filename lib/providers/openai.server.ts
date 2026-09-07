@@ -1252,6 +1252,29 @@ export function analysisReasoningEffortFromEnv(env: NodeJS.ProcessEnv = process.
   return env.OPENAI_ANALYSIS_REASONING_EFFORT?.trim() === "medium" ? "medium" : "low";
 }
 
+/**
+ * suggestCompetitorsFromCrawl's model -- kept independently configurable
+ * from both openAiModelsFromEnv's economyModel and analysisModel,
+ * specifically so this one change can be rolled back with an env var, no
+ * deploy, without affecting analyzeBusiness()'s own model setting.
+ *
+ * Was economyModel (gpt-5.6-luna, which resolves to deepseek-v4-flash on
+ * this gateway) until a real production scan (tvcp.app) measured 73.6s
+ * for this call -- reproduced live on a second fresh scan at 70.4s,
+ * confirming it wasn't a one-off. Same failure mode already disqualified
+ * this model for analyzeBusiness()'s much larger schema (empty
+ * completions, retries, a silent fallback to gpt-5.5, 514s in that
+ * benchmark) -- this is that same unreliability showing up on a smaller
+ * schema, just less consistently triggered. Defaults to gpt-5.6-sol
+ * (the model already proven reliable for analyzeBusiness) specifically
+ * to skip deepseek-v4-flash's unreliable first hop, even for its own
+ * fallback chain, rather than risk the same empty-completion retries
+ * before falling back.
+ */
+export function competitorSuggestionModelFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  return env.OPENAI_COMPETITOR_SUGGESTION_MODEL?.trim() || DEFAULT_OPENAI_MODELS.analysisModel;
+}
+
 export function openAiModelFallbacksFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   models = openAiModelsFromEnv(env),
@@ -2414,7 +2437,7 @@ export class OpenAiProvider implements AiProvider {
     request: SuggestCompetitorsFromCrawlRequest,
   ): Promise<AiProviderResult<SuggestedCompetitor[]>> {
     return this.structured({
-      model: request.models.economyModel,
+      model: request.model,
       operation: "competitor_suggestion",
       schemaName: "competitor_suggestions",
       schema: COMPETITOR_SUGGESTIONS_SCHEMA,

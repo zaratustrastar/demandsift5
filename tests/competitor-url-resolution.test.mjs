@@ -68,8 +68,31 @@ test("homepage verification fetches run in parallel across the batch, not sequen
   assert.match(resolution, /await Promise\.all\(\s*candidates\.map/);
 });
 
-test("competitor suggestion uses the economy model and one batched request, not the analysis tier and not one request per candidate", () => {
-  assert.match(provider, /model: request\.models\.economyModel,\s*\n\s*operation: "competitor_suggestion"/);
+test("competitor suggestion uses an independently-configurable model (not economyModel/luna) and one batched request, not one request per candidate", () => {
+  // Switched from economyModel (gpt-5.6-luna, which resolves to
+  // deepseek-v4-flash on this gateway) after a real production scan
+  // measured 73.6s for this call, reproduced live at 70.4s -- the same
+  // empty-completion/retry/fallback unreliability already disqualified
+  // for analyzeBusiness()'s larger schema. Kept independently
+  // configurable (competitorSuggestionModelFromEnv, not economyModel or
+  // analysisModel) so it can be rolled back without affecting
+  // analyzeBusiness()'s own model setting.
+  assert.match(provider, /model: request\.model,\s*\n\s*operation: "competitor_suggestion"/);
+  assert.doesNotMatch(provider.slice(provider.indexOf("async suggestCompetitorsFromCrawl")), /model: request\.models\.economyModel/);
+});
+
+test("competitorSuggestionModelFromEnv defaults to gpt-5.6-sol and reads OPENAI_COMPETITOR_SUGGESTION_MODEL for rollback without a code change", () => {
+  const fnStart = provider.indexOf("export function competitorSuggestionModelFromEnv");
+  const fnBody = provider.slice(fnStart, provider.indexOf("\n}", fnStart));
+  assert.match(fnBody, /OPENAI_COMPETITOR_SUGGESTION_MODEL/);
+  assert.match(fnBody, /DEFAULT_OPENAI_MODELS\.analysisModel/);
+});
+
+test("both production call sites of resolveCompetitorUrlsFromCrawl pass the env-configured competitor-suggestion model, not a hardcoded one", () => {
+  assert.match(resolution, /model: params\.model,/);
+  const workflowMatches = [...workflow.matchAll(/model: competitorSuggestionModelFromEnv\(env\)/g)];
+  assert.equal(workflowMatches.length, 1);
+  assert.match(route, /model: competitorSuggestionModelFromEnv\(\)/);
 });
 
 test("the model is explicitly told not to guess a domain from the name alone, and not to pad the list to reach 3", () => {

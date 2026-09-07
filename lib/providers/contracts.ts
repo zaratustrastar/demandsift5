@@ -303,6 +303,13 @@ export interface SuggestCompetitorsFromCrawlRequest {
   websiteUrl: string;
   canonicalDomain: string;
   pages: Array<{ url: string; title: string; description?: string; textExcerpt: string }>;
+  /** Resolved by the caller via competitorSuggestionModelFromEnv, not
+   * derived from models.economyModel here -- kept independently
+   * configurable/rollback-able from analyzeBusiness()'s own model
+   * setting. See that function's doc comment in openai.server.ts for
+   * why this changed from gpt-5.6-luna (deepseek-v4-flash) to
+   * gpt-5.6-sol. */
+  model: string;
   models: ModelConfiguration;
 }
 

@@ -36,7 +36,7 @@ import {
 } from "@/lib/intelligence/embedding-prefilter";
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
 import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
-import { createOpenAiProviderFromEnv, openAiModelsFromEnv, analysisReasoningEffortFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
+import { createOpenAiProviderFromEnv, openAiModelsFromEnv, analysisReasoningEffortFromEnv, competitorSuggestionModelFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
 import type { TriageProcessingOutcome } from "@/lib/providers/contracts";
 import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
 import { crawlWebsite, UnsafeWebsiteUrlError, PermanentWebsiteFetchError } from "@/lib/security/website-crawler";
@@ -711,6 +711,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
           pages: buildCompactCompetitorEvidence(crawl),
           ownDomain: normalizedBusinessHostname(scan.websiteUrl) ?? "",
           aiProvider,
+          model: competitorSuggestionModelFromEnv(env),
           models,
           workspaceId: scan.workspaceId,
         })

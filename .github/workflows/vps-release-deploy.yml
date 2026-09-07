@@ -1,7 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: add temporary benchmark endpoint for analyzeBusiness()
-# model/reasoning-effort comparison, investigation-only, not used by
-# production UI (2026-09-07).
+# Release marker: benchmark endpoint now supports ?configIndex=0-3 to run
+# a single config per request, avoiding client timeout on the combined
+# 4-call version (2026-09-07).
 
 on:
   push:

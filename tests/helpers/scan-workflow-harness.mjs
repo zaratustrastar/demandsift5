@@ -100,7 +100,7 @@ export async function scanWorkflowHarness(t, { count = 15, fetchLimit = 0, dropU
     "lib/server/funnel.ts": "export async function captureFunnelEvent() {}",
     "lib/server/ai-visibility-workflow.ts": "export async function ensureAiVisibilityTrackingStarted() {}",
     "lib/security/website-crawler.ts": `export class UnsafeWebsiteUrlError extends Error {} export const crawlWebsite = (...args) => ${ref}.crawlWebsite(...args); export const validatePublicWebsiteUrl = async () => { throw new Error("validatePublicWebsiteUrl is not stubbed in this test harness -- if a test needs it, add a real stub instead of relying on this throwing"); };`,
-    "lib/providers/openai.server.ts": `export const createOpenAiProviderFromEnv = (env, options) => ${ref}.createAiProvider ? ${ref}.createAiProvider(env, options) : ${ref}.ai; export const openAiModelsFromEnv = () => ${ref}.models; export const isUsableTriageJudgment = ${ref}.isUsableTriageJudgment;`,
+    "lib/providers/openai.server.ts": `export const createOpenAiProviderFromEnv = (env, options) => ${ref}.createAiProvider ? ${ref}.createAiProvider(env, options) : ${ref}.ai; export const openAiModelsFromEnv = () => ${ref}.models; export const analysisReasoningEffortFromEnv = () => "low"; export const isUsableTriageJudgment = ${ref}.isUsableTriageJudgment;`,
     "lib/providers/reddit.server.ts": `export const createRedditProviderFromEnv = () => ${ref}.reddit;`,
   } });
   scan = await workflow.createScan("fixture_workspace", inputMode === "website"

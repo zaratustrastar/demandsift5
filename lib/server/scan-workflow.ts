@@ -36,7 +36,7 @@ import {
 } from "@/lib/intelligence/embedding-prefilter";
 import { aggregatePotentialCustomers, normalizedRedditAuthor } from "@/lib/intelligence/potential-customers";
 import { createRedditProviderFromEnv } from "@/lib/providers/reddit.server";
-import { createOpenAiProviderFromEnv, openAiModelsFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
+import { createOpenAiProviderFromEnv, openAiModelsFromEnv, analysisReasoningEffortFromEnv, isUsableTriageJudgment } from "@/lib/providers/openai.server";
 import type { TriageProcessingOutcome } from "@/lib/providers/contracts";
 import { ensureAiVisibilityTrackingStarted } from "@/lib/server/ai-visibility-workflow";
 import { crawlWebsite, UnsafeWebsiteUrlError } from "@/lib/security/website-crawler";
@@ -184,7 +184,7 @@ async function observedCrawl(scan: ScanRecord, pageTraces?: PageCrawlTrace[]): P
   return structuredClone(scan.websiteSnapshot.crawl);
 }
 
-export function assertWebsiteProfileEvidence(scan: ScanRecord, business: BusinessUnderstanding) {
+function assertWebsiteProfileEvidence(scan: ScanRecord, business: BusinessUnderstanding) {
   if (!scan.websiteSnapshot || !legacyProfileMatchesSnapshot(businessWebsiteSourceIds(business), scan.websiteSnapshot)) {
     throw new ApiError("The business profile references unavailable website evidence. Retry the website analysis.", 502, "website_snapshot_mismatch");
   }
@@ -521,7 +521,7 @@ function profileFromBusiness(business: BusinessUnderstanding): ScanBusinessProfi
 /** Provenance records + sourceId-tagged pages for a crawl result. Shared by
  * runFullWebsiteUnderstanding and the full pass inside `runScan`, so both
  * attribute evidence the same way. */
-export function pagesFromCrawl(crawl: WebsiteCrawlResult): {
+function pagesFromCrawl(crawl: WebsiteCrawlResult): {
   websiteSources: Provenance[];
   pages: Array<WebsiteCrawlResult["pages"][number] & { sourceId: string }>;
 } {
@@ -654,6 +654,7 @@ async function runFullWebsiteUnderstanding(scan: ScanRecord): Promise<{
           canonicalDomain: crawl.canonicalDomain,
           pages,
           models,
+          reasoningEffortOverride: analysisReasoningEffortFromEnv(env),
         });
         const competitorStarted = performance.now();
         // Persisted the moment this branch settles -- not after
@@ -1490,6 +1491,7 @@ export async function runScan(
         canonicalDomain: websiteCrawl.canonicalDomain,
         pages,
         models,
+        reasoningEffortOverride: analysisReasoningEffortFromEnv(env),
       });
       assertWebsiteProfileEvidence(scan, analyzed.value);
       business = analyzed.value;

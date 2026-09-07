@@ -1234,6 +1234,24 @@ export function openAiModelsFromEnv(env: NodeJS.ProcessEnv = process.env): Model
   };
 }
 
+/**
+ * analyzeBusiness()'s reasoning effort -- separated from openAiModelsFromEnv
+ * so it can be rolled back with just an env var change, no deploy. Default
+ * is "low": a benchmark across 3 representative businesses (SaaS,
+ * e-commerce, restaurant) measured "medium" against "low" on the same
+ * gpt-5.6-sol model and found latency 16-23% lower with "low" on 2 of 3
+ * sites (identical on the third) and no quality regression on any
+ * BusinessUnderstanding field across any of them. Set
+ * OPENAI_ANALYSIS_REASONING_EFFORT=medium to revert to the prior
+ * behavior without a code change. Deliberately not exposed for
+ * analyzeBusinessFromContext (the "describe your market" text path),
+ * which keeps its own separate hardcoded "medium" -- untouched, since
+ * only the website-crawl path was benchmarked.
+ */
+export function analysisReasoningEffortFromEnv(env: NodeJS.ProcessEnv = process.env): "low" | "medium" {
+  return env.OPENAI_ANALYSIS_REASONING_EFFORT?.trim() === "medium" ? "medium" : "low";
+}
+
 export function openAiModelFallbacksFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   models = openAiModelsFromEnv(env),

@@ -312,9 +312,18 @@ export function CompetitorsSetup({
           Skip for now
         </button>
         <button className={styles.primary} type="button" onClick={saveAndContinue} disabled={analyzing}>
+          {analyzing && <span className={styles.spinner} aria-hidden="true" />}
           {analyzing ? "Analyzing competitors…" : "Continue to search setup →"}
         </button>
       </footer>
+      {analyzing && (
+        <>
+          <p className={styles.note}>
+            Comparing your business with competitors to find the right search phrases.
+          </p>
+          <p className={styles.noteSecondary}>Usually takes about 20–30 seconds.</p>
+        </>
+      )}
     </main>
   );
 }

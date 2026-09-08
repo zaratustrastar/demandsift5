@@ -310,6 +310,10 @@
   border-radius: 10px;
   padding: 12px 22px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .primary { border: 0; background: var(--green); color: #fff; }
@@ -318,6 +322,23 @@
 
 .secondary { border: 1px solid var(--line); background: var(--card); color: var(--ink); }
 .secondary:hover:not(:disabled) { border-color: var(--green); }
+
+/* Same rotating-ring technique as ThreadlineExperience.module.css's
+ * existing .orbit loader (@keyframes spin { to { transform: rotate
+ * (360deg); } }), just resized and recolored for inline use inside a
+ * button instead of a full-screen loading state. Scoped locally here
+ * since CSS Modules don't share keyframes across files. */
+.spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .4);
+  border-top-color: #fff;
+  animation: spin .7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .skipLink {
   font: inherit;
@@ -342,6 +363,20 @@
   text-align: right;
 }
 
+/* Same positioning/width/color as .note above -- sits directly under it
+ * as a lighter-weight sub-line, not a second separate note (smaller top
+ * margin, reduced opacity on the same muted color rather than a new
+ * font-size or color token). */
+.noteSecondary {
+  width: 100%;
+  max-width: 880px;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  opacity: .75;
+  text-align: right;
+}
+
 .error {
   width: 100%;
   max-width: 880px;
@@ -355,5 +390,5 @@
   .title { font-size: 26px; }
   .actions { justify-content: stretch; }
   .primary, .secondary { flex: 1; }
-  .note { text-align: left; }
+  .note, .noteSecondary { text-align: left; }
 }

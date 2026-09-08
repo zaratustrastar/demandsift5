@@ -1319,6 +1319,36 @@
   letter-spacing: 0.03em;
 }
 
+/* Same color language as .reliabilityBadge above (soft green, dark-green
+ * number) adapted to a small inline pill instead of a block-level corner
+ * badge, so it reads as a secondary detail sitting with the card's own
+ * content rather than competing with the header for space. The number is
+ * the same existing 0-100 ranking score that already orders the carousel
+ * (see RelevanceBadge's own doc comment) -- displayed, not recomputed. */
+.relevanceBadge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 4px 9px;
+  background: var(--green-soft);
+  border-radius: 8px;
+}
+
+.relevanceBadge strong {
+  color: var(--green-dark);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.relevanceBadge span {
+  color: #4c7c67;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 .carouselActions {
   display: flex;
   flex-wrap: wrap;

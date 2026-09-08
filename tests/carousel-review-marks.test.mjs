@@ -165,3 +165,54 @@ test("only the previous/next arrows plus filter switching move the position -- b
   assert.match(carouselBody, /const item = filteredItems\[safeIndex\];/);
 });
 
+/**
+ * Relevance score display: the existing 0-100 ranking score every carousel
+ * item already carries (CarouselItem.reliability, already used to sort the
+ * carousel) is now also shown on the card, via the same reliability value
+ * threaded straight through rather than recomputed. Two pieces of "AI
+ * reliability/relevance" boilerplate copy were removed in the same change
+ * (a section-header note and the carousel's own footer caption) in favor
+ * of showing the real number directly.
+ */
+test("RelevanceBadge displays the existing CarouselItem.reliability score, clamped/rounded for display only -- not a new scoring computation", () => {
+  const fnStart = dashboard.indexOf("function RelevanceBadge");
+  const fnBody = dashboard.slice(fnStart, dashboard.indexOf("\n}\n", fnStart));
+  assert.match(fnBody, /const rounded = Math\.round\(Math\.max\(0, Math\.min\(100, score\)\)\);/);
+  assert.match(fnBody, /<strong>\{rounded\}<\/strong>/);
+});
+
+test("the high-relevance label is a single transparent threshold, not a multi-tier legend", () => {
+  const fnStart = dashboard.indexOf("function RelevanceBadge");
+  const fnBody = dashboard.slice(fnStart, dashboard.indexOf("\n}\n", fnStart));
+  assert.match(fnBody, /rounded >= 85 \? "High relevance" : "relevance"/);
+  // Only one threshold check in the whole function -- not a low/medium/high ladder.
+  assert.equal((fnBody.match(/rounded >=/g) ?? []).length, 1);
+});
+
+test("both card kinds pass their item's own reliability value into the shared RelevanceBadge, using the same CarouselItem field that already sorts the carousel", () => {
+  assert.match(dashboard, /reliability=\{item\.reliability\}/g);
+  const opportunityCardStart = dashboard.indexOf("function CarouselOpportunityCard");
+  const relevantCardStart = dashboard.indexOf("function CarouselRelevantCard");
+  const opportunityCardBody = dashboard.slice(opportunityCardStart, dashboard.indexOf("\n}\n", opportunityCardStart));
+  const relevantCardBody = dashboard.slice(relevantCardStart, dashboard.indexOf("\n}\n", relevantCardStart));
+  for (const body of [opportunityCardBody, relevantCardBody]) {
+    assert.match(body, /<RelevanceBadge score=\{reliability\} \/>/);
+  }
+});
+
+test("the badge reuses .reliabilityBadge's existing color tokens (green-soft, green-dark) rather than introducing new colors", () => {
+  assert.match(dashboardCss, /\.relevanceBadge \{/);
+  const badgeStart = dashboardCss.indexOf(".relevanceBadge {");
+  const badgeBlock = dashboardCss.slice(badgeStart, badgeStart + 400);
+  assert.match(badgeBlock, /background: var\(--green-soft\);/);
+  assert.match(badgeBlock, /color: var\(--green-dark\);/);
+});
+
+test("the two specified boilerplate strings were removed from the carousel section, and no unrelated screen's copy was touched", () => {
+  assert.equal(dashboard.includes("AI relevance checked"), false);
+  assert.equal(dashboard.includes("Ordered by AI reliability, highest first. Later conversations may be less reliable."), false);
+  // The similarly-worded but distinct "Worth your time today" overview
+  // section's own copy is a different screen and must be untouched.
+  assert.match(dashboard, /<span>Ordered by AI reliability, highest first<\/span>/);
+});
+

@@ -1072,6 +1072,7 @@ function CarouselRelevantCard({
   onCreateReply,
   reviewStatus,
   onSetReviewStatus,
+  reliability,
 }: {
   conversation: RelevantConversation;
   isRevealed: boolean;
@@ -1084,6 +1085,7 @@ function CarouselRelevantCard({
   onCreateReply: () => void;
   reviewStatus: "reviewed" | "declined" | "replied" | null;
   onSetReviewStatus: (status: "reviewed" | "declined" | "replied") => void;
+  reliability: number;
 }) {
   const signalLabels = [...new Set([
     ...conversation.demandSignals,
@@ -1106,6 +1108,8 @@ function CarouselRelevantCard({
           <ReviewStatusBadge status={reviewStatus} />
         </div>
       </div>
+
+      <RelevanceBadge score={reliability} />
 
       <h3>{conversation.title}</h3>
       <div className={styles.mockExcerpt}>
@@ -1465,6 +1469,27 @@ function ReviewStatusBadge({ status }: { status: "reviewed" | "declined" | "repl
 }
 
 /**
+ * The existing 0-100 ranking score every opportunity/relevant conversation
+ * already carries (CarouselItem.reliability -- opportunity.classification.
+ * relevanceScore or conversation.reliabilityScore, both already clamped
+ * 0-100 server-side; see percent() in reddit-pipeline.ts and
+ * publicRelevantConversation's Math.round/clamp in presenter.ts). This is
+ * the same number that already decides carousel order -- displayed here,
+ * not recomputed. "High relevance" is a single, transparent threshold on
+ * that existing number (>= 85), not a new scoring system or a multi-tier
+ * legend; below that, just the number.
+ */
+function RelevanceBadge({ score }: { score: number }) {
+  const rounded = Math.round(Math.max(0, Math.min(100, score)));
+  return (
+    <span className={styles.relevanceBadge}>
+      <strong>{rounded}</strong>
+      <span>{rounded >= 85 ? "High relevance" : "relevance"}</span>
+    </span>
+  );
+}
+
+/**
  * The single card shown by OpportunityCarousel. Same underlying fields as
  * OpportunityCard (relevanceScore, matchReasons, permalink, reply) -- this
  * is a presentation variant for the single-card carousel, not a new data
@@ -1476,12 +1501,14 @@ function CarouselOpportunityCard({
   onToggleReply,
   reviewStatus,
   onSetReviewStatus,
+  reliability,
 }: {
   opportunity: RedditOpportunity;
   isRevealed: boolean;
   onToggleReply: () => void;
   reviewStatus: "reviewed" | "declined" | "replied" | null;
   onSetReviewStatus: (status: "reviewed" | "declined" | "replied") => void;
+  reliability: number;
 }) {
   const tags = reliabilitySignalTags(opportunity);
   const whyItMatters = opportunity.matchReasons[0] ?? opportunity.classification.customerProblem;
@@ -1500,6 +1527,8 @@ function CarouselOpportunityCard({
         </div>
         <ReviewStatusBadge status={reviewStatus} />
       </div>
+
+      <RelevanceBadge score={reliability} />
 
       <h3>{opportunity.title}</h3>
 
@@ -1776,6 +1805,7 @@ function OpportunityCarousel({
           onToggleReply={() => toggleReply(item.id)}
           reviewStatus={currentReviewStatus}
           onSetReviewStatus={handleSetReviewStatus}
+          reliability={item.reliability}
         />
       ) : (
         <CarouselRelevantCard
@@ -1787,6 +1817,7 @@ function OpportunityCarousel({
           onCreateReply={() => onCreateReply(item.conversation)}
           reviewStatus={currentReviewStatus}
           onSetReviewStatus={handleSetReviewStatus}
+          reliability={item.reliability}
         />
       )}
 
@@ -1829,10 +1860,6 @@ function OpportunityCarousel({
           <Icon name="arrow" size={20} />
         </button>
       </div>
-
-      <p className={styles.carouselCaption}>
-        Ordered by AI reliability, highest first. Later conversations may be less reliable.
-      </p>
     </div>
   );
 }
@@ -2544,7 +2571,6 @@ export function ProductDashboard({
                         <div>
                           <h2>Reddit posts found:</h2>
                         </div>
-                        <span className={styles.qualityNote}>AI relevance checked &middot; Source linked</span>
                       </div>
                       <OpportunityCarousel
                         items={carouselItems}

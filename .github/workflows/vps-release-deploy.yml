@@ -1,7 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: fix the manual-description recovery flow -- run the
-# context analysis directly instead of re-triggering a job the queue's
-# own dedup silently no-ops on for an already-failed scan (2026-09-07).
+# Release marker: decompress gzip/deflate/br responses in the pinned
+# website fetch -- amazon.es (and any site whose server compresses
+# regardless of Accept-Encoding) was corrupting crawled content into
+# unreadable garbage that silently broke the database write with no
+# visible scan error at all (2026-09-08).
 
 on:
   push:

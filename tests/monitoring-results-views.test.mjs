@@ -64,15 +64,18 @@ test("a run's own scan can be opened without leaving the dashboard, via a real A
   assert.match(experienceSource, /monitorRuns=\{monitorRuns\}/);
 });
 
-test("the AI visibility panel renders the latest scan's answers, metrics, and any provider errors, not just the toggle", () => {
-  const start = dashboardSource.indexOf("function AiVisibilityPanel");
+test("the AI visibility feature renders the latest scan's answers, metrics, and any provider errors, not just the toggle -- now split across AiVisibilityPanel and its helper components/sub-components rather than one flat function", () => {
+  // Spans from the first AI-visibility helper (groupVisibilityAnswersByQuestion,
+  // defined just before AiVisibilityPanel) through AiVisibilityPanel's own end,
+  // since the redesign split what used to be one function into several.
+  const start = dashboardSource.indexOf("function groupVisibilityAnswersByQuestion");
   const end = dashboardSource.indexOf("type IconName");
   const body = dashboardSource.slice(start, end);
   assert.match(body, /scans\?: AiVisibilityScanSummary\[\] \| null/);
   assert.match(body, /Latest results/);
-  assert.match(body, /latest\.metrics/);
+  assert.match(body, /latestSucceeded\.metrics/);
   assert.match(body, /latest\.providerErrors/);
-  assert.match(body, /latest\.answers/);
+  assert.match(body, /scan\.answers/);
   assert.match(body, /answer\.brandMentioned/);
   assert.match(body, /answer\.brandRecommended/);
   assert.match(body, /answer\.citations/);

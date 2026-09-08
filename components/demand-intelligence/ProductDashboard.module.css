@@ -854,6 +854,161 @@
   color: var(--green-dark);
 }
 
+/* Requirement 1: compact, generic loading state. Same rotating-ring
+ * technique as DiscoveryProfile.module.css's existing .spinner
+ * (@keyframes spin { to { transform: rotate(360deg); } }) -- scoped
+ * locally here since CSS Modules don't share keyframes across files --
+ * just larger and recolored for sitting on a light card background
+ * instead of inside a colored button. */
+.aiVisibilityLoading {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 4px 0;
+}
+
+.aiVisibilityLoading strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.aiVisibilityLoading p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.aiVisibilitySpinner {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 2.5px solid var(--line);
+  border-top-color: var(--green);
+  animation: aiVisibilitySpin 0.8s linear infinite;
+}
+
+@keyframes aiVisibilitySpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Requirement 3: three compact summary metrics -- cells reuse the
+ * existing .scMetricCard/.scMetricLabel/.scMetricValue/.scMetricNote
+ * from the Overview screen; only this 3-column grid wrapper is new
+ * (Overview's own .metricsRow is a 4-column grid, built for a
+ * different, larger metric set). */
+.aiVisibilityMetricsRow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+/* Requirement 4: compact per-question row, reusing .resultsRow's own
+ * color/border/radius tokens but as a clickable button with its own
+ * flex layout (question text / mentioned-recommended-sources meta /
+ * view arrow) instead of .resultsRow's simple stacked grid. */
+.trackedQuestionRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 14px;
+  width: 100%;
+  padding: 11px 13px;
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trackedQuestionRow:hover {
+  border-color: var(--green);
+}
+
+.trackedQuestionText {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.trackedQuestionMeta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.trackedQuestionArrow {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--green-dark);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Requirement 5: right-side details drawer. Reuses the exact same
+ * overlay/backdrop technique as .valuePropOverlay/.valuePropClose
+ * above (same darkening, same z-index approach, same close-button
+ * style) -- no drawer/sheet component exists anywhere in this
+ * codebase, so this is the simplest existing-style equivalent rather
+ * than a new dependency, just anchored to the right edge instead of
+ * centered. */
+.aiVisibilityDrawerOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(13, 13, 15, 0.45);
+}
+
+.aiVisibilityDrawer {
+  position: relative;
+  width: min(560px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  background: #fff;
+  padding: 40px 32px 34px;
+  box-shadow: -20px 0 60px -20px rgba(9, 9, 11, 0.35);
+}
+
+.aiVisibilityDrawerTitle {
+  margin: 6px 0 4px;
+  font-family: var(--font-ui);
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.28;
+  letter-spacing: -0.03em;
+}
+
+.aiVisibilityDrawerBody {
+  display: grid;
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.aiVisibilityDrawerProvider {
+  padding: 16px 18px;
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
 .sectionHeadingRow,
 .replyHeader {
   display: flex;

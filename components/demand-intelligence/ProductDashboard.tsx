@@ -521,6 +521,186 @@ function RedditMonitoringPanel({
   );
 }
 
+type GroupedVisibilityQuestion = {
+  question: string;
+  answers: AiVisibilityAnswerSummary[];
+  mentionedCount: number;
+  recommendedCount: number;
+  totalSources: number;
+};
+
+/**
+ * Groups the scan's flat answers list (provider x question, up to 9
+ * entries) by question text -- the same 3 questions are asked of every
+ * provider (see ai-visibility-workflow.ts's generateQuestions, called
+ * once and reused for all 3 Actor runs), so exact-string grouping is
+ * reliable, not a heuristic. scan.questions (not the answers array
+ * itself) is the authoritative list of tracked questions, so a question
+ * every provider failed to answer still gets its own row rather than
+ * silently disappearing.
+ */
+function groupVisibilityAnswersByQuestion(scan: AiVisibilityScanSummary): GroupedVisibilityQuestion[] {
+  const byQuestion = new Map<string, AiVisibilityAnswerSummary[]>();
+  for (const answer of scan.answers) {
+    const list = byQuestion.get(answer.question) ?? [];
+    list.push(answer);
+    byQuestion.set(answer.question, list);
+  }
+  return scan.questions.map((question) => {
+    const answers = byQuestion.get(question) ?? [];
+    return {
+      question,
+      answers,
+      mentionedCount: answers.filter((answer) => answer.brandMentioned).length,
+      recommendedCount: answers.filter((answer) => answer.brandRecommended).length,
+      totalSources: answers.reduce((sum, answer) => sum + answer.citations.length, 0),
+    };
+  });
+}
+
+/**
+ * Compact, generic loading state -- shown only while the latest scan is
+ * running/queued and no earlier successful result exists to show
+ * instead (once a successful result exists, a slower newer check runs
+ * quietly behind it rather than replacing good results with a spinner).
+ * No fake percentages or per-provider progress bars: scan.status
+ * (queued/running/succeeded/failed) is the only genuine run-level
+ * status in the data model. providerErrors exists but is only populated
+ * after a provider has actually failed, never as an "in progress"
+ * signal during a run -- there is no genuine per-provider running state
+ * to show honestly, so this stays one generic state as the spec allows.
+ */
+function AiVisibilityLoadingState() {
+  return (
+    <div className={styles.aiVisibilityLoading}>
+      <span className={styles.aiVisibilitySpinner} aria-hidden="true" />
+      <div>
+        <strong>Checking your AI visibility now</strong>
+        <p>We&rsquo;re asking the same buyer questions across ChatGPT, Gemini and Perplexity.</p>
+        <p>Usually takes a few minutes.</p>
+        <p className={styles.resultsMeta}>
+          Results will appear here automatically. You can leave this page while the check continues.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One compact row per tracked buyer question -- the primary grouping is
+ * by question, not by provider, since the useful comparison is how
+ * differently ChatGPT/Gemini/Perplexity answer the exact same question.
+ * No full answer text here; that only appears in the detail drawer.
+ */
+function TrackedQuestionRow({
+  grouped,
+  onOpen,
+}: {
+  grouped: GroupedVisibilityQuestion;
+  onOpen: () => void;
+}) {
+  const total = grouped.answers.length || 3;
+  return (
+    <button type="button" className={styles.trackedQuestionRow} onClick={onOpen}>
+      <span className={styles.trackedQuestionText}>{grouped.question}</span>
+      <span className={styles.trackedQuestionMeta}>
+        Mentioned {grouped.mentionedCount}/{total}
+        {" \u00b7 "}Recommended {grouped.recommendedCount}/{total}
+        {grouped.totalSources > 0 && (
+          <>{" \u00b7 "}{grouped.totalSources} source{grouped.totalSources === 1 ? "" : "s"}</>
+        )}
+      </span>
+      <span className={styles.trackedQuestionArrow} aria-hidden="true">
+        View <Icon name="arrow" size={12} />
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Right-side details drawer for one tracked question. No drawer/sheet
+ * component exists anywhere in this codebase (checked before writing
+ * this) and none was added -- this reuses the same overlay/backdrop
+ * technique as the existing value-prop modal (.valuePropOverlay,
+ * .valuePropClose), just anchored to the right edge via new CSS instead
+ * of centered. Answers are grouped by provider (ChatGPT, then Gemini,
+ * then Perplexity) per spec, rendered with the same FormattedAnswerText
+ * this screen's old flat list already used -- no new markdown
+ * dependency, and the raw answer text/sources are shown exactly as
+ * stored, never truncated, regenerated, or re-summarized.
+ */
+function AiVisibilityAnswerDrawer({
+  grouped,
+  checkedAt,
+  onClose,
+}: {
+  grouped: GroupedVisibilityQuestion;
+  checkedAt: string;
+  onClose: () => void;
+}) {
+  const order: AiVisibilityProvider[] = ["chatgpt", "gemini", "perplexity"];
+  const byProvider = new Map(grouped.answers.map((answer) => [answer.provider, answer]));
+  return (
+    <div className={styles.aiVisibilityDrawerOverlay}>
+      <div className={styles.aiVisibilityDrawer}>
+        <button type="button" className={styles.valuePropClose} onClick={onClose} aria-label="Close">
+          &times;
+        </button>
+        <span className={styles.simpleCardEyebrow}>Tracked question</span>
+        <h2 className={styles.aiVisibilityDrawerTitle}>{grouped.question}</h2>
+        <p className={styles.resultsMeta}>Last checked {relativeTime(checkedAt)}</p>
+        <div className={styles.aiVisibilityDrawerBody}>
+          {order.map((provider) => {
+            const answer = byProvider.get(provider);
+            return (
+              <section key={provider} className={styles.aiVisibilityDrawerProvider}>
+                <div className={styles.resultsRowHead}>
+                  <span className={styles.resultsProvider}>{aiVisibilityProviderLabel(provider)}</span>
+                  {answer ? (
+                    <span
+                      className={`${styles.resultsStatus} ${answer.brandMentioned ? styles.resultsStatusOk : styles.resultsStatusPending}`}
+                    >
+                      {answer.brandMentioned ? "Mentioned" : "Not mentioned"}
+                      {answer.brandMentioned
+                        ? ` \u00b7 ${answer.brandRecommended ? "Recommended" : "Not recommended"}`
+                        : ""}
+                    </span>
+                  ) : (
+                    <span className={`${styles.resultsStatus} ${styles.resultsStatusFail}`}>No answer</span>
+                  )}
+                </div>
+                {answer?.answerText ? (
+                  <>
+                    <FormattedAnswerText text={answer.answerText} />
+                    {answer.citations.length > 0 && (
+                      <>
+                        <p className={styles.resultsMeta}>
+                          Sources &middot; {answer.citations.length}
+                        </p>
+                        <ul className={styles.resultsCitations}>
+                          {answer.citations.map((citation) => (
+                            <li key={citation.url}>
+                              <a href={citation.url} target="_blank" rel="noreferrer noopener">
+                                {citation.title || citation.domain}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <p className={styles.resultsEmpty}>No answer was returned for this question.</p>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AiVisibilityPanel({
   status,
   onUpdate,
@@ -531,6 +711,7 @@ function AiVisibilityPanel({
   scans?: AiVisibilityScanSummary[] | null;
 }) {
   const [saving, setSaving] = useState(false);
+  const [openQuestion, setOpenQuestion] = useState<string | null>(null);
   if (!status) return null;
 
   const save = async (enabled: boolean) => {
@@ -544,22 +725,39 @@ function AiVisibilityPanel({
   };
 
   const latest = scans?.[0] ?? null;
+  // The main content shows the most recent SUCCESSFUL check even if a
+  // newer running/failed attempt exists on top of it -- a still-running
+  // recheck must not blank out a perfectly good prior result.
+  const latestSucceeded = scans?.find((scan) => scan.status === "succeeded") ?? null;
+  const isChecking = !latestSucceeded && (latest?.status === "running" || latest?.status === "queued");
   const providerErrors = latest
     ? (Object.entries(latest.providerErrors) as Array<[AiVisibilityProvider, string | null]>).filter(
         ([, message]) => Boolean(message),
       )
     : [];
+  const grouped = latestSucceeded ? groupVisibilityAnswersByQuestion(latestSucceeded) : [];
+  const openGrouped = grouped.find((item) => item.question === openQuestion) ?? null;
 
   return (
     <section className={`${styles.card} ${styles.monitoringCard}`}>
-      <div>
-        <span className={styles.eyebrow}>AI visibility tracking</span>
-        <h2>See how ChatGPT, Gemini and Perplexity answer about you</h2>
-        <p>
-          Once a week, the same questions are put to ChatGPT, Gemini and Perplexity to check whether
-          your business is mentioned or recommended, and which sources they cite.
-        </p>
-      </div>
+      {latestSucceeded ? (
+        // Requirement 2: once a successful result exists, the large
+        // introductory hero stops being the dominant content -- same
+        // plain header/subhead every other Scooptr screen uses.
+        <div>
+          <span className={styles.eyebrow}>AI Visibility</span>
+          <h2>See how AI assistants represent your business</h2>
+        </div>
+      ) : (
+        <div>
+          <span className={styles.eyebrow}>AI visibility tracking</span>
+          <h2>See how ChatGPT, Gemini and Perplexity answer about you</h2>
+          <p>
+            Once a week, the same questions are put to ChatGPT, Gemini and Perplexity to check whether
+            your business is mentioned or recommended, and which sources they cite.
+          </p>
+        </div>
+      )}
       <label className={styles.monitoringToggle}>
         <input
           type="checkbox"
@@ -576,75 +774,105 @@ function AiVisibilityPanel({
             : "No weekly check has completed yet."}
         </small>
       </div>
-      <div className={styles.resultsBlock}>
-        <h3>Latest results</h3>
-        {!latest ? (
-          <p className={styles.resultsEmpty}>
-            No weekly check has completed yet. Once one runs, ChatGPT, Gemini and Perplexity&rsquo;s answers will appear here.
-          </p>
-        ) : (
-          <>
-            <div className={styles.resultsRowHead}>
-              <RunStatusBadge status={latest.status} />
-              <span>{relativeTime(latest.createdAt)}</span>
+
+      {isChecking && (
+        <div className={styles.resultsBlock}>
+          <AiVisibilityLoadingState />
+        </div>
+      )}
+
+      {!latestSucceeded && !isChecking && (
+        <div className={styles.resultsBlock}>
+          <h3>Latest results</h3>
+          {!latest ? (
+            <p className={styles.resultsEmpty}>
+              No weekly check has completed yet. Once one runs, ChatGPT, Gemini and Perplexity&rsquo;s answers will appear here.
+            </p>
+          ) : (
+            <>
+              <div className={styles.resultsRowHead}>
+                <RunStatusBadge status={latest.status} />
+                <span>{relativeTime(latest.createdAt)}</span>
+              </div>
+              {latest.error && (
+                <p className={styles.resultsError}>
+                  <LinkifiedText text={latest.error} />
+                </p>
+              )}
+              {providerErrors.map(([provider, message]) => (
+                <p key={provider} className={styles.resultsError}>
+                  <strong>{aiVisibilityProviderLabel(provider)}: </strong>
+                  <LinkifiedText text={message as string} />
+                </p>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
+      {latestSucceeded && (
+        <div className={styles.resultsBlock}>
+          {/* Requirement 3: three compact summary metrics, reusing the
+              same metric-card component the Overview screen already
+              uses (scMetricCard/scMetricLabel/scMetricValue/scMetricNote)
+              rather than a new card style. */}
+          <div className={styles.aiVisibilityMetricsRow}>
+            <div className={styles.scMetricCard}>
+              <span className={styles.scMetricLabel}>Mentioned</span>
+              <span className={styles.scMetricValue}>
+                {latestSucceeded.metrics?.totalMentions ?? 0} / {latestSucceeded.metrics?.totalAnswers ?? 0}
+              </span>
+              <span className={styles.scMetricNote}>
+                {Math.round((latestSucceeded.metrics?.mentionRate ?? 0) * 100)}%
+              </span>
             </div>
-            {latest.metrics && (
-              <p className={styles.resultsMeta}>
-                Mentioned in {latest.metrics.totalMentions} of {latest.metrics.totalAnswers} answers (
-                {Math.round(latest.metrics.mentionRate * 100)}%) · Recommended {latest.metrics.totalRecommendations} time
-                {latest.metrics.totalRecommendations === 1 ? "" : "s"}
-              </p>
-            )}
-            {latest.error && (
-              <p className={styles.resultsError}>
-                <LinkifiedText text={latest.error} />
-              </p>
-            )}
-            {providerErrors.map(([provider, message]) => (
+            <div className={styles.scMetricCard}>
+              <span className={styles.scMetricLabel}>Recommended</span>
+              <span className={styles.scMetricValue}>
+                {latestSucceeded.metrics?.totalRecommendations ?? 0} / {latestSucceeded.metrics?.totalAnswers ?? 0}
+              </span>
+              <span className={styles.scMetricNote}>
+                {Math.round((latestSucceeded.metrics?.recommendationRate ?? 0) * 100)}%
+              </span>
+            </div>
+            <div className={styles.scMetricCard}>
+              <span className={styles.scMetricLabel}>Questions checked</span>
+              <span className={styles.scMetricValue}>{latestSucceeded.questions.length}</span>
+              <span className={styles.scMetricNote}>
+                {relativeTime(latestSucceeded.createdAt)}
+              </span>
+            </div>
+          </div>
+
+          {latest && latest.id !== latestSucceeded.id && (latest.status === "running" || latest.status === "queued") && (
+            <p className={styles.resultsMeta}>A newer check is running now; these are the last completed results.</p>
+          )}
+          {providerErrors.length > 0 && latest?.id === latestSucceeded.id && (
+            providerErrors.map(([provider, message]) => (
               <p key={provider} className={styles.resultsError}>
                 <strong>{aiVisibilityProviderLabel(provider)}: </strong>
                 <LinkifiedText text={message as string} />
               </p>
+            ))
+          )}
+
+          {/* Requirement 4: grouped by buyer question, not by provider. */}
+          <h3>Questions tracked</h3>
+          <div className={styles.resultsList}>
+            {grouped.map((item) => (
+              <TrackedQuestionRow key={item.question} grouped={item} onOpen={() => setOpenQuestion(item.question)} />
             ))}
-            {latest.answers.length > 0 && (
-              <ul className={styles.resultsList}>
-                {latest.answers.map((answer, index) => (
-                  <li key={`${answer.provider}-${index}`} className={styles.resultsRow}>
-                    <div className={styles.resultsRowHead}>
-                      <span className={styles.resultsProvider}>{aiVisibilityProviderLabel(answer.provider)}</span>
-                      {answer.brandMentioned && (
-                        <span className={`${styles.resultsStatus} ${styles.resultsStatusOk}`}>
-                          {answer.brandRecommended ? "Recommended" : "Mentioned"}
-                        </span>
-                      )}
-                    </div>
-                    <p className={styles.resultsMeta}>{answer.question}</p>
-                    {answer.answerText ? (
-                      <details className={styles.resultsAnswer}>
-                        <summary>View answer{answer.citations.length > 0 ? ` (${answer.citations.length} source${answer.citations.length === 1 ? "" : "s"})` : ""}</summary>
-                        <FormattedAnswerText text={answer.answerText} />
-                        {answer.citations.length > 0 && (
-                          <ul className={styles.resultsCitations}>
-                            {answer.citations.map((citation) => (
-                              <li key={citation.url}>
-                                <a href={citation.url} target="_blank" rel="noreferrer noopener">
-                                  {citation.title || citation.domain}
-                                </a>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </details>
-                    ) : (
-                      <p className={styles.resultsEmpty}>No answer was returned for this question.</p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        )}
-      </div>
+          </div>
+        </div>
+      )}
+
+      {openGrouped && latestSucceeded && (
+        <AiVisibilityAnswerDrawer
+          grouped={openGrouped}
+          checkedAt={latestSucceeded.createdAt}
+          onClose={() => setOpenQuestion(null)}
+        />
+      )}
     </section>
   );
 }

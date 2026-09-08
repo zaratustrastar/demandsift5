@@ -1,10 +1,12 @@
 {
-  "id": "watch-live-scan-4206-2026-09-02-0702",
+  "id": "diagnose-amazones-slow-crawl-2026-09-08-0008",
   "ops": [
     "logs",
     "status",
     "runtime"
   ],
-  "inspectScans": [],
+  "inspectScans": [
+    "scan_1095312941894a90a7e819818993c415"
+  ],
   "startScan": null
 }

@@ -57,11 +57,13 @@ test("clicking the already-active status undoes it; a different one switches dir
   assert.match(fnBody, /const next = currentReviewStatus === status \? null : status;/);
 });
 
-test("declining or marking replied auto-advances to the next card; marking reviewed does not", () => {
+test("marking a status no longer explicitly advances the index -- filtering makes that unnecessary (see the filter-aware auto-advance test below)", () => {
   const fnStart = dashboard.indexOf("const handleSetReviewStatus");
-  const fnBody = dashboard.slice(fnStart, fnStart + 400);
-  assert.match(fnBody, /if \(next === "declined" \|\| next === "replied"\) goTo\(safeIndex \+ 1\);/);
-  assert.equal(fnBody.includes('next === "reviewed") goTo'), false);
+  assert.ok(fnStart > -1);
+  const fnBody = dashboard.slice(fnStart, fnStart + 250);
+  assert.match(fnBody, /const next = currentReviewStatus === status \? null : status;/);
+  assert.match(fnBody, /onSetReviewMark\(item\.id, next\);/);
+  assert.equal(fnBody.includes("goTo("), false);
 });
 
 test("both carousel card kinds render the same shared review-actions row and status badge, not two separate implementations", () => {
@@ -101,3 +103,65 @@ test("the new CSS reuses this file's existing soft-pill color tokens (green-soft
   // No new CSS custom property was introduced for this feature.
   assert.equal(/--review[a-zA-Z-]*:/.test(dashboardCss), false);
 });
+
+/**
+ * Filtering feature: New | Reviewed | Replied | Declined | All, added
+ * directly above the existing card. Counts and filtering are derived
+ * locally from the same items + reviewMarks the carousel already had --
+ * confirmed by inspection that all opportunities are already client-side
+ * (dashboardData/carouselItems), so no new API/backend architecture was
+ * needed. The existing mark-setting/persistence logic (recordReviewMark,
+ * the API route, the optimistic overlay) is untouched by any of this.
+ */
+test("the five filter tabs match the spec exactly, in order, and counts come from the full unfiltered items list", () => {
+  assert.match(dashboard, /const REVIEW_FILTER_TABS: Array<\{ id: ReviewFilter; label: string \}> = \[\s*\{ id: "new", label: "New" \},\s*\{ id: "reviewed", label: "Reviewed" \},\s*\{ id: "replied", label: "Replied" \},\s*\{ id: "declined", label: "Declined" \},\s*\{ id: "all", label: "All" \},\s*\];/);
+  const countsStart = dashboard.indexOf("const counts = useMemo(");
+  assert.ok(countsStart > -1);
+  const countsBody = dashboard.slice(countsStart, countsStart + 500);
+  assert.match(countsBody, /for \(const candidate of items\) \{/);
+  assert.match(countsBody, /all: items\.length/);
+});
+
+test("matchesReviewFilter implements New = no mark, All = everything, and each named filter = that exact status", () => {
+  const fnStart = dashboard.indexOf("function matchesReviewFilter");
+  const fnBody = dashboard.slice(fnStart, dashboard.indexOf("\n}\n", fnStart));
+  assert.match(fnBody, /if \(filter === "all"\) return true;/);
+  assert.match(fnBody, /if \(filter === "new"\) return status === null;/);
+  assert.match(fnBody, /return status === filter;/);
+});
+
+test("filtering never re-sorts -- it filters the already relevance-sorted items array in place", () => {
+  assert.match(
+    dashboard,
+    /const filteredItems = useMemo\(\s*\(\) => items\.filter\(\(candidate\) => matchesReviewFilter\(reviewFilter, reviewMarks\[candidate\.id\] \?\? null\)\),/,
+  );
+});
+
+test("switching filters resets to the first matching conversation (index 0), set during render rather than in a useEffect", () => {
+  const carouselStart = dashboard.indexOf("function OpportunityCarousel");
+  const carouselBody = dashboard.slice(carouselStart, carouselStart + 3000);
+  assert.match(carouselBody, /if \(reviewFilter !== indexFilter\) \{\s*setIndexFilter\(reviewFilter\);\s*setIndex\(0\);\s*\}/);
+  // Specifically not a useEffect for this -- avoids an extra render pass,
+  // and was caught as a real lint error (react-hooks/set-state-in-effect)
+  // during implementation.
+  assert.equal(/useEffect\(\(\) => \{\s*setIndex\(0\)/.test(carouselBody), false);
+});
+
+test("the position indicator (e.g. 'Reviewed -> 1 of 14') reflects the filtered list's own length, not the full unfiltered count", () => {
+  assert.match(dashboard, /const total = filteredItems\.length;/);
+  assert.match(dashboard, /\{safeIndex \+ 1\} of \{total\}/);
+});
+
+test("an empty filter shows a simple 'No <filter> conversations yet' message instead of the carousel silently rendering nothing", () => {
+  const carouselStart = dashboard.indexOf("function OpportunityCarousel");
+  const carouselBody = dashboard.slice(carouselStart, carouselStart + 4000);
+  assert.match(carouselBody, /No \{emptyLabel\} conversations yet\./);
+  assert.equal(carouselBody.includes("if (!item) return null;"), false);
+});
+
+test("only the previous/next arrows plus filter switching move the position -- both navigate the filtered list", () => {
+  const carouselStart = dashboard.indexOf("function OpportunityCarousel");
+  const carouselBody = dashboard.slice(carouselStart, carouselStart + 5000);
+  assert.match(carouselBody, /const item = filteredItems\[safeIndex\];/);
+});
+

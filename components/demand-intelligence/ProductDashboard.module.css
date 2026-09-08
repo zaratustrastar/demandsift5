@@ -1216,6 +1216,61 @@
   width: 100%;
 }
 
+/* Compact segmented control, directly above the card -- a light track
+ * with a raised active pill, matching this file's existing small-control
+ * language (muted gray background, --ink for the emphasized state)
+ * rather than introducing a new visual pattern. */
+.reviewFilterTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  padding: 4px;
+  background: #f5f7f5;
+  border-radius: 10px;
+}
+
+.reviewFilterTab {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #5d6963;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.reviewFilterTab:hover {
+  color: var(--ink);
+}
+
+.reviewFilterTabActive {
+  color: var(--ink);
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.reviewFilterCount {
+  opacity: 0.6;
+  font-weight: 800;
+  font-size: 10px;
+}
+
+.carouselEmptyFilter {
+  width: 100%;
+  padding: 40px 20px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .carouselTopline {
   display: flex;
   align-items: center;

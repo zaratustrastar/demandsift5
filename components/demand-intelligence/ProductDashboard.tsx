@@ -1591,6 +1591,58 @@ type CarouselItem =
   | { kind: "opportunity"; id: string; reliability: number; opportunity: RedditOpportunity }
   | { kind: "relevant"; id: string; reliability: number; conversation: RelevantConversation };
 
+type ReviewFilter = "new" | "reviewed" | "replied" | "declined" | "all";
+
+const REVIEW_FILTER_TABS: Array<{ id: ReviewFilter; label: string }> = [
+  { id: "new", label: "New" },
+  { id: "reviewed", label: "Reviewed" },
+  { id: "replied", label: "Replied" },
+  { id: "declined", label: "Declined" },
+  { id: "all", label: "All" },
+];
+
+function matchesReviewFilter(
+  filter: ReviewFilter,
+  status: "reviewed" | "declined" | "replied" | null,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "new") return status === null;
+  return status === filter;
+}
+
+/**
+ * Compact segmented filter shown directly above the carousel card. Counts
+ * are derived from the same items/reviewMarks the carousel already has --
+ * no new data source. Purely a view over existing state, same as the
+ * carousel itself: this never touches ranking or which items exist.
+ */
+function ReviewFilterTabs({
+  filter,
+  onFilterChange,
+  counts,
+}: {
+  filter: ReviewFilter;
+  onFilterChange: (filter: ReviewFilter) => void;
+  counts: Record<ReviewFilter, number>;
+}) {
+  return (
+    <div className={styles.reviewFilterTabs} role="tablist" aria-label="Filter by review status">
+      {REVIEW_FILTER_TABS.map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          aria-selected={filter === tab.id}
+          className={`${styles.reviewFilterTab} ${filter === tab.id ? styles.reviewFilterTabActive : ""}`}
+          onClick={() => onFilterChange(tab.id)}
+        >
+          {tab.label} <span className={styles.reviewFilterCount}>{counts[tab.id]}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function OpportunityCarousel({
   items,
   drafts,
@@ -1630,15 +1682,44 @@ function OpportunityCarousel({
 }) {
   const [index, setIndex] = useState(0);
   const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
-  const total = items.length;
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("new");
+  // Tracks which filter `index` currently applies to, so a filter change
+  // can reset the position back to the first matching conversation. Set
+  // directly during render (React's documented pattern for "adjusting
+  // state when a prop/dependency changes") rather than in a useEffect,
+  // which would cause an extra, avoidable re-render pass for this.
+  const [indexFilter, setIndexFilter] = useState<ReviewFilter>(reviewFilter);
+  if (reviewFilter !== indexFilter) {
+    setIndexFilter(reviewFilter);
+    setIndex(0);
+  }
+
+  // Counts always come from the full, unfiltered items list -- switching
+  // tabs must never change what a count means. Relevance ordering (items
+  // is already sorted strongest-first, see carouselItems above) is
+  // preserved by filtering rather than re-sorting.
+  const counts = useMemo(() => {
+    const result: Record<ReviewFilter, number> = { new: 0, reviewed: 0, replied: 0, declined: 0, all: items.length };
+    for (const candidate of items) {
+      const status = reviewMarks[candidate.id] ?? null;
+      if (status === null) result.new += 1;
+      else result[status] += 1;
+    }
+    return result;
+  }, [items, reviewMarks]);
+
+  const filteredItems = useMemo(
+    () => items.filter((candidate) => matchesReviewFilter(reviewFilter, reviewMarks[candidate.id] ?? null)),
+    [items, reviewFilter, reviewMarks],
+  );
+  const total = filteredItems.length;
 
   // Derived rather than stored: if the underlying list ever changes size
   // (e.g. a fresh scan result swaps in a shorter list) the position clamps
   // back into range on the next render without a setState-in-effect, and
   // without touching the list or its order.
   const safeIndex = total === 0 ? 0 : Math.min(index, total - 1);
-  const item = items[safeIndex];
-  if (!item) return null;
+  const item = filteredItems[safeIndex];
 
   const goTo = (nextIndex: number) => setIndex(((nextIndex % total) + total) % total);
   const toggleReply = (itemId: string) => {
@@ -1649,17 +1730,35 @@ function OpportunityCarousel({
       return next;
     });
   };
+
+  const filterTabs = (
+    <ReviewFilterTabs filter={reviewFilter} onFilterChange={setReviewFilter} counts={counts} />
+  );
+
+  if (!item) {
+    const emptyLabel = reviewFilter === "all" ? "opportunities"
+      : reviewFilter === "new" ? "new"
+        : REVIEW_FILTER_TABS.find((tab) => tab.id === reviewFilter)?.label.toLowerCase();
+    return (
+      <div className={styles.carousel}>
+        {filterTabs}
+        <p className={styles.carouselEmptyFilter}>No {emptyLabel} conversations yet.</p>
+      </div>
+    );
+  }
+
   const isRevealed = revealedReplyIds.has(item.id);
   const currentReviewStatus = reviewMarks[item.id] ?? null;
   // Toggling the already-active status off is the undo gesture; picking a
-  // different one switches directly, with no separate "are you sure."
-  // Decline and replied move on automatically -- both mean "I'm done with
-  // this one" -- while reviewed deliberately does not, since looking a
-  // conversation over is often the reason to stay and read its reply next.
+  // different one switches directly, with no separate "are you sure." No
+  // explicit index change is needed here: under a specific filter, the
+  // item disappearing from filteredItems on the next render naturally
+  // leaves this same index pointing at what's now next (removing element N
+  // shifts N+1 into its place) -- and under "All", filteredItems never
+  // shrinks at all, so the same card just shows its updated status.
   const handleSetReviewStatus = (status: "reviewed" | "declined" | "replied") => {
     const next = currentReviewStatus === status ? null : status;
     onSetReviewMark(item.id, next);
-    if (next === "declined" || next === "replied") goTo(safeIndex + 1);
   };
 
   return (
@@ -1669,6 +1768,7 @@ function OpportunityCarousel({
       aria-roledescription="carousel"
       aria-label="Reddit posts found, ordered by AI reliability, highest first"
     >
+      {filterTabs}
       {item.kind === "opportunity" ? (
         <CarouselOpportunityCard
           opportunity={item.opportunity}

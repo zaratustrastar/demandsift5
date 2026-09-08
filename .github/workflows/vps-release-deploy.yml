@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: add a New/Reviewed/Replied/Declined/All segmented filter
-# to the Reddit opportunity carousel, entirely client-side over data
-# already loaded (no new API/backend) -- also replaces the old
-# unconditional decline/replied auto-advance with a filter-aware rule
+# Release marker: show the existing 0-100 relevance score on carousel
+# cards (already used for sorting, just newly displayed) and remove two
+# AI-reliability boilerplate strings -- no ranking/scoring changes
 # (2026-09-08).
 
 on:

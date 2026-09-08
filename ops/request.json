@@ -1,6 +1,6 @@
 {
-  "id": "diagnose-ai-visibility-duplicate-index-2026-09-08-2145",
-  "ops": ["logs"],
+  "id": "confirm-ai-visibility-fix-deployed-2026-09-08-2145",
+  "ops": ["runtime"],
   "inspectScans": [],
   "startScan": null
 }

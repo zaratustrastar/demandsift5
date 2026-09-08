@@ -364,6 +364,12 @@ export interface RedditDemandDemoData {
   /** Recurring struggles and requests aggregated from the relevant corpus. */
   conversationThemes: ConversationTheme[];
   relevantConversations?: RelevantConversation[];
+  /**
+   * The user's own manual triage marks (decline / reviewed / replied) from
+   * the results carousel, keyed by opportunity or relevant-conversation id.
+   * An absent entry means untouched.
+   */
+  reviewMarks?: Record<string, "reviewed" | "declined" | "replied">;
   competitorWeaknesses: CompetitorWeakness[];
   opportunities: RedditOpportunity[];
   potentialCustomers?: PotentialCustomerSummary;

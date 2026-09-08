@@ -112,6 +112,13 @@ type ApiReport = {
   profile: ApiProfile;
   insights: ApiInsight[];
   relevantConversations?: ApiRelevantConversation[];
+  /**
+   * The user's own manual triage marks (decline / reviewed / replied) from
+   * the results carousel, keyed by opportunity or relevant-conversation id.
+   * An absent entry means untouched -- never a signal fed back into
+   * ranking, matching, or reply generation.
+   */
+  reviewMarks?: Record<string, "reviewed" | "declined" | "replied">;
   conversationThemes?: Array<{
     id: string;
     label: string;
@@ -671,5 +678,6 @@ export function scanResponseToDashboard(response: ApiScanResponse): RedditDemand
     analysisProgress: response.scan.progress,
     visibilityOpportunities: [],
     pricing: redditDemandDemoData.pricing,
+    reviewMarks: report.reviewMarks ?? {},
   };
 }

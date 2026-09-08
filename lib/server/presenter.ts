@@ -355,6 +355,15 @@ export async function presentScan(scan: ScanRecord) {
       ),
       competitorWeakness: result.competitorWeakness,
       opportunities: visibleOpportunities.map(publicOpportunity),
+      /**
+       * The user's own manual triage marks from the results carousel
+       * (decline / reviewed / replied), keyed by opportunity or relevant-
+       * conversation id -- see ScanRecord.reviewMarks's doc comment in
+       * contracts.ts for why this is a separate concept from the
+       * triage-prefixed AI-relevance fields elsewhere in this codebase.
+       * Passed through as-is; an absent entry just means untouched.
+       */
+      reviewMarks: scan.reviewMarks ?? {},
       potentialCustomers: result.potentialCustomers ?? {
         total: result.opportunities.length,
         conversationCount: result.opportunities.length,

@@ -127,6 +127,18 @@ export interface ProductDashboardProps {
     opportunityId: string,
     replyText: string,
   ) => Promise<boolean> | boolean;
+  /**
+   * Persists the person's own manual triage mark (decline / reviewed /
+   * replied, or null to undo/clear) for one carousel item -- see
+   * PATCH /api/scans/[scanId]/review-mark and ScanRecord.reviewMarks's doc
+   * comment in contracts.ts. Returns whether the save succeeded, matching
+   * onPublishOpportunity's pattern, so an optimistic local update can be
+   * rolled back on failure.
+   */
+  onSetReviewMark?: (
+    itemId: string,
+    status: "reviewed" | "declined" | "replied" | null,
+  ) => Promise<boolean> | boolean;
   onRecordClick?: (opportunityId: string) => Promise<boolean> | boolean;
   onRecordConversion?: (opportunityId: string) => Promise<boolean> | boolean;
   redditConnection?: RedditConnectionStatus;
@@ -641,10 +653,12 @@ type IconName =
   | "arrowLeft"
   | "check"
   | "copy"
+  | "decline"
   | "edit"
   | "external"
   | "logo"
   | "refresh"
+  | "replied"
   | "star";
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
@@ -662,9 +676,11 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     arrowLeft: "\u2190",
     check: "\u2713",
     copy: "\u29c9",
+    decline: "\u2715",
     edit: "\u270e",
     external: "\u2197",
     refresh: "\u21bb",
+    replied: "\u21a9",
     star: "\u2605",
   };
 
@@ -1054,6 +1070,8 @@ function CarouselRelevantCard({
   createdDraft,
   isCreatingReply,
   onCreateReply,
+  reviewStatus,
+  onSetReviewStatus,
 }: {
   conversation: RelevantConversation;
   isRevealed: boolean;
@@ -1064,6 +1082,8 @@ function CarouselRelevantCard({
   createdDraft?: string;
   isCreatingReply: boolean;
   onCreateReply: () => void;
+  reviewStatus: "reviewed" | "declined" | "replied" | null;
+  onSetReviewStatus: (status: "reviewed" | "declined" | "replied") => void;
 }) {
   const signalLabels = [...new Set([
     ...conversation.demandSignals,
@@ -1083,6 +1103,7 @@ function CarouselRelevantCard({
               {relativeTime(conversation.capturedAt)} &middot; {conversation.subreddit} &middot; Public conversation
             </span>
           </div>
+          <ReviewStatusBadge status={reviewStatus} />
         </div>
       </div>
 
@@ -1136,6 +1157,7 @@ function CarouselRelevantCard({
           </a>
         )}
       </div>
+      <ReviewActionsRow status={reviewStatus} onSetStatus={onSetReviewStatus} />
     </article>
   );
 }
@@ -1388,6 +1410,61 @@ function reliabilitySignalTags(opportunity: RedditOpportunity): string[] {
 }
 
 /**
+ * Shared by both carousel card kinds -- three compact toggle buttons for
+ * the person's own manual triage mark. Clicking the already-active one
+ * undoes it (clears back to untouched); clicking a different one switches
+ * directly. Deliberately just three small buttons next to the existing
+ * footer actions, not a separate toolbar.
+ */
+function ReviewActionsRow({
+  status,
+  onSetStatus,
+}: {
+  status: "reviewed" | "declined" | "replied" | null;
+  onSetStatus: (status: "reviewed" | "declined" | "replied") => void;
+}) {
+  return (
+    <div className={styles.reviewActions} role="group" aria-label="Mark this conversation">
+      <button
+        type="button"
+        className={`${styles.reviewActionButton} ${status === "declined" ? styles.reviewActionActive : ""}`}
+        aria-pressed={status === "declined"}
+        onClick={() => onSetStatus("declined")}
+      >
+        <Icon name="decline" size={12} /> Not relevant
+      </button>
+      <button
+        type="button"
+        className={`${styles.reviewActionButton} ${status === "reviewed" ? styles.reviewActionActive : ""}`}
+        aria-pressed={status === "reviewed"}
+        onClick={() => onSetStatus("reviewed")}
+      >
+        <Icon name="check" size={12} /> Reviewed
+      </button>
+      <button
+        type="button"
+        className={`${styles.reviewActionButton} ${status === "replied" ? styles.reviewActionActive : ""}`}
+        aria-pressed={status === "replied"}
+        onClick={() => onSetStatus("replied")}
+      >
+        <Icon name="replied" size={12} /> Replied
+      </button>
+    </div>
+  );
+}
+
+/** The subtle top-of-card indicator for whichever status is currently set -- absent entirely when untouched. */
+function ReviewStatusBadge({ status }: { status: "reviewed" | "declined" | "replied" | null }) {
+  if (!status) return null;
+  const label = status === "declined" ? "Not relevant" : status === "reviewed" ? "Reviewed" : "Replied";
+  const toneClass =
+    status === "declined" ? styles.reviewStatusDeclined
+      : status === "reviewed" ? styles.reviewStatusReviewed
+        : styles.reviewStatusReplied;
+  return <span className={`${styles.reviewStatusBadge} ${toneClass}`}>{label}</span>;
+}
+
+/**
  * The single card shown by OpportunityCarousel. Same underlying fields as
  * OpportunityCard (relevanceScore, matchReasons, permalink, reply) -- this
  * is a presentation variant for the single-card carousel, not a new data
@@ -1397,10 +1474,14 @@ function CarouselOpportunityCard({
   opportunity,
   isRevealed,
   onToggleReply,
+  reviewStatus,
+  onSetReviewStatus,
 }: {
   opportunity: RedditOpportunity;
   isRevealed: boolean;
   onToggleReply: () => void;
+  reviewStatus: "reviewed" | "declined" | "replied" | null;
+  onSetReviewStatus: (status: "reviewed" | "declined" | "replied") => void;
 }) {
   const tags = reliabilitySignalTags(opportunity);
   const whyItMatters = opportunity.matchReasons[0] ?? opportunity.classification.customerProblem;
@@ -1417,6 +1498,7 @@ function CarouselOpportunityCard({
             {opportunity.conversationType}
           </span>
         </div>
+        <ReviewStatusBadge status={reviewStatus} />
       </div>
 
       <h3>{opportunity.title}</h3>
@@ -1450,6 +1532,7 @@ function CarouselOpportunityCard({
           </a>
         )}
       </div>
+      <ReviewActionsRow status={reviewStatus} onSetStatus={onSetReviewStatus} />
     </article>
   );
 }
@@ -1524,6 +1607,8 @@ function OpportunityCarousel({
   createdReplies,
   creatingReplyId,
   onCreateReply,
+  reviewMarks,
+  onSetReviewMark,
 }: {
   items: CarouselItem[];
   drafts: Record<string, string>;
@@ -1540,6 +1625,8 @@ function OpportunityCarousel({
   createdReplies: Record<string, string>;
   creatingReplyId: string | null;
   onCreateReply: (conversation: RelevantConversation) => void;
+  reviewMarks: Record<string, "reviewed" | "declined" | "replied">;
+  onSetReviewMark: (itemId: string, status: "reviewed" | "declined" | "replied" | null) => void;
 }) {
   const [index, setIndex] = useState(0);
   const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
@@ -1563,6 +1650,17 @@ function OpportunityCarousel({
     });
   };
   const isRevealed = revealedReplyIds.has(item.id);
+  const currentReviewStatus = reviewMarks[item.id] ?? null;
+  // Toggling the already-active status off is the undo gesture; picking a
+  // different one switches directly, with no separate "are you sure."
+  // Decline and replied move on automatically -- both mean "I'm done with
+  // this one" -- while reviewed deliberately does not, since looking a
+  // conversation over is often the reason to stay and read its reply next.
+  const handleSetReviewStatus = (status: "reviewed" | "declined" | "replied") => {
+    const next = currentReviewStatus === status ? null : status;
+    onSetReviewMark(item.id, next);
+    if (next === "declined" || next === "replied") goTo(safeIndex + 1);
+  };
 
   return (
     <div
@@ -1576,6 +1674,8 @@ function OpportunityCarousel({
           opportunity={item.opportunity}
           isRevealed={isRevealed}
           onToggleReply={() => toggleReply(item.id)}
+          reviewStatus={currentReviewStatus}
+          onSetReviewStatus={handleSetReviewStatus}
         />
       ) : (
         <CarouselRelevantCard
@@ -1585,6 +1685,8 @@ function OpportunityCarousel({
           createdDraft={createdReplies[item.conversation.id]}
           isCreatingReply={creatingReplyId === item.conversation.id}
           onCreateReply={() => onCreateReply(item.conversation)}
+          reviewStatus={currentReviewStatus}
+          onSetReviewStatus={handleSetReviewStatus}
         />
       )}
 
@@ -1645,6 +1747,7 @@ export function ProductDashboard({
   onCheckout,
   onRegenerateReply,
   onPublishOpportunity,
+  onSetReviewMark,
   redditConnection = {
     configured: false,
     connected: false,
@@ -1718,6 +1821,36 @@ export function ProductDashboard({
       data.opportunities.map((opportunity) => [opportunity.id, opportunity.reply.draft]),
     ),
   );
+
+  // Optimistic overlay on top of data.reviewMarks (the server-persisted
+  // map), same pattern as publishedIds above: applied immediately on click,
+  // reconciled from the server on the next full data refresh. A stored
+  // `null` here means "explicitly cleared this session" -- distinct from a
+  // key simply being absent -- so an undo click that raced ahead of the
+  // server's own copy of data.reviewMarks (e.g. this dashboard re-rendered
+  // from a slightly stale fetch) can't be silently overridden back to the
+  // previous status by the merge below.
+  const [reviewMarkOverrides, setReviewMarkOverrides] = useState<
+    Record<string, "reviewed" | "declined" | "replied" | null>
+  >({});
+  const reviewMarks = useMemo(() => {
+    const merged: Record<string, "reviewed" | "declined" | "replied"> = { ...(data.reviewMarks ?? {}) };
+    for (const [itemId, status] of Object.entries(reviewMarkOverrides)) {
+      if (status === null) delete merged[itemId];
+      else merged[itemId] = status;
+    }
+    return merged;
+  }, [data.reviewMarks, reviewMarkOverrides]);
+  const setReviewMark = async (itemId: string, status: "reviewed" | "declined" | "replied" | null) => {
+    setReviewMarkOverrides((current) => ({ ...current, [itemId]: status }));
+    const accepted = await onSetReviewMark?.(itemId, status);
+    // A failed save keeps the optimistic value rather than reverting it --
+    // matching this dashboard's other optimistic actions (e.g. publishReply
+    // never rolls back on a false return either) -- a stray network blip
+    // shouldn't visibly undo something the person just clicked. The next
+    // full data refresh reconciles from the server either way.
+    if (accepted === false) return;
+  };
 
   const serverPublishedIds = useMemo(
     () =>
@@ -2333,6 +2466,8 @@ export function ProductDashboard({
                         createdReplies={createdReplies}
                         creatingReplyId={creatingReplyId}
                         onCreateReply={(conversation) => void createReply(conversation)}
+                        reviewMarks={reviewMarks}
+                        onSetReviewMark={(itemId, status) => void setReviewMark(itemId, status)}
                       />
                     </TrackedSection>
                   )

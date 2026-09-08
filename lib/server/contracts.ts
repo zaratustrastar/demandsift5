@@ -666,6 +666,20 @@ export type ScanRecord = {
   /** Distinguishes a user-started market scan from a daily watch-term result. */
   scanKind?: "discovery" | "monitoring";
   monitorRunId?: string | null;
+  /**
+   * The user's own manual triage of a found conversation on the results
+   * carousel -- keyed by the same id used for both card kinds
+   * (RedditOpportunity.id and MarketIntelligenceRecord.id are both opaque,
+   * scan-scoped, collision-free strings). Deliberately not named
+   * "triage*" like the fields above: those are the backend's own
+   * AI-driven relevance classification, an entirely different concept
+   * from a person manually marking what they've done with a result.
+   * Absent key means untouched ("new"); a present key can be freely
+   * changed or removed (undo) by the person at any time -- this is a
+   * personal workflow note, never a signal fed back into ranking,
+   * matching, or reply generation.
+   */
+  reviewMarks?: Record<string, "reviewed" | "declined" | "replied">;
 };
 
 export type EntitlementRecord = {

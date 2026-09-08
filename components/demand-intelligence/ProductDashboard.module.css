@@ -1143,6 +1143,27 @@
   text-transform: capitalize;
 }
 
+/* Pushed to the far right of the existing flex row via margin-left: auto --
+ * absent entirely (no DOM node at all) when the item is untouched. Tones
+ * reuse this file's existing soft-pill colors (.intentHigh's green,
+ * .intentMedium's amber) rather than introducing new ones; "declined"
+ * reuses .opportunityMeta span's own neutral gray instead of a red/danger
+ * color, since none exists in this file and a set-aside mark isn't meant
+ * to read as an alarm. */
+.reviewStatusBadge {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.reviewStatusDeclined { color: #727c77; background: #f5f7f5; border: 1px solid #ebeeec; }
+.reviewStatusReviewed { color: #1c6c49; background: var(--green-soft); }
+.reviewStatusReplied { color: #87601d; background: var(--amber-soft); }
+
 .opportunityButtons {
   display: flex;
   flex-wrap: wrap;
@@ -1259,6 +1280,42 @@
 .carouselActions a {
   flex: 1 1 auto;
   text-decoration: none;
+}
+
+/* Sits directly below the existing footer actions with just a small gap --
+ * no border-top/extra padding of its own, so this reads as one continuous
+ * footer area rather than a second toolbar. Sizing/colors match this
+ * file's existing small secondary controls (.opportunityMeta span's
+ * padding/radius/font-size), just with a visible pressed state added. */
+.reviewActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.reviewActionButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1px solid #ebeeec;
+  border-radius: 8px;
+  background: #f5f7f5;
+  color: #5d6963;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.reviewActionButton:hover {
+  border-color: #cbd8d0;
+}
+
+.reviewActionActive {
+  color: #fff;
+  background: var(--ink);
+  border-color: var(--ink);
 }
 
 .carouselNav {

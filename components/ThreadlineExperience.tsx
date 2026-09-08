@@ -3179,6 +3179,34 @@ export function ThreadlineExperience() {
     }
   }
 
+  /**
+   * Persists the person's own manual triage mark (decline / reviewed /
+   * replied, or null to undo/clear) for one carousel item -- see
+   * PATCH /api/scans/[scanId]/review-mark and ScanRecord.reviewMarks's doc
+   * comment in contracts.ts. Deliberately silent on success (the button/
+   * badge state the person just clicked is already the feedback for a
+   * frequent, lightweight action); a failure still surfaces so an apparent
+   * click doesn't silently fail to save.
+   */
+  async function recordReviewMark(
+    itemId: string,
+    status: "reviewed" | "declined" | "replied" | null,
+  ): Promise<boolean> {
+    if (!scanResponse) return false;
+    try {
+      const response = await fetch(`/api/scans/${scanResponse.scan.id}/review-mark`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ itemId, status }),
+      });
+      if (!response.ok) throw new Error("That mark could not be saved.");
+      return true;
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "That mark could not be saved.");
+      return false;
+    }
+  }
+
   async function recordResult(
     opportunityId: string,
     kind: "click" | "conversion",
@@ -3386,6 +3414,7 @@ export function ThreadlineExperience() {
         onCheckout={checkout}
         onRegenerateReply={regenerateReply}
         onPublishOpportunity={recordPublication}
+        onSetReviewMark={recordReviewMark}
         onRecordClick={(opportunityId) => recordResult(opportunityId, "click")}
         onRecordConversion={(opportunityId) => recordResult(opportunityId, "conversion")}
         redditConnection={redditConnection}

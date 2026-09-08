@@ -1,9 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: decompress gzip/deflate/br responses in the pinned
-# website fetch -- amazon.es (and any site whose server compresses
-# regardless of Accept-Encoding) was corrupting crawled content into
-# unreadable garbage that silently broke the database write with no
-# visible scan error at all (2026-09-08).
+# Release marker: let broad, multi-category marketplace businesses
+# (e.g. amazon.es) get competitor suggestions too -- the model was
+# declining to name any competitor for a business too broad to have
+# one precise niche match, even when obvious alternatives exist
+# (2026-09-08).
 
 on:
   push:

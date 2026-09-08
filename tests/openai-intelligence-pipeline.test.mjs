@@ -956,3 +956,27 @@ test("an unknown answer index from analyzeVisibilityMentions is also retried", a
   assert.equal(attempts, 2, "expected the unknown-index attempt to be retried, not thrown immediately");
   assert.equal(result.value[0].index, 0);
 });
+
+test("analyzeVisibilityMentions' own prompt explicitly tells the model never to repeat or omit an index", async () => {
+  // Reduces how often the duplicate-index failure above happens in the
+  // first place, rather than only handling it after the fact via retry.
+  let sentSystemPrompt = "";
+  const provider = new openai.OpenAiProvider({
+    apiKey: "test-key",
+    apiStyle: "chat",
+    fetchImpl: async (_url, init) => {
+      sentSystemPrompt = JSON.parse(init.body).messages[0].content;
+      return chatResponse({ results: [{ index: 0, brandRecommended: true, reasoning: "ok" }] });
+    },
+  });
+  await provider.analyzeVisibilityMentions({
+    brandName: "Example",
+    answers: [{ index: 0, question: "best tool for X?", answerText: "Try Example." }],
+    models: openai.DEFAULT_OPENAI_MODELS,
+    workspaceId: "ws_1",
+    businessId: "biz_1",
+  });
+  assert.match(sentSystemPrompt, /each index must appear exactly once/i);
+  assert.match(sentSystemPrompt, /never repeat an index/i);
+});
+

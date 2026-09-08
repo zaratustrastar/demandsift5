@@ -296,3 +296,32 @@ test("competitor and business profile data read by AI visibility tracking is rea
   assert.equal(/seed\.discoveryProfile\s*=|seed\.competitorProfiles\s*=/.test(workflowSource), false);
   assert.equal(/repository\.saveScan\(seed\)/.test(workflowSource), false);
 });
+
+test("a failure in the recommendation-classification AI call does not fail the whole scan -- it keeps the deterministic mention/position/competitor/citation results already computed", () => {
+  // Live symptom this fixes: the classification call (a refinement on top
+  // of already-computed deterministic results, not a precondition for
+  // them) occasionally throws (observed: OpenAI returning a duplicate
+  // answer index), and that exception was propagating out of the whole
+  // try block in runAiVisibilityScan, discarding draftAnswers -- data that
+  // had already been successfully scraped and deterministically analyzed
+  // -- and marking the entire scan "failed" instead of just shipping it
+  // without that one refinement.
+  const classifyStart = workflowSource.indexOf("const toClassify = draftAnswers");
+  assert.ok(classifyStart > -1);
+  const classifyBlock = workflowSource.slice(classifyStart, workflowSource.indexOf("const metrics = computeVisibilityMetrics", classifyStart));
+  assert.match(classifyBlock, /try \{[\s\S]*const analyzed = await aiProvider\.analyzeVisibilityMentions/);
+  assert.match(classifyBlock, /\} catch \(error\) \{\s*console\.error\(/);
+  // The catch block must not re-throw -- that would defeat the whole fix.
+  const catchStart = classifyBlock.indexOf("} catch (error) {");
+  const catchBlock = classifyBlock.slice(catchStart);
+  assert.equal(/throw\s+error/.test(catchBlock), false);
+});
+
+test("every draftAnswers entry already has a safe brandRecommended/recommendationReasoning default before the classification call runs, so a caught failure ships something coherent, not a half-built record", () => {
+  const draftStart = workflowSource.indexOf("const draftAnswers: AiVisibilityAnswer[] = []");
+  const classifyStart = workflowSource.indexOf("const toClassify = draftAnswers");
+  const draftBlock = workflowSource.slice(draftStart, classifyStart);
+  assert.match(draftBlock, /brandRecommended: false,/);
+  assert.match(draftBlock, /recommendationReasoning: null,/);
+});
+

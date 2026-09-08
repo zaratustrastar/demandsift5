@@ -2417,7 +2417,7 @@ export class OpenAiProvider implements AiProvider {
       reasoningEffort: "low",
       context: { workspaceId: request.workspaceId, businessId: request.businessId },
       system:
-        `Return exactly one result for every supplied answer index and no other indices. For each answer, decide whether "${request.brandName}" is genuinely being RECOMMENDED as a solution -- not just named, mentioned in passing, mentioned as one of many options with no endorsement, or mentioned negatively/critically. brandRecommended must be true only when the answer text actively suggests, endorses, or positions the brand as a good choice for the asker. A brand that is merely present in a list without any positive framing is not a recommendation. reasoning is one short sentence citing what in the text supports the decision.`,
+        `Return exactly one result for every supplied answer index and no other indices -- each index must appear exactly once in your response; never repeat an index and never omit one. For each answer, decide whether "${request.brandName}" is genuinely being RECOMMENDED as a solution -- not just named, mentioned in passing, mentioned as one of many options with no endorsement, or mentioned negatively/critically. brandRecommended must be true only when the answer text actively suggests, endorses, or positions the brand as a good choice for the asker. A brand that is merely present in a list without any positive framing is not a recommendation. reasoning is one short sentence citing what in the text supports the decision.`,
       user: JSON.stringify({
         brandName: request.brandName,
         answers: request.answers,

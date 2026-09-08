@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: revert unreviewed changes from a concurrent agent
-# (live triage preview publishing un-gate + scan-progress UI tweaks)
-# that reached production only as a side effect of a routine git merge
-# -- restores prior, previously-shipped behavior (2026-09-08).
+# Release marker: fix AI Visibility scans failing entirely with no
+# results when the OpenAI recommendation-classification step glitches
+# -- strengthened prompt + isolated the optional AI refinement so a
+# deterministic scrape/analysis result is never discarded (2026-09-08).
 
 on:
   push:

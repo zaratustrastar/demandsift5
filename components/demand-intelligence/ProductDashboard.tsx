@@ -8,6 +8,7 @@ import { redditDemandDemoData } from "./demo-data";
 import type {
   BusinessProfile,
   ConversationTheme,
+  DemandInsight,
   NavigationSection,
   NavigationSectionId,
   PricingPlan,
@@ -1166,6 +1167,111 @@ function CarouselRelevantCard({
   );
 }
 
+type InsightsFilter = "all" | "pains" | "requests" | "patterns";
+
+/**
+ * Compact segmented filter for the Insights screen, above the three
+ * existing sections (Pains/Requests/Demand patterns). Reuses the exact
+ * same classes as the carousel's ReviewFilterTabs -- same segmented-
+ * control visual language across the app rather than a second one
+ * invented for this screen. Purely a display filter: it hides/shows
+ * existing sections, never touches what data was fetched or generated.
+ */
+function InsightsFilterTabs({
+  filter,
+  onFilterChange,
+  counts,
+}: {
+  filter: InsightsFilter;
+  onFilterChange: (filter: InsightsFilter) => void;
+  counts: Record<InsightsFilter, number>;
+}) {
+  const tabs: Array<{ id: InsightsFilter; label: string }> = [
+    { id: "all", label: "All" },
+    { id: "pains", label: "Pains" },
+    { id: "requests", label: "Requests" },
+    { id: "patterns", label: "Demand patterns" },
+  ];
+  return (
+    <div className={styles.reviewFilterTabs} role="tablist" aria-label="Filter insights by type">
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          aria-selected={filter === tab.id}
+          className={`${styles.reviewFilterTab} ${filter === tab.id ? styles.reviewFilterTabActive : ""}`}
+          onClick={() => onFilterChange(tab.id)}
+        >
+          {tab.label} <span className={styles.reviewFilterCount}>{counts[tab.id]}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A demand-pattern insight, restyled to match ThemeSection's card
+ * language (same .themeCard/.themeToggle/.themeEvidence classes) so
+ * Pains, Requests, and Demand patterns read as one consistent card
+ * system instead of two different ones on the same screen -- no new
+ * CSS was needed for the card shell itself.
+ *
+ * Two real, existing fields this card newly surfaces: insight.evidence
+ * (populated since the API response, but never rendered anywhere in the
+ * UI before this) behind the same collapsed-by-default toggle
+ * ThemeSection already uses, and a sourceCount-based sort at the call
+ * site (see the .sort() below) so stronger patterns lead.
+ *
+ * Deliberately drops insight.recommendedAction: every one of these
+ * insights carries the exact same static sentence ("Use the underlying
+ * question to guide a useful answer and product messaging."), never
+ * anything specific to that insight -- displaying it added no unique
+ * information per card, which is exactly the repeated boilerplate this
+ * screen was asked to remove. whyItMatters is also skipped for the same
+ * reason: it is set to the same string as summary at the data-adapter
+ * level (see from-scan.ts), so showing both would just repeat one
+ * sentence twice.
+ */
+function DemandPatternCard({ insight }: { insight: DemandInsight }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <article className={styles.themeCard}>
+      <span className={styles.simpleCardEyebrow}>{insight.eyebrow}</span>
+      <div className={styles.themeHead}>
+        <h3>{insight.title}</h3>
+      </div>
+      <p className={styles.simpleCardBody}>{insight.summary}</p>
+      {insight.evidence.length > 0 && (
+        <>
+          <button
+            className={styles.themeToggle}
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+          >
+            {open ? "Hide evidence" : "View evidence"}
+          </button>
+          {open && (
+            <ul className={styles.themeEvidence}>
+              {insight.evidence.map((item) => (
+                <li key={item.provenanceId}>
+                  <span>{item.quote}</span>
+                  {item.sourceUrl && (
+                    <a href={item.sourceUrl} target="_blank" rel="noreferrer noopener">
+                      {item.sourceLabel}
+                    </a>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </article>
+  );
+}
+
 /**
  * A recurring struggle or request, with its supporting conversations behind a
  * "Show evidence" toggle.
@@ -1899,6 +2005,11 @@ export function ProductDashboard({
   const [activeSection, setActiveSection] = useState<NavigationSectionId>(
     initialSection ?? "dashboard",
   );
+  // Filters which of the three existing sections (Pains/Requests/Demand
+  // patterns) render on the Insights screen -- purely a display filter over
+  // data already loaded (data.conversationThemes, data.insights); it never
+  // changes what was fetched, generated, or how it's ranked.
+  const [insightsFilter, setInsightsFilter] = useState<"all" | "pains" | "requests" | "patterns">("all");
   // Opportunities and Competitors are the two screens that fill in on their
   // own as monitoring runs -- grouped under one collapsible "Inbox" header,
   // open by default. AI Citations/Live feed from the original design don't
@@ -2604,27 +2715,56 @@ export function ProductDashboard({
 
           {activeSection === "insights" && (
             <div className={styles.lightSection}>
-              <ThemeSection
-                kind="struggle"
-                eyebrow="Recurring pain"
-                heading="What customers are struggling with"
-                themes={data.conversationThemes}
+              <InsightsFilterTabs
+                filter={insightsFilter}
+                onFilterChange={setInsightsFilter}
+                counts={{
+                  all:
+                    data.conversationThemes.filter((theme) => theme.kind === "struggle").length +
+                    data.conversationThemes.filter((theme) => theme.kind === "request").length +
+                    data.insights.length,
+                  pains: data.conversationThemes.filter((theme) => theme.kind === "struggle").length,
+                  requests: data.conversationThemes.filter((theme) => theme.kind === "request").length,
+                  patterns: data.insights.length,
+                }}
               />
-              <ThemeSection
-                kind="request"
-                eyebrow="Recurring requests"
-                heading="What they are asking for"
-                themes={data.conversationThemes}
-              />
-              {data.insights.length > 0 &&
-                data.insights.map((insight) => (
-                  <div key={insight.id} className={styles.simpleCard}>
-                    <span className={styles.simpleCardEyebrow}>{insight.eyebrow}</span>
-                    <span className={styles.simpleCardTitle}>{insight.title}</span>
-                    <p className={styles.simpleCardBody}>{insight.summary}</p>
-                    <span className={styles.simpleCardMeta}>{insight.recommendedAction}</span>
+              {(insightsFilter === "all" || insightsFilter === "pains") && (
+                <ThemeSection
+                  kind="struggle"
+                  eyebrow="Recurring pain"
+                  heading="What customers are struggling with"
+                  themes={data.conversationThemes}
+                />
+              )}
+              {(insightsFilter === "all" || insightsFilter === "requests") && (
+                <ThemeSection
+                  kind="request"
+                  eyebrow="Recurring requests"
+                  heading="What they are asking for"
+                  themes={data.conversationThemes}
+                />
+              )}
+              {(insightsFilter === "all" || insightsFilter === "patterns") && data.insights.length > 0 && (
+                <section className={styles.dashboardSection}>
+                  <div className={styles.sectionHeadingRow}>
+                    <div>
+                      <span className={styles.eyebrow}>Demand patterns</span>
+                      <h2>Patterns that should influence positioning</h2>
+                    </div>
                   </div>
-                ))}
+                  <div className={styles.insightColumn}>
+                    {/* Stronger patterns (more supporting conversations) lead --
+                        sourceCount already exists on every insight (from-scan.ts
+                        guarantees it via a sourceIds-based fallback), so this
+                        reorders existing data rather than inventing a new score. */}
+                    {[...data.insights]
+                      .sort((a, b) => (b.sourceCount ?? 0) - (a.sourceCount ?? 0))
+                      .map((insight) => (
+                        <DemandPatternCard key={insight.id} insight={insight} />
+                      ))}
+                  </div>
+                </section>
+              )}
               {isFree && onCheckout && data.lockedCounts.insights > 0 && (
                 <div className={styles.simpleEmpty}>
                   <div className={styles.emptyIcon} />

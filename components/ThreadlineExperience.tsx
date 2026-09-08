@@ -14,7 +14,6 @@ import {
 } from "./demand-intelligence";
 import {
   scanResponseToDashboard,
-  type ApiPartialPreview,
   type ApiPartialResponse,
   type ApiScanResponse,
 } from "./demand-intelligence/from-scan";
@@ -220,7 +219,7 @@ function StageProgress({ rows, scan, connected, account }: { rows: StageRow[]; s
             role="listitem"
             aria-label={`${row.label}: ${queued && row.status !== "complete" ? "queued" : retrying && row.status === "active" ? "retry scheduled" : row.status}`}
           >
-            <span aria-hidden="true">{row.status === "complete" ? "✓" : row.status === "active" && !queued ? "●" : "○"}</span>
+            <span aria-hidden="true">{row.status === "complete" ? "✓" : row.status === "active" && !queued ? "•" : ""}</span>
             <div>
               <strong>{row.label}</strong>
               <small>{progressDetail(row.id, progress, row.detail)}</small>
@@ -1608,16 +1607,6 @@ function liveReplyLabel(state: "ready" | "pending" | "failed" | undefined): stri
   return "Reply being prepared";
 }
 
-// Derived from triage's own intent judgment -- not a fabricated match score.
-// Full-context qualification (with a real percentage) has not run on these
-// yet; that is exactly what "Qualification pending" already communicates.
-function intentBadge(intent: ApiPartialPreview["intent"] | undefined): string | null {
-  if (intent === "actively_looking" || intent === "switching") return "🔥 High intent";
-  if (intent === "evaluating") return "Evaluating options";
-  if (intent === "problem_aware") return "Problem aware";
-  return null;
-}
-
 function LiveScanDashboard({
   url,
   inputMode,
@@ -1717,20 +1706,14 @@ function LiveScanDashboard({
                 <b>{partial.previews.length}</b>
               </div>
               <div className={styles.liveCardGrid}>
-                {partial.previews.map(preview => {
-                  const badge = intentBadge(preview.intent);
-                  return (
-                    <article className={`${styles.liveCard} ${styles.livePreviewCard}`} key={preview.id}>
-                      <div className={styles.liveCardMeta}>
-                        <span>r/{preview.subreddit.replace(/^r\//, "")}</span>
-                        {badge ? <em className={styles.liveIntentBadge}>{badge}</em> : <em>Qualification pending</em>}
-                      </div>
-                      <h4>{preview.title}</h4>
-                      <p>{preview.problem || preview.excerpt}</p>
-                      <small>{preview.demandSignal.replaceAll("_", " ")} · {preview.productFit} product fit</small>
-                    </article>
-                  );
-                })}
+                {partial.previews.map(preview => (
+                  <article className={`${styles.liveCard} ${styles.livePreviewCard}`} key={preview.id}>
+                    <div className={styles.liveCardMeta}><span>r/{preview.subreddit.replace(/^r\//, "")}</span><em>Qualification pending</em></div>
+                    <h4>{preview.title}</h4>
+                    <p>{preview.problem || preview.excerpt}</p>
+                    <small>{preview.demandSignal.replaceAll("_", " ")} · {preview.productFit} product fit</small>
+                  </article>
+                ))}
               </div>
             </section>
           )}

@@ -1,6 +1,6 @@
 {
-  "id": "confirm-revert-deployed-2026-09-08-2115",
-  "ops": ["runtime"],
+  "id": "diagnose-ai-visibility-duplicate-index-2026-09-08-2145",
+  "ops": ["logs"],
   "inspectScans": [],
   "startScan": null
 }

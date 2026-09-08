@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: fix AI Visibility scans failing entirely with no
-# results when the OpenAI recommendation-classification step glitches
-# -- strengthened prompt + isolated the optional AI refinement so a
-# deterministic scrape/analysis result is never discarded (2026-09-08).
+# Release marker: Insights screen information-hierarchy pass -- All/
+# Pains/Requests/Demand patterns filter, compact collapsible-evidence
+# cards, dropped repeated static boilerplate copy. UI only, reuses
+# existing report fields, no backend/AI/ranking changes (2026-09-08).
 
 on:
   push:

@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { Readable } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 import type { WebsiteEvidencePage } from "@/lib/providers/contracts";
 import type { Browser } from "puppeteer-core";
@@ -445,7 +446,7 @@ function responseHeaders(headers: Record<string, string | string[] | undefined>)
  * pins SNI/certificate verification to that hostname while lookup supplies the
  * validated network address.
  */
-async function fetchPinnedWebsiteTarget(
+export async function fetchPinnedWebsiteTarget(
   input: URL,
   init: RequestInit,
   target: ValidatedWebsiteTarget,
@@ -502,13 +503,52 @@ async function fetchPinnedWebsiteTarget(
 
       const bodyForbidden = status === 204 || status === 205 || status === 304;
       if (bodyForbidden) incoming.resume();
+      // Node's raw http/https client (used here, not the global fetch(),
+      // so the already-validated pinned IP can be used without a second
+      // DNS lookup -- see this function's doc comment) does not
+      // auto-decompress a response the way a browser or fetch() does.
+      // Real production case: amazon.es's servers gzip-compress their
+      // response regardless of this crawler never sending an
+      // Accept-Encoding header, so the raw compressed bytes (starting
+      // with the gzip magic number) were being read as UTF-8 "text" --
+      // garbage binary that, once it reached a NUL byte, failed the next
+      // Postgres JSONB write with an opaque, unclassified database error
+      // (code 22P05) instead of ever reaching any of this crawler's own
+      // error handling, so the scan retried indefinitely with no visible
+      // failure at all. Decompress here, based on whatever
+      // Content-Encoding the server actually used, before any of that.
+      const contentEncoding = Array.isArray(incoming.headers["content-encoding"])
+        ? incoming.headers["content-encoding"][0]
+        : incoming.headers["content-encoding"];
+      const encoding = (contentEncoding ?? "").trim().toLowerCase();
+      let decoded: Readable = incoming;
+      if (!bodyForbidden && (encoding === "gzip" || encoding === "x-gzip")) {
+        decoded = incoming.pipe(createGunzip());
+      } else if (!bodyForbidden && encoding === "deflate") {
+        decoded = incoming.pipe(createInflate());
+      } else if (!bodyForbidden && encoding === "br") {
+        decoded = incoming.pipe(createBrotliDecompress());
+      }
+      // .pipe() does not forward source errors to the destination --
+      // without this, a connection drop mid-response would silently
+      // truncate the decompressed stream instead of surfacing as a
+      // fetch failure the same way it already does in the uncompressed
+      // case.
+      if (decoded !== incoming) incoming.once("error", (error) => decoded.destroy(error));
       const body = bodyForbidden
         ? null
-        : Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
+        : Readable.toWeb(decoded) as ReadableStream<Uint8Array>;
+      const headers = responseHeaders(incoming.headers);
+      // The body reaching consumers below is now decompressed (or was
+      // never compressed) either way -- a passthrough content-encoding
+      // header would incorrectly claim otherwise, matching how a real
+      // fetch()/browser client already hides this header once it has
+      // handled the encoding transparently.
+      headers.delete("content-encoding");
       try {
         resolvePromise(
           new Response(body, {
-            headers: responseHeaders(incoming.headers),
+            headers,
             status,
             statusText: incoming.statusMessage,
           }),

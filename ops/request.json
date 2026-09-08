@@ -1,6 +1,6 @@
 {
-  "id": "check-deployed-sha-2026-09-08-2100",
-  "ops": ["status", "runtime"],
+  "id": "confirm-revert-deployed-2026-09-08-2115",
+  "ops": ["runtime"],
   "inspectScans": [],
   "startScan": null
 }

@@ -1,8 +1,6 @@
 {
-  "id": "diagnose-amazones-slow-analyzebusiness-2026-09-08-0053",
-  "ops": [
-    "logs"
-  ],
+  "id": "check-review-marks-test-scan-2026-09-08-2010",
+  "ops": ["status"],
   "inspectScans": [],
   "startScan": null
 }

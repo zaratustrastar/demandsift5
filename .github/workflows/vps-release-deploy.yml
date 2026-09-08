@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: Insights screen information-hierarchy pass -- All/
-# Pains/Requests/Demand patterns filter, compact collapsible-evidence
-# cards, dropped repeated static boilerplate copy. UI only, reuses
-# existing report fields, no backend/AI/ranking changes (2026-09-08).
+# Release marker: AI Visibility results redesign -- progressive
+# disclosure (overall -> question -> per-assistant answer -> sources),
+# question-first grouping, right-side detail drawer. UI only, reuses
+# existing data/renderers, no backend/AI/schedule changes (2026-09-08).
 
 on:
   push:

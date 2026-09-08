@@ -1,6 +1,6 @@
 {
-  "id": "check-review-marks-test-scan-2026-09-08-2010",
-  "ops": ["status"],
+  "id": "check-deployed-sha-2026-09-08-2100",
+  "ops": ["status", "runtime"],
   "inspectScans": [],
   "startScan": null
 }

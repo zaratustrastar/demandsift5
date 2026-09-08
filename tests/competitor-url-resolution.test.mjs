@@ -102,6 +102,38 @@ test("the model is explicitly told not to guess a domain from the name alone, an
   assert.match(method, /do not pad[\s\S]*to reach 3/i);
 });
 
+/**
+ * Real gap found live: amazon.es (an online marketplace spanning
+ * consumer electronics, fashion, household items, books, sports, and
+ * general merchandise) got zero competitor suggestions, even though
+ * Walmart/eBay/AliExpress are obviously real, well-known alternatives.
+ * The model itself proposed zero candidates (confirmed via the route's
+ * own ?debug=1 diagnostic trace -- candidatesReturned: 0, before any
+ * verification/crawling of a competitor's site even happened), not a
+ * later verification failure. The original "not broad category giants
+ * unrelated to its actual size or niche" instruction, while correctly
+ * stopping a narrow business from getting an irrelevant giant as a
+ * suggestion, had no exception for a business that IS itself operating
+ * at that broad, multi-category scale -- there, no single narrow
+ * competitor exists by definition, and the model's own "return none
+ * rather than pad with a weak guess" instruction meant it declined
+ * entirely rather than naming the obvious broad-scale alternatives.
+ */
+test("a business that itself operates at a broad, multi-category scale (a general marketplace/platform/aggregator) is explicitly exempted from the narrow-niche requirement", () => {
+  const method = provider.slice(provider.indexOf("async suggestCompetitorsFromCrawl"), provider.indexOf("async suggestCompetitorsFromCrawl") + 3500);
+  assert.match(method, /not broad category giants unrelated/i);
+  assert.match(method, /Exception:[\s\S]{0,80}broad, multi-category[\s\S]{0,40}scale/i);
+  assert.match(method, /marketplace, platform, or aggregator/i);
+  assert.match(method, /legitimate close alternatives/i);
+  // The exception must come after (i.e. qualify) the original
+  // restriction, not replace or precede it -- a narrow business should
+  // still never get an irrelevant giant suggested.
+  assert.ok(
+    method.indexOf("not broad category giants unrelated") < method.indexOf("Exception:"),
+    "the broad-scale exception should qualify the general rule, not appear before it",
+  );
+});
+
 test("the model is asked to consider geography for location-dependent businesses and product/audience similarity for online ones", () => {
   const method = provider.slice(provider.indexOf("async suggestCompetitorsFromCrawl"), provider.indexOf("async suggestCompetitorsFromCrawl") + 3500);
   assert.match(method, /location-dependent/i);

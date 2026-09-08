@@ -2449,7 +2449,12 @@ export class OpenAiProvider implements AiProvider {
         "an excerpt of the page's own text) -- read them to understand what the business sells, who it serves, and " +
         "how it's positioned. Then name up to 3 of its closest direct competitors or meaningful alternatives -- " +
         "specific companies a real customer would actually compare it against, not broad category giants unrelated " +
-        "to its actual size or niche. If the business is location-dependent (serves a specific city/region/" +
+        "to its actual size or niche. Exception: if the business itself operates at that broad, multi-category " +
+        "scale -- a general marketplace, platform, or aggregator spanning many product categories or use cases, " +
+        "rather than one specific niche -- other companies operating at that same broad scale and serving the " +
+        "same general function are legitimate close alternatives even without a single narrow niche match; name " +
+        "the most obvious ones instead of returning none just because the business is too broad for one precise " +
+        "competitor. If the business is location-dependent (serves a specific city/region/" +
         "country), only suggest competitors serving that same geographic market. If it's online/global, prioritize " +
         "product similarity and target-customer overlap over geography. For each one, return its likely official " +
         "homepage URL only if you are reasonably confident which specific company is meant and what its real " +

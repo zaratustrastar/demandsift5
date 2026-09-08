@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: add a spinner + short helper text to the Competitors
-# screen's existing 20-25 second analysis wait -- reused existing
-# spinner technique and .note styling, no architecture/backend/timing
-# changes (2026-09-08).
+# Release marker: add a persistent triage workflow (decline/reviewed/
+# replied) to the Reddit opportunity carousel -- new ScanRecord.reviewMarks
+# field (no schema migration), PATCH /api/scans/[scanId]/review-mark,
+# carousel UI wiring (2026-09-08).
 
 on:
   push:

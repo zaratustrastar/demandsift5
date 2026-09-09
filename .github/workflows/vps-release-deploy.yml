@@ -1,9 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: Premium visual upgrade of the "Top subreddits" table
-# -- card padding fix, redesigned header, row separators instead of
-# full grid lines, right-aligned numeric columns, relevance/AI-cited
-# badges, top-row emphasis, hover state. Visual only, no logic/data
-# changes (2026-09-09).
+# Release marker: Second premium refinement pass on the Analytics page
+# -- removed permanent first-row background, title-case column headers,
+# explicit column-width proportions, semibold subreddit/blue
+# opportunities text, tighter score/AI-cited badges, demoted scope
+# note, softer insight-card labels. Visual only (2026-09-09).
 
 on:
   push:

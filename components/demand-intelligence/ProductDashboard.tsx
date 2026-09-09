@@ -785,13 +785,13 @@ function sortSubredditRows(rows: SubredditPerformanceRow[], column: SubredditSor
   return direction === "asc" ? sorted : sorted.reverse();
 }
 
-const SUBREDDIT_COLUMNS: Array<{ id: SubredditSortColumn; label: string }> = [
-  { id: "subreddit", label: "Subreddit" },
-  { id: "relevantConversations", label: "Relevant conversations" },
-  { id: "opportunities", label: "Opportunities" },
-  { id: "avgRelevance", label: "Avg relevance" },
-  { id: "aiCited", label: "AI cited" },
-  { id: "latest", label: "Latest" },
+const SUBREDDIT_COLUMNS: Array<{ id: SubredditSortColumn; label: string; width: string }> = [
+  { id: "subreddit", label: "Subreddit", width: "28%" },
+  { id: "relevantConversations", label: "Relevant conversations", width: "20%" },
+  { id: "opportunities", label: "Opportunities", width: "14%" },
+  { id: "avgRelevance", label: "Avg. relevance", width: "14%" },
+  { id: "aiCited", label: "AI cited", width: "11%" },
+  { id: "latest", label: "Latest", width: "13%" },
 ];
 
 /**
@@ -989,7 +989,7 @@ function BestOpportunitySourceCard({ data }: { data: SubredditPerformanceSummary
   const best = data.bestOpportunitySource;
   return (
     <section className={`${styles.card} ${styles.analyticsInsightCard}`}>
-      <span className={styles.eyebrow}>Best opportunity source</span>
+      <span className={styles.analyticsInsightLabel}>Best opportunity source</span>
       {best ? (
         <>
           <h3>r/{best.subreddit}</h3>
@@ -1017,7 +1017,7 @@ function AiCitedCommunitiesCard({ data }: { data: SubredditPerformanceSummary | 
   const communities = data.aiCitedCommunities;
   return (
     <section className={`${styles.card} ${styles.analyticsInsightCard}`}>
-      <span className={styles.eyebrow}>Communities influencing AI answers</span>
+      <span className={styles.analyticsInsightLabel}>Communities influencing AI answers</span>
       {communities.length > 0 ? (
         <div className={styles.analyticsPillRow}>
           {communities.map((row) => (
@@ -1055,11 +1055,8 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
   return (
     <section className={`${styles.card} ${styles.subredditTopCard}`}>
       <div className={styles.subredditTopHeader}>
-        <div>
-          <h2>Top subreddits</h2>
-          <p>Communities producing the most relevant conversations and opportunities.</p>
-        </div>
-        <small className={styles.subredditTopScope}>Based on the initial scan and recent monitoring activity.</small>
+        <h2>Top subreddits</h2>
+        <p>Communities producing the most relevant conversations and opportunities.</p>
       </div>
       {!data ? (
         // Reuses the same generic spinner already built for AI Visibility
@@ -1078,48 +1075,60 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
           No subreddit activity yet -- once Scooptr finds relevant conversations or AI Visibility cites a community, it will appear here.
         </p>
       ) : (
-        <div className={styles.subredditTableScroll}>
-          <table className={`${styles.answerTable} ${styles.subredditTopTable}`}>
-            <thead>
-              <tr>
+        <>
+          <div className={styles.subredditTableScroll}>
+            <table className={`${styles.answerTable} ${styles.subredditTopTable}`}>
+              <colgroup>
                 {SUBREDDIT_COLUMNS.map((column) => (
-                  <th key={column.id} className={column.id === "subreddit" ? undefined : styles.subredditNumericHead}>
-                    <button type="button" className={styles.textButton} onClick={() => clickColumn(column.id)}>
-                      {column.label}
-                      {sortColumn === column.id ? (sortDirection === "desc" ? " \u2193" : " \u2191") : ""}
-                    </button>
-                  </th>
+                  <col key={column.id} style={{ width: column.width }} />
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(sortColumn ? sortSubredditRows(data.rows, sortColumn, sortDirection) : [...data.rows].sort(defaultSubredditSort)).map((row, index) => (
-                <tr key={row.subreddit} className={index === 0 ? styles.subredditTopRow : undefined}>
-                  <td className={styles.subredditNameCell}>r/{row.subreddit}</td>
-                  <td className={styles.subredditNumericCell}>
-                    {row.relevantConversations > 0 ? row.relevantConversations : <span className={styles.subredditMuted}>0</span>}
-                  </td>
-                  <td className={styles.subredditNumericCell}>
-                    {row.opportunities > 0 ? row.opportunities : <span className={styles.subredditMuted}>0</span>}
-                  </td>
-                  <td className={styles.subredditNumericCell}>
-                    {row.avgRelevance === null ? (
-                      <span className={styles.subredditMuted}>{"\u2014"}</span>
-                    ) : (
-                      <span className={row.avgRelevance >= 85 ? styles.subredditScoreBadgeHigh : styles.subredditScoreBadge}>{row.avgRelevance}</span>
-                    )}
-                  </td>
-                  <td className={styles.subredditNumericCell}>
-                    {row.aiCited > 0 ? <span className={styles.subredditAiCited}>{row.aiCited}</span> : <span className={styles.subredditMuted}>0</span>}
-                  </td>
-                  <td className={`${styles.subredditNumericCell} ${styles.subredditLatestCell}`}>
-                    {row.latest ? relativeTime(row.latest) : <span className={styles.subredditMuted}>{"\u2014"}</span>}
-                  </td>
+              </colgroup>
+              <thead>
+                <tr>
+                  {SUBREDDIT_COLUMNS.map((column) => (
+                    <th key={column.id} className={column.id === "subreddit" ? undefined : styles.subredditNumericHead}>
+                      <button type="button" className={styles.textButton} onClick={() => clickColumn(column.id)}>
+                        {column.label}
+                        {sortColumn === column.id ? (sortDirection === "desc" ? " \u2193" : " \u2191") : ""}
+                      </button>
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {(sortColumn ? sortSubredditRows(data.rows, sortColumn, sortDirection) : [...data.rows].sort(defaultSubredditSort)).map((row) => (
+                  <tr key={row.subreddit}>
+                    <td className={styles.subredditNameCell}>r/{row.subreddit}</td>
+                    <td className={styles.subredditNumericCell}>
+                      {row.relevantConversations > 0 ? row.relevantConversations : <span className={styles.subredditMuted}>0</span>}
+                    </td>
+                    <td className={styles.subredditNumericCell}>
+                      {row.opportunities > 0 ? (
+                        <span className={styles.subredditOpportunitiesValue}>{row.opportunities}</span>
+                      ) : (
+                        <span className={styles.subredditMuted}>0</span>
+                      )}
+                    </td>
+                    <td className={styles.subredditNumericCell}>
+                      {row.avgRelevance === null ? (
+                        <span className={styles.subredditMuted}>{"\u2014"}</span>
+                      ) : (
+                        <span className={row.avgRelevance >= 85 ? styles.subredditScoreBadgeHigh : styles.subredditScoreBadge}>{row.avgRelevance}</span>
+                      )}
+                    </td>
+                    <td className={styles.subredditNumericCell}>
+                      {row.aiCited > 0 ? <span className={styles.subredditAiCited}>{row.aiCited}</span> : <span className={styles.subredditMuted}>0</span>}
+                    </td>
+                    <td className={`${styles.subredditNumericCell} ${styles.subredditLatestCell}`}>
+                      {row.latest ? relativeTime(row.latest) : <span className={styles.subredditMuted}>{"\u2014"}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <small className={styles.subredditTopFootnote}>Based on the initial scan and recent monitoring activity.</small>
+        </>
       )}
     </section>
   );

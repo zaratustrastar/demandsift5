@@ -321,12 +321,14 @@ test("no new metrics, fake trends, or comparison values were introduced in this 
   assert.equal(/[+-]\d+%|vs\. previous|vs previous|2x|better than average/i.test(body), false);
 });
 
-test("the header is restructured into a title/subtitle group and a separately-positioned, muted scope note, with a divider before the table", () => {
+test("the header is a clean title/subtitle group; the scope note was demoted out of the header entirely into a footer note below the table", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /styles\.subredditTopHeader/);
-  assert.match(body, /styles\.subredditTopScope/);
-  const cssBody = css.slice(css.indexOf(".subredditTopHeader {"), css.indexOf(".subredditTopHeader {") + 250);
-  assert.match(cssBody, /border-bottom: 1px solid var\(--line\);/);
+  assert.match(body, /styles\.subredditTopFootnote/);
+  assert.equal(/styles\.subredditTopScope/.test(body), false);
+  // The footnote is no longer italic top-right metadata -- it's a plain, muted line.
+  const cssBody = css.slice(css.indexOf(".subredditTopFootnote {"), css.indexOf(".subredditTopFootnote {") + 150);
+  assert.equal(/font-style: italic;/.test(cssBody), false);
 });
 
 test("the table no longer draws a full grid line around every cell -- horizontal row separators only, matching a real analytics product rather than a spreadsheet export", () => {
@@ -341,18 +343,20 @@ test("numeric columns are right-aligned and use tabular figures so values scan c
   assert.match(cssBody, /font-variant-numeric: tabular-nums;/);
 });
 
-test("row hover state exists, and the current top row gets a subtle background emphasis without any sort-logic change", () => {
+test("row hover state exists with a smooth transition, and the previous permanent top-row background emphasis was deliberately removed per explicit direction", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /className=\{index === 0 \? styles\.subredditTopRow : undefined\}/);
+  assert.equal(/subredditTopRow/.test(body), false);
   const hoverCss = css.slice(css.indexOf(".subredditTopTable tbody tr:hover {"), css.indexOf(".subredditTopTable tbody tr:hover {") + 100);
-  assert.match(hoverCss, /background: #fafbfd;/);
+  assert.match(hoverCss, /background: #f7f9fc;/);
+  const transitionCss = css.slice(css.indexOf(".subredditTopTable tbody tr {"), css.indexOf(".subredditTopTable tbody tr {") + 100);
+  assert.match(transitionCss, /transition: background-color 140ms ease;/);
 });
 
-test("Subreddit is rendered as the bold visual anchor of each row", () => {
+test("Subreddit is rendered as the visual anchor of each row with a semibold (not heavy-bold) weight, per the specified 500-600 range", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /className=\{styles\.subredditNameCell\}>r\/\{row\.subreddit\}/);
   const cssBody = css.slice(css.indexOf(".subredditNameCell {"), css.indexOf(".subredditNameCell {") + 100);
-  assert.match(cssBody, /font-weight: 700;/);
+  assert.match(cssBody, /font-weight: 600;/);
 });
 
 test("Avg relevance renders as a small score badge (reusing the existing blue accent tokens), not plain text -- and a high score gets a visually stronger tint than an ordinary one", () => {
@@ -364,15 +368,37 @@ test("Avg relevance renders as a small score badge (reusing the existing blue ac
   assert.match(cssBody, /var\(--green-dark\)/);
 });
 
+test("the score badge has an explicit minimum width in the specified 28-34px range, not left to shrink-wrap arbitrarily", () => {
+  const cssBody = css.slice(css.indexOf(".subredditScoreBadge,"), css.indexOf(".subredditScoreBadge,") + 300);
+  assert.match(cssBody, /min-width: 30px;/);
+});
+
+test("Opportunities gets a distinct, stronger visual treatment than a plain number when its value is genuinely positive -- Scooptr blue text, not a giant badge", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /row\.opportunities > 0 \? \(\s*<span className=\{styles\.subredditOpportunitiesValue\}>\{row\.opportunities\}<\/span>/);
+  const cssBody = css.slice(css.indexOf(".subredditOpportunitiesValue {"), css.indexOf(".subredditOpportunitiesValue {") + 100);
+  assert.match(cssBody, /color: var\(--green-dark\);/);
+  assert.equal(/border-radius|background/.test(cssBody), false);
+});
+
 test("AI cited shows a real tinted badge when there is a real citation count, and a muted zero otherwise -- no fabricated signal", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /row\.aiCited > 0 \? <span className=\{styles\.subredditAiCited\}>\{row\.aiCited\}<\/span> : <span className=\{styles\.subredditMuted\}>0<\/span>/);
 });
 
+test("AI cited's badge is visually quieter (smaller font, tighter padding) than the Avg relevance score badge, so it never competes with Opportunities or reads louder than the score", () => {
+  const aiCss = css.slice(css.indexOf(".subredditAiCited {"), css.indexOf(".subredditAiCited {") + 250);
+  const aiFontMatch = aiCss.match(/font-size: ([\d.]+)px;/);
+  const badgeCss = css.slice(css.indexOf(".subredditScoreBadge,"), css.indexOf(".subredditScoreBadge,") + 300);
+  const badgeFontMatch = badgeCss.match(/font-size: ([\d.]+)px;/);
+  assert.ok(aiFontMatch && badgeFontMatch);
+  assert.ok(Number(aiFontMatch[1]) <= Number(badgeFontMatch[1]));
+});
+
 test("zero-value relevant-conversations and opportunities cells are visually muted, distinct from real positive values", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /row\.relevantConversations > 0 \? row\.relevantConversations : <span className=\{styles\.subredditMuted\}>0<\/span>/);
-  assert.match(body, /row\.opportunities > 0 \? row\.opportunities : <span className=\{styles\.subredditMuted\}>0<\/span>/);
+  assert.match(body, /row\.opportunities > 0 \? \(/);
 });
 
 test("Latest is rendered quieter/secondary than the other numeric cells", () => {
@@ -388,7 +414,38 @@ test("the existing safe mobile horizontal-scroll wrapper is preserved unchanged 
   assert.match(css, /\.subredditTableScroll \.answerTable \{\s*\n\s*min-width: 560px;/);
 });
 
-test("the header stacks into a single column on mobile so the scope note doesn't get cramped against the title", () => {
-  const cssBody = css.slice(css.indexOf(".subredditTopHeader {\n    flex-direction: column;") - 30, css.indexOf(".subredditTopHeader {\n    flex-direction: column;") + 150);
-  assert.match(cssBody, /flex-direction: column;/);
+test("explicit column width proportions are set via <col>, matching the specified percentage breakdown, rather than left to browser auto-sizing", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /<col key=\{column\.id\} style=\{\{ width: column\.width \}\} \/>/);
+  assert.match(dashboard, /\{ id: "subreddit", label: "Subreddit", width: "28%" \}/);
+  assert.match(dashboard, /\{ id: "relevantConversations", label: "Relevant conversations", width: "20%" \}/);
+  assert.match(dashboard, /\{ id: "opportunities", label: "Opportunities", width: "14%" \}/);
+  assert.match(dashboard, /\{ id: "avgRelevance", label: "Avg\. relevance", width: "14%" \}/);
+  assert.match(dashboard, /\{ id: "aiCited", label: "AI cited", width: "11%" \}/);
+});
+
+test("column header labels use title case, not the old all-caps spreadsheet-style transform -- no uppercase, no heavy letter-spacing", () => {
+  const cssBody = css.slice(css.indexOf(".subredditTopTable thead th {"), css.indexOf(".subredditTopTable thead th {") + 250);
+  assert.equal(/text-transform: uppercase;/.test(cssBody), false);
+  assert.match(cssBody, /letter-spacing: 0;/);
+});
+
+test("the two insight cards above the table (Best opportunity source, Communities influencing AI answers) use a softer label than the shared, heavily-uppercase .eyebrow class used broadly elsewhere -- and that shared class itself is untouched", () => {
+  const bestBody = fnBody(dashboard, "function BestOpportunitySourceCard", "\n}\n");
+  const aiBody = fnBody(dashboard, "function AiCitedCommunitiesCard", "\n}\n");
+  assert.match(bestBody, /styles\.analyticsInsightLabel/);
+  assert.match(aiBody, /styles\.analyticsInsightLabel/);
+  assert.equal(/styles\.eyebrow/.test(bestBody), false);
+  assert.equal(/styles\.eyebrow/.test(aiBody), false);
+  const cssBody = css.slice(css.indexOf(".analyticsInsightLabel {"), css.indexOf(".analyticsInsightLabel {") + 200);
+  assert.equal(/text-transform: uppercase;/.test(cssBody), false);
+  // The shared .eyebrow rule itself is unchanged -- still exists as-is for its other, broad usage.
+  assert.match(css, /^\.eyebrow \{/m);
+});
+
+test("no sort logic, column IDs, data source, or business logic changed in this visual pass -- only presentation", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /sortSubredditRows\(data\.rows, sortColumn, sortDirection\)/);
+  assert.match(body, /\[\.\.\.data\.rows\]\.sort\(defaultSubredditSort\)/);
+  assert.equal(/[+-]\d+%|vs\. previous|2x|better than average/i.test(body), false);
 });

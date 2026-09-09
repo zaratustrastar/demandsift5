@@ -857,75 +857,66 @@
 }
 
 /* "Top subreddits" -- a premium, product-feeling table rather than a
- * plain spreadsheet grid. Reuses the same 22-24px padding, blue accent
- * family, and card shell already used by the analytics cards above it
- * (this section previously used bare .card with no padding class at
- * all, unlike every sibling above it -- that gap, not a styling choice,
- * was the main reason it read as flat and disconnected). */
+ * plain spreadsheet grid. Reuses the same padding scale, blue accent
+ * family, and card shell already used by the analytics cards above it. */
 .subredditTopCard {
-  padding: 24px 26px 20px;
+  padding: 26px 28px 20px;
 }
 .subredditTopHeader {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--line);
+  margin-bottom: 22px;
 }
 .subredditTopHeader h2 {
   margin: 0 0 4px;
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 600;
   color: var(--ink);
 }
 .subredditTopHeader p {
   margin: 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
-.subredditTopScope {
-  flex: 0 0 auto;
+/* Demoted per explicit direction: a footer note rather than
+ * top-right-aligned italic metadata competing with the heading. */
+.subredditTopFootnote {
+  display: block;
+  margin-top: 14px;
   color: var(--faint);
   font-size: 11px;
-  font-style: italic;
-  text-align: right;
-  white-space: nowrap;
 }
 
-/* The table itself: horizontal row separators only (no per-cell grid
- * lines), larger type, right-aligned numeric columns, a subtle hover
- * state, and a quiet emphasis on whichever row currently sorts first --
- * the presentation language of a real analytics product rather than a
- * spreadsheet export. */
+/* The table itself: one subtle horizontal separator between rows (no
+ * vertical column dividers, no per-cell borders), generous row height,
+ * right-aligned numeric columns with a clear typographic hierarchy --
+ * data hierarchy instead of boxes. Column widths are set via <col> to
+ * match the specified proportions rather than left to auto-sizing. */
 .subredditTopTable {
   border-collapse: collapse;
-  font-size: 13px;
+  table-layout: fixed;
+  font-size: 14px;
 }
 .subredditTopTable th,
 .subredditTopTable td {
-  padding: 12px 14px;
+  padding: 15px 16px;
   border: none;
   border-bottom: 1px solid var(--line);
 }
 .subredditTopTable thead th {
   padding-top: 0;
-  padding-bottom: 10px;
+  padding-bottom: 12px;
   background: none;
   border-bottom: 1px solid var(--line);
-  color: var(--faint);
-  font-size: 10.5px;
-  font-weight: 750;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 550;
+  letter-spacing: 0;
 }
 .subredditTopTable thead th .textButton {
   padding: 0;
   color: inherit;
   font-size: inherit;
   font-weight: inherit;
-  text-transform: inherit;
+  text-transform: none;
   letter-spacing: inherit;
 }
 .subredditTopTable thead th.subredditNumericHead {
@@ -938,41 +929,48 @@
 .subredditTopTable tbody tr:last-child td {
   border-bottom: none;
 }
+.subredditTopTable tbody tr {
+  transition: background-color 140ms ease;
+}
 .subredditTopTable tbody tr:hover {
-  background: #fafbfd;
-}
-.subredditTopRow td {
-  background: var(--green-soft);
-}
-.subredditTopRow:hover td {
-  background: var(--green-soft);
+  background: #f7f9fc;
 }
 .subredditNameCell {
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--ink);
 }
 .subredditNumericCell {
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
-  font-weight: 600;
+  font-weight: 500;
+}
+.subredditOpportunitiesValue {
+  color: var(--green-dark);
+  font-weight: 700;
 }
 .subredditLatestCell {
   color: var(--faint);
-  font-weight: 500;
-  font-size: 12px;
+  font-weight: 450;
+  font-size: 12.5px;
+  white-space: nowrap;
 }
 .subredditMuted {
   color: var(--faint);
-  font-weight: 500;
+  font-weight: 450;
 }
 .subredditScoreBadge,
 .subredditScoreBadgeHigh {
   display: inline-flex;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
 }
 .subredditScoreBadge {
   background: #f1f3f5;
@@ -986,22 +984,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 20px;
-  padding: 1px 7px;
+  min-width: 18px;
+  padding: 1px 6px;
   border-radius: 999px;
   background: var(--green-soft);
   color: var(--green-dark);
-  font-weight: 700;
-}
-
-@media (max-width: 640px) {
-  .subredditTopHeader {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .subredditTopScope {
-    text-align: left;
-  }
+  font-size: 11px;
+  font-weight: 600;
 }
 
 /* Analytics screen infographics -- KPI row, activity chart, donut, two
@@ -1120,6 +1109,18 @@
   justify-content: center;
 }
 
+/* A softer label than the shared .eyebrow (which is heavily uppercase,
+ * letter-spaced, and blue-colored) for just these two insight cards --
+ * they read more like premium insight cards this way, less like a
+ * dashboard KPI box. The shared .eyebrow class itself is untouched
+ * since it's used broadly elsewhere across the app. */
+.analyticsInsightLabel {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 550;
+}
 .analyticsInsightCard h3 {
   margin: 8px 0 10px;
   font-size: 18px;

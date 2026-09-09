@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: AI Visibility results redesign -- progressive
-# disclosure (overall -> question -> per-assistant answer -> sources),
-# question-first grouping, right-side detail drawer. UI only, reuses
-# existing data/renderers, no backend/AI/schedule changes (2026-09-08).
+# Release marker: Reddit monitoring config sections (Prompt 7A) + AI
+# Visibility persisted, user-manageable question set (Prompt 7B) --
+# includes migration 0015 (one additive nullable jsonb column on
+# runtime_ai_visibility_schedules) (2026-09-09).
 
 on:
   push:

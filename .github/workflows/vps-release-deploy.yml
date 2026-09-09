@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: Reddit monitoring config sections (Prompt 7A) + AI
-# Visibility persisted, user-manageable question set (Prompt 7B) --
-# includes migration 0015 (one additive nullable jsonb column on
-# runtime_ai_visibility_schedules) (2026-09-09).
+# Release marker: Prompt 9A -- lightweight subreddit include/exclude
+# control for ongoing Reddit monitoring, "Recommended" derived from
+# existing seed-scan + recent-monitoring-run data. No schema change,
+# no new scraping (2026-09-09).
 
 on:
   push:

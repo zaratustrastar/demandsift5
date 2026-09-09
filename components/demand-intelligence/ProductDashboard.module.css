@@ -1035,7 +1035,7 @@
   padding: 16px 18px;
   background: #fbfcfb;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 11px;
 }
 
 /* Manage questions rows/inputs -- same card shell as
@@ -1051,7 +1051,7 @@
   padding: 13px 15px;
   background: #fbfcfb;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 11px;
 }
 
 .manageQuestionText {
@@ -1076,8 +1076,12 @@
 
 .manageQuestionStatus {
   margin-right: 4px;
-  color: var(--faint);
-  font-size: 10.5px;
+  padding: 3px 7px;
+  color: #727c77;
+  background: #f5f7f5;
+  border: 1px solid #ebeeec;
+  border-radius: 6px;
+  font-size: 10px;
   font-weight: 750;
   text-transform: uppercase;
   letter-spacing: 0.04em;

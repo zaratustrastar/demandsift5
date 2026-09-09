@@ -789,8 +789,8 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
         <span className={styles.eyebrow}>Analytics</span>
         <h2>Subreddit performance</h2>
         <p>
-          See which Reddit communities are actually producing relevant conversations, opportunities, and influencing
-          AI answers -- separate from Monitoring config, which controls where Scooptr is allowed to look.
+          See which Reddit communities are actually producing relevant conversations and opportunities, and
+          which ones are influencing AI answers. Monitoring config controls where Scooptr is allowed to look.
         </p>
         <small className={styles.monitoringTermsNote}>Based on the initial scan and recent monitoring activity.</small>
       </div>

@@ -1,10 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: Top subreddits -- fixed a real CSS specificity bug
-# (.answerTable's th/td rule was winning a cascade tie over this
-# table's own rule, silently re-applying spreadsheet-style borders
-# under two prior passes) by fully decoupling the table from
-# .answerTable. Added Reddit-identity glyph, subreddit count, reworked
-# relevance/AI-cited treatment. Visual only (2026-09-09).
+# Release marker: Top subreddits -- replaced the HTML <table> with a
+# CSS Grid data list sharing one grid-template-columns definition
+# between the header and every row, fixing residual header/value
+# column drift. Real Reddit logo asset (public/logos/reddit-mark.png)
+# replaces the CSS glyph. Visual/structural only (2026-09-09).
 
 on:
   push:

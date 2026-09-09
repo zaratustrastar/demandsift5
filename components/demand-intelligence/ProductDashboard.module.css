@@ -850,25 +850,9 @@
   -webkit-overflow-scrolling: touch;
 }
 
-/* Without a minimum, width: 100% on the table would just shrink to
- * the narrow container instead of triggering the scroll above.
- * Targets .subredditTopTable directly now that this table no longer
- * shares .answerTable as a base class. */
-.subredditTableScroll .subredditTopTable {
-  min-width: 560px;
-}
-
 /* "Top subreddits" -- a premium, product-feeling data list rather than
  * a plain spreadsheet grid. Reuses the same padding scale, blue accent
- * family, and card shell already used by the analytics cards above it.
- * The table below is fully self-contained (does not share .answerTable
- * as a base class): that class's own th/td rule has the exact same
- * specificity as this table's own equivalent rule, and being defined
- * later in the stylesheet, was silently winning the cascade tie and
- * re-applying full per-cell borders and left/top alignment underneath
- * every style below -- this is why the table kept looking like a
- * spreadsheet despite this file already having "correct" rules for it.
- * Decoupling from that shared class removes the conflict permanently. */
+ * family, and card shell already used by the analytics cards above it. */
 .subredditTopCard {
   padding: 26px 28px 22px;
 }
@@ -881,26 +865,27 @@
   gap: 8px;
   margin-bottom: 4px;
 }
-/* A small, monochrome glyph rather than Reddit's own trademarked
- * orange logo -- makes "this is Reddit data" obvious at a glance
- * without introducing a third brand color into Scooptr's own
- * white/blue system. */
+/* The real, supplied Reddit logo asset (public/logos/reddit-mark.png),
+ * never recreated with CSS/an icon library/emoji -- kept at its
+ * correct square aspect ratio and sized subtly. */
 .subredditTopIcon {
-  width: 18px;
-  height: 18px;
-  color: var(--faint);
+  width: 22px;
+  height: 22px;
   flex: 0 0 auto;
+  display: block;
 }
 .subredditTopHeader h2 {
   margin: 0;
   font-size: 18px;
   font-weight: 600;
   color: var(--ink);
+  line-height: 1;
 }
 .subredditTopCount {
   color: var(--faint);
   font-size: 13px;
   font-weight: 500;
+  line-height: 1;
 }
 .subredditTopHeader p {
   margin: 0;
@@ -908,49 +893,72 @@
   font-size: 13.5px;
 }
 /* Demoted per explicit direction: a footer note rather than
- * top-right-aligned italic metadata competing with the heading. */
+ * top-right-aligned italic metadata competing with the heading. Its
+ * left edge is 4px (matching .subredditGridCell:first-child's own 4px
+ * left padding below) so it lines up exactly with the grid content
+ * above it, not with the card's own outer padding. */
 .subredditTopFootnote {
   display: block;
   margin-top: 14px;
+  padding-left: 4px;
   color: var(--faint);
   font-size: 11px;
 }
 
-/* The table itself: one very subtle horizontal separator between rows
- * (no vertical column dividers, no per-cell borders at all), generous
- * row height, right-aligned numeric columns with a clear typographic
- * hierarchy -- data hierarchy instead of boxes. Column widths are set
- * via <col> to match the specified proportions rather than left to
- * auto-sizing. */
-.subredditTopTable {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 14px;
+/* The data list itself: one single grid-template-columns definition
+ * (.subredditTopGrid) applied unchanged to both the header row and
+ * every data row -- not an HTML <table> (which, in production, drifted
+ * by a few pixels per column between <thead> and <tbody> despite
+ * matching <col> widths) but a set of CSS Grid containers that all
+ * share the exact same column template, guaranteeing every value sits
+ * directly beneath its column heading. role="table"/"row"/
+ * "columnheader"/"cell" preserve the screen-reader semantics a real
+ * <table> would have had. Subreddit gets the largest flexible share;
+ * "Relevant conversations" gets enough width for its own long label;
+ * Opportunities and Avg. relevance are narrower; AI cited is compact;
+ * Latest gets enough room for a string like "217 days ago". */
+.subredditTopGridContainer {
+  min-width: 560px;
 }
-.subredditTopTable th,
-.subredditTopTable td {
-  padding: 17px 16px;
-  border: none;
+.subredditTopGrid {
+  display: grid;
+  grid-template-columns: minmax(140px, 2fr) minmax(108px, 1.15fr) minmax(76px, 0.75fr) minmax(84px, 0.85fr) minmax(64px, 0.7fr) minmax(92px, 0.95fr);
+  align-items: center;
+  column-gap: 12px;
+}
+.subredditTopGrid:not(.subredditTopGridHead) {
   border-bottom: 1px solid var(--line);
-  text-align: left;
-  vertical-align: middle;
+  transition: background-color 140ms ease;
 }
-.subredditTopTable th:first-child,
-.subredditTopTable td:first-child {
+.subredditTopGridContainer > .subredditTopGrid:last-child {
+  border-bottom: none;
+}
+.subredditTopGrid:not(.subredditTopGridHead):hover {
+  background: #f7f9fc;
+}
+/* Every cell (header or data) shares this one padding rule -- no cell
+ * is individually nudged with its own margin/padding to force
+ * alignment; the shared grid template above is what does that. */
+.subredditGridCell {
+  padding: 17px 0;
+  text-align: left;
+}
+.subredditGridCell:first-child {
   padding-left: 4px;
 }
-.subredditTopTable thead th {
+.subredditGridCellRight {
+  text-align: right;
+}
+.subredditTopGridHead .subredditGridCell {
   padding-top: 0;
   padding-bottom: 12px;
-  background: none;
-  border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 12.5px;
   font-weight: 550;
-  letter-spacing: 0;
 }
-.subredditTopTable thead th .textButton {
+.subredditTopGridHead .textButton {
+  display: inline-flex;
+  width: 100%;
   padding: 0;
   color: inherit;
   font-size: inherit;
@@ -958,21 +966,8 @@
   text-transform: none;
   letter-spacing: inherit;
 }
-.subredditTopTable thead th.subredditNumericHead {
-  text-align: right;
-}
-.subredditTopTable thead th.subredditNumericHead .textButton {
+.subredditTopGridHead .subredditGridCellRight .textButton {
   justify-content: flex-end;
-  width: 100%;
-}
-.subredditTopTable tbody tr:last-child td {
-  border-bottom: none;
-}
-.subredditTopTable tbody tr {
-  transition: background-color 140ms ease;
-}
-.subredditTopTable tbody tr:hover {
-  background: #f7f9fc;
 }
 .subredditNameCell {
   font-size: 15px;
@@ -980,7 +975,7 @@
   color: var(--ink);
 }
 .subredditNumericCell {
-  text-align: right;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
   font-weight: 500;

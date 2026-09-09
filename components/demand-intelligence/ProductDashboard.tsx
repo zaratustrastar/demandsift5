@@ -1052,22 +1052,16 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
     }
   };
 
+  const sortedRows = sortColumn ? sortSubredditRows(data?.rows ?? [], sortColumn, sortDirection) : [...(data?.rows ?? [])].sort(defaultSubredditSort);
+
   return (
     <section className={`${styles.card} ${styles.subredditTopCard}`}>
       <div className={styles.subredditTopHeader}>
         <div className={styles.subredditTopTitleRow}>
-          {/* A simple, monochrome alien-face glyph rather than Reddit's
-           * own trademarked orange logo -- recognizable as "this is
-           * Reddit data" without introducing a third brand color or any
-           * asset/trademark concern into Scooptr's own white/blue system. */}
-          <svg className={styles.subredditTopIcon} viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <circle cx="10" cy="12" r="7" fill="currentColor" opacity="0.12" />
-            <circle cx="7.2" cy="12" r="1.15" fill="currentColor" />
-            <circle cx="12.8" cy="12" r="1.15" fill="currentColor" />
-            <path d="M6.3 14.8c1 1.1 2.3 1.7 3.7 1.7s2.7-.6 3.7-1.7" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" fill="none" />
-            <line x1="10" y1="5.2" x2="10" y2="3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-            <circle cx="10" cy="2.3" r="0.9" fill="currentColor" />
-          </svg>
+          {/* The real, supplied Reddit logo asset -- never recreated with
+           * CSS/an icon library/emoji. Sized subtly and kept at its
+           * correct square aspect ratio. */}
+          <img src="/logos/reddit-mark.png" alt="Reddit" className={styles.subredditTopIcon} width={22} height={22} />
           <h2>Top subreddits</h2>
           {data && data.rows.length > 0 && <span className={styles.subredditTopCount}>{data.rows.length}</span>}
         </div>
@@ -1091,65 +1085,65 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
         </p>
       ) : (
         <>
+          {/*
+           * A CSS Grid data list, not an HTML <table>. The header row and
+           * every data row are separate grid containers that all apply
+           * the exact same styles.subredditTopGrid class -- one single
+           * grid-template-columns definition, defined once, used
+           * everywhere -- so every value is guaranteed to sit directly
+           * beneath its column heading rather than relying on <table>'s
+           * own column-width negotiation (which visibly drifted by a
+           * few pixels per column in production). role="table"/"row"/
+           * "columnheader"/"cell" preserve the same screen-reader
+           * semantics a real <table> would have had.
+           */}
           <div className={styles.subredditTableScroll}>
-            {/* Deliberately not sharing .answerTable as a base class here
-             * (previously did) -- that class's own th/td rule has the
-             * exact same specificity as this table's own, and being
-             * defined later in the stylesheet, was silently winning the
-             * cascade tie and re-applying full per-cell borders and
-             * left/top alignment underneath this component's intended
-             * styles. This table is now fully self-contained. */}
-            <table className={styles.subredditTopTable}>
-              <colgroup>
+            <div className={styles.subredditTopGridContainer} role="table" aria-label="Top subreddits">
+              <div className={`${styles.subredditTopGrid} ${styles.subredditTopGridHead}`} role="row">
                 {SUBREDDIT_COLUMNS.map((column) => (
-                  <col key={column.id} style={{ width: column.width }} />
+                  <div
+                    key={column.id}
+                    className={column.id === "subreddit" ? styles.subredditGridCell : `${styles.subredditGridCell} ${styles.subredditGridCellRight}`}
+                    role="columnheader"
+                  >
+                    <button type="button" className={styles.textButton} onClick={() => clickColumn(column.id)}>
+                      {column.label}
+                      {sortColumn === column.id ? (sortDirection === "desc" ? " \u2193" : " \u2191") : ""}
+                    </button>
+                  </div>
                 ))}
-              </colgroup>
-              <thead>
-                <tr>
-                  {SUBREDDIT_COLUMNS.map((column) => (
-                    <th key={column.id} className={column.id === "subreddit" ? undefined : styles.subredditNumericHead}>
-                      <button type="button" className={styles.textButton} onClick={() => clickColumn(column.id)}>
-                        {column.label}
-                        {sortColumn === column.id ? (sortDirection === "desc" ? " \u2193" : " \u2191") : ""}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {(sortColumn ? sortSubredditRows(data.rows, sortColumn, sortDirection) : [...data.rows].sort(defaultSubredditSort)).map((row) => (
-                  <tr key={row.subreddit}>
-                    <td className={styles.subredditNameCell}>r/{row.subreddit}</td>
-                    <td className={styles.subredditNumericCell}>
-                      {row.relevantConversations > 0 ? row.relevantConversations : <span className={styles.subredditMuted}>0</span>}
-                    </td>
-                    <td className={styles.subredditNumericCell}>
-                      {row.opportunities > 0 ? (
-                        <span className={styles.subredditOpportunitiesValue}>{row.opportunities}</span>
-                      ) : (
-                        <span className={styles.subredditMuted}>0</span>
-                      )}
-                    </td>
-                    <td className={styles.subredditNumericCell}>
-                      {row.avgRelevance === null ? (
-                        <span className={styles.subredditMuted}>{"\u2014"}</span>
-                      ) : row.avgRelevance >= 85 ? (
-                        <span className={styles.subredditScoreHigh}>{row.avgRelevance}</span>
-                      ) : (
-                        <span className={styles.subredditScore}>{row.avgRelevance}</span>
-                      )}
-                    </td>
-                    <td className={styles.subredditNumericCell}>
-                      {row.aiCited > 0 ? <span className={styles.subredditAiCited}>{row.aiCited}</span> : <span className={styles.subredditMuted}>0</span>}
-                    </td>
-                    <td className={`${styles.subredditNumericCell} ${styles.subredditLatestCell}`}>
-                      {row.latest ? relativeTime(row.latest) : <span className={styles.subredditMuted}>{"\u2014"}</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              </div>
+              {sortedRows.map((row) => (
+                <div className={styles.subredditTopGrid} role="row" key={row.subreddit}>
+                  <div className={`${styles.subredditGridCell} ${styles.subredditNameCell}`} role="cell">r/{row.subreddit}</div>
+                  <div className={`${styles.subredditGridCell} ${styles.subredditGridCellRight} ${styles.subredditNumericCell}`} role="cell">
+                    {row.relevantConversations > 0 ? row.relevantConversations : <span className={styles.subredditMuted}>0</span>}
+                  </div>
+                  <div className={`${styles.subredditGridCell} ${styles.subredditGridCellRight} ${styles.subredditNumericCell}`} role="cell">
+                    {row.opportunities > 0 ? (
+                      <span className={styles.subredditOpportunitiesValue}>{row.opportunities}</span>
+                    ) : (
+                      <span className={styles.subredditMuted}>0</span>
+                    )}
+                  </div>
+                  <div className={`${styles.subredditGridCell} ${styles.subredditGridCellRight} ${styles.subredditNumericCell}`} role="cell">
+                    {row.avgRelevance === null ? (
+                      <span className={styles.subredditMuted}>{"\u2014"}</span>
+                    ) : row.avgRelevance >= 85 ? (
+                      <span className={styles.subredditScoreHigh}>{row.avgRelevance}</span>
+                    ) : (
+                      <span className={styles.subredditScore}>{row.avgRelevance}</span>
+                    )}
+                  </div>
+                  <div className={`${styles.subredditGridCell} ${styles.subredditGridCellRight} ${styles.subredditNumericCell}`} role="cell">
+                    {row.aiCited > 0 ? <span className={styles.subredditAiCited}>{row.aiCited}</span> : <span className={styles.subredditMuted}>0</span>}
+                  </div>
+                  <div className={`${styles.subredditGridCell} ${styles.subredditGridCellRight} ${styles.subredditNumericCell} ${styles.subredditLatestCell}`} role="cell">
+                    {row.latest ? relativeTime(row.latest) : <span className={styles.subredditMuted}>{"\u2014"}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
           <small className={styles.subredditTopFootnote}>Based on the initial scan and recent monitoring activity.</small>
         </>

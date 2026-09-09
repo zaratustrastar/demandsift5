@@ -165,10 +165,19 @@ test("the table shows an em dash, not a fabricated number, for avg relevance and
   assert.match(body, /row\.latest \? relativeTime\(row\.latest\) : <span className=\{styles\.subredditMuted\}>\{"\\u2014"\}<\/span>/);
 });
 
-test("the table is fully self-contained and no longer shares .answerTable as a base class -- that shared class's own th/td rule had identical CSS specificity to this table's own rule and, being defined later in the stylesheet, was silently winning the cascade tie and re-applying full per-cell borders underneath every intended style", () => {
+test("the table is a CSS Grid data list, not an HTML <table> -- header and rows are separate grid containers sharing one grid-template-columns definition, applied via the exact same .subredditTopGrid class, so no column can drift between header and body", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.equal(/styles\.answerTable/.test(body), false);
-  assert.match(body, /<table className=\{styles\.subredditTopTable\}>/);
+  // Checked against the JSX return block with its own {/* ... */} JSX
+  // comments stripped out -- one of those comments correctly mentions
+  // "<table>" while describing what this moved away from, which would
+  // otherwise be a false positive for this exact check.
+  const jsxBody = body.slice(body.indexOf("return (")).replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
+  assert.equal(/<table/i.test(jsxBody), false);
+  const headMatches = body.match(/className=\{`\$\{styles\.subredditTopGrid\} \$\{styles\.subredditTopGridHead\}`\}/g) ?? [];
+  const rowMatches = body.match(/className=\{styles\.subredditTopGrid\} role="row"/g) ?? [];
+  assert.equal(headMatches.length, 1);
+  assert.equal(rowMatches.length, 1);
 });
 
 test("the scope note matches exactly what was specified", () => {
@@ -176,11 +185,10 @@ test("the scope note matches exactly what was specified", () => {
   assert.match(body, /Based on the initial scan and recent monitoring activity\./);
 });
 
-test("no chart library or chart-style SVG (bars, arcs, paths for data) is used in this table -- the only <svg> present is the small, static Reddit-identity glyph in the header", () => {
+test("no chart library or chart-style SVG (bars, arcs, paths for data) is used in this table -- the header uses the real supplied Reddit logo image asset, not an SVG glyph", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.equal(/recharts|chart\.js|d3\./i.test(body), false);
-  const svgMatches = body.match(/<svg/g) ?? [];
-  assert.equal(svgMatches.length, 1);
+  assert.equal(/recharts|chart\.js|d3\.|<svg/i.test(body), false);
+  assert.match(body, /src="\/logos\/reddit-mark\.png"/);
   assert.match(body, /className=\{styles\.subredditTopIcon\}/);
 });
 
@@ -315,8 +323,8 @@ test("the table's outer card now has its own padding class paired with .card, ma
 
 test("sort logic, column definitions, and data flow into the table are completely unchanged by this visual pass", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /sortSubredditRows\(data\.rows, sortColumn, sortDirection\)/);
-  assert.match(body, /\[\.\.\.data\.rows\]\.sort\(defaultSubredditSort\)/);
+  assert.match(body, /sortSubredditRows\(data\?\.rows \?\? \[\], sortColumn, sortDirection\)/);
+  assert.match(body, /\[\.\.\.\(data\?\.rows \?\? \[\]\)\]\.sort\(defaultSubredditSort\)/);
   assert.match(body, /SUBREDDIT_COLUMNS\.map\(\(column\)/);
 });
 
@@ -335,30 +343,31 @@ test("the header is a clean title/subtitle group; the scope note was demoted out
   assert.equal(/font-style: italic;/.test(cssBody), false);
 });
 
-test("the table no longer draws a full grid line around every cell -- horizontal row separators only, matching a real analytics product rather than a spreadsheet export", () => {
-  const cssBody = css.slice(css.indexOf(".subredditTopTable {"), css.indexOf(".subredditTopTable tbody tr:hover"));
-  assert.match(cssBody, /border: none;/);
+test("the data list no longer draws a full grid line around every cell -- horizontal row separators only (one shared rule on the non-header grid rows), matching a real analytics product rather than a spreadsheet export", () => {
+  const cssBody = css.slice(css.indexOf(".subredditTopGrid:not(.subredditTopGridHead) {"), css.indexOf(".subredditTopGrid:not(.subredditTopGridHead) {") + 150);
   assert.match(cssBody, /border-bottom: 1px solid var\(--line\);/);
+  assert.equal(/border: 1px solid|border-left|border-right/.test(cssBody), false);
 });
 
-test("numeric columns are right-aligned and use tabular figures so values scan cleanly in a column, unlike the previous left-aligned plain cells", () => {
+test("numeric columns use tabular figures and header/data cells share one right-alignment modifier class, so header labels and values are guaranteed the same alignment", () => {
   const cssBody = css.slice(css.indexOf(".subredditNumericCell {"), css.indexOf(".subredditNumericCell {") + 200);
-  assert.match(cssBody, /text-align: right;/);
   assert.match(cssBody, /font-variant-numeric: tabular-nums;/);
+  const rightCss = css.slice(css.indexOf(".subredditGridCellRight {"), css.indexOf(".subredditGridCellRight {") + 100);
+  assert.match(rightCss, /text-align: right;/);
 });
 
 test("row hover state exists with a smooth transition, and the previous permanent top-row background emphasis was deliberately removed per explicit direction", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.equal(/subredditTopRow/.test(body), false);
-  const hoverCss = css.slice(css.indexOf(".subredditTopTable tbody tr:hover {"), css.indexOf(".subredditTopTable tbody tr:hover {") + 100);
+  assert.equal(/subredditTopRow\b/.test(body), false);
+  const hoverCss = css.slice(css.indexOf(".subredditTopGrid:not(.subredditTopGridHead):hover {"), css.indexOf(".subredditTopGrid:not(.subredditTopGridHead):hover {") + 100);
   assert.match(hoverCss, /background: #f7f9fc;/);
-  const transitionCss = css.slice(css.indexOf(".subredditTopTable tbody tr {"), css.indexOf(".subredditTopTable tbody tr {") + 100);
+  const transitionCss = css.slice(css.indexOf(".subredditTopGrid:not(.subredditTopGridHead) {"), css.indexOf(".subredditTopGrid:not(.subredditTopGridHead) {") + 150);
   assert.match(transitionCss, /transition: background-color 140ms ease;/);
 });
 
 test("Subreddit is rendered as the visual anchor of each row with a semibold (not heavy-bold) weight, per the specified 500-600 range", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /className=\{styles\.subredditNameCell\}>r\/\{row\.subreddit\}/);
+  assert.match(body, /styles\.subredditNameCell\}`\} role="cell">r\/\{row\.subreddit\}/);
   const cssBody = css.slice(css.indexOf(".subredditNameCell {"), css.indexOf(".subredditNameCell {") + 100);
   assert.match(cssBody, /font-weight: 600;/);
 });
@@ -411,18 +420,19 @@ test("Latest is rendered quieter/secondary than the other numeric cells", () => 
   assert.match(cssBody, /color: var\(--faint\);/);
 });
 
-test("the existing safe mobile horizontal-scroll wrapper is preserved unchanged -- .subredditTableScroll still wraps the table, and its min-width rule (now targeting .subredditTopTable directly, since the table no longer shares .answerTable) still applies", () => {
+test("the existing safe mobile horizontal-scroll wrapper is preserved unchanged -- .subredditTableScroll still wraps the grid, and the grid container has its own min-width so the scroll actually engages on a narrow viewport", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /styles\.subredditTableScroll/);
-  assert.match(css, /\.subredditTableScroll \.subredditTopTable \{\s*\n\s*min-width: 560px;/);
+  assert.match(css, /\.subredditTopGridContainer \{\s*\n\s*min-width: 560px;/);
 });
 
-test("a small, monochrome Reddit-identity glyph sits next to the section title -- not Reddit's own trademarked orange logo, and using the muted faint color token rather than a new one", () => {
+test("the real, supplied Reddit logo image asset sits next to the section title -- never recreated with CSS/an icon library/emoji, sized subtly (~22px) at its correct square aspect ratio", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /styles\.subredditTopIcon/);
+  assert.match(body, /src="\/logos\/reddit-mark\.png"/);
+  assert.match(body, /width=\{22\} height=\{22\}/);
   const cssBody = css.slice(css.indexOf(".subredditTopIcon {"), css.indexOf(".subredditTopIcon {") + 150);
-  assert.equal(/#ff4500/i.test(cssBody), false);
-  assert.match(cssBody, /color: var\(--faint\);/);
+  assert.match(cssBody, /width: 22px;/);
+  assert.match(cssBody, /height: 22px;/);
 });
 
 test("a muted subreddit count sits next to the title, shown only once there are real rows to count", () => {
@@ -430,20 +440,31 @@ test("a muted subreddit count sits next to the title, shown only once there are 
   assert.match(body, /data && data\.rows\.length > 0 && <span className=\{styles\.subredditTopCount\}>\{data\.rows\.length\}<\/span>/);
 });
 
-test("explicit column width proportions are set via <col>, matching the specified percentage breakdown, rather than left to browser auto-sizing", () => {
+test("one shared grid-template-columns definition is used for both the header row and every data row -- defined exactly once in .subredditTopGrid, never independently on header vs. rows", () => {
+  const gridDefinitions = css.match(/grid-template-columns: minmax\(140px, 2fr\)[^;]*;/g) ?? [];
+  assert.equal(gridDefinitions.length, 1);
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /<col key=\{column\.id\} style=\{\{ width: column\.width \}\} \/>/);
-  assert.match(dashboard, /\{ id: "subreddit", label: "Subreddit", width: "28%" \}/);
-  assert.match(dashboard, /\{ id: "relevantConversations", label: "Relevant conversations", width: "20%" \}/);
-  assert.match(dashboard, /\{ id: "opportunities", label: "Opportunities", width: "14%" \}/);
-  assert.match(dashboard, /\{ id: "avgRelevance", label: "Avg\. relevance", width: "14%" \}/);
-  assert.match(dashboard, /\{ id: "aiCited", label: "AI cited", width: "11%" \}/);
+  const gridClassUses = body.match(/styles\.subredditTopGrid\b/g) ?? [];
+  // Used on both the header row and the per-row div -- at least twice.
+  assert.ok(gridClassUses.length >= 2);
+});
+
+test("column proportions favor Subreddit as the largest flexible share, with Relevant conversations wide enough for its own long label, Opportunities/Avg. relevance narrower, AI cited compact, and Latest wide enough for a string like '217 days ago'", () => {
+  const gridCss = css.slice(css.indexOf(".subredditTopGrid {"), css.indexOf(".subredditTopGrid {") + 400);
+  assert.match(gridCss, /minmax\(140px, 2fr\) minmax\(108px, 1\.15fr\) minmax\(76px, 0\.75fr\) minmax\(84px, 0\.85fr\) minmax\(64px, 0\.7fr\) minmax\(92px, 0\.95fr\)/);
+});
+
+test("no cell is individually nudged with its own margin/padding to force alignment -- every cell (header or data) shares one .subredditGridCell padding rule, with only a first-child left-padding exception applied identically to both", () => {
+  const cellCss = css.slice(css.indexOf(".subredditGridCell {"), css.indexOf(".subredditGridCell {") + 100);
+  assert.match(cellCss, /padding: 17px 0;/);
+  const firstChildCss = css.slice(css.indexOf(".subredditGridCell:first-child {"), css.indexOf(".subredditGridCell:first-child {") + 100);
+  assert.match(firstChildCss, /padding-left: 4px;/);
 });
 
 test("column header labels use title case, not the old all-caps spreadsheet-style transform -- no uppercase, no heavy letter-spacing", () => {
-  const cssBody = css.slice(css.indexOf(".subredditTopTable thead th {"), css.indexOf(".subredditTopTable thead th {") + 250);
+  const cssBody = css.slice(css.indexOf(".subredditTopGridHead .subredditGridCell {"), css.indexOf(".subredditTopGridHead .subredditGridCell {") + 200);
   assert.equal(/text-transform: uppercase;/.test(cssBody), false);
-  assert.match(cssBody, /letter-spacing: 0;/);
+  assert.equal(/letter-spacing: 0\.\d/.test(cssBody), false);
 });
 
 test("the two insight cards above the table (Best opportunity source, Communities influencing AI answers) use a softer label than the shared, heavily-uppercase .eyebrow class used broadly elsewhere -- and that shared class itself is untouched", () => {
@@ -461,7 +482,7 @@ test("the two insight cards above the table (Best opportunity source, Communitie
 
 test("no sort logic, column IDs, data source, or business logic changed in this visual pass -- only presentation", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /sortSubredditRows\(data\.rows, sortColumn, sortDirection\)/);
-  assert.match(body, /\[\.\.\.data\.rows\]\.sort\(defaultSubredditSort\)/);
+  assert.match(body, /sortSubredditRows\(data\?\.rows \?\? \[\], sortColumn, sortDirection\)/);
+  assert.match(body, /\[\.\.\.\(data\?\.rows \?\? \[\]\)\]\.sort\(defaultSubredditSort\)/);
   assert.equal(/[+-]\d+%|vs\. previous|2x|better than average/i.test(body), false);
 });

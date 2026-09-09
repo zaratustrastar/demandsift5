@@ -1,6 +1,6 @@
 {
-  "id": "confirm-ai-visibility-redesign-deploy-2026-09-09-0000",
-  "ops": ["runtime"],
+  "id": "verify-7a-7b-deploy-and-migration-2026-09-09-0100",
+  "ops": ["runtime", "migrations", "logs"],
   "inspectScans": [],
   "startScan": null
 }

@@ -1,6 +1,6 @@
 {
-  "id": "verify-7a-7b-deploy-and-migration-2026-09-09-0100",
-  "ops": ["runtime", "migrations", "logs"],
+  "id": "check-logs-for-errors-2026-09-09-0145",
+  "ops": ["logs"],
   "inspectScans": [],
   "startScan": null
 }

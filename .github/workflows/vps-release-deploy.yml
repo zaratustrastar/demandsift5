@@ -1,8 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: Prompt 9A -- lightweight subreddit include/exclude
-# control for ongoing Reddit monitoring, "Recommended" derived from
-# existing seed-scan + recent-monitoring-run data. No schema change,
-# no new scraping (2026-09-09).
+# Release marker: Prompt 9B -- new Analytics screen, "Subreddit
+# performance" table (read-only aggregation of existing scan +
+# monitoring + AI Visibility citation data). No schema change, no new
+# scraping, no new ranking (2026-09-09).
 
 on:
   push:

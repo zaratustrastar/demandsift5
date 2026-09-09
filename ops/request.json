@@ -1,6 +1,6 @@
 {
-  "id": "verify-9a-deploy-2026-09-09-0230",
-  "ops": ["runtime"],
+  "id": "verify-9b-deploy-and-logs-2026-09-09-0430",
+  "ops": ["runtime", "logs"],
   "inspectScans": [],
   "startScan": null
 }

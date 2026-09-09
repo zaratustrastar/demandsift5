@@ -1053,11 +1053,13 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
   };
 
   return (
-    <section className={styles.card}>
-      <div>
-        <h2>Top subreddits</h2>
-        <p>Communities producing the most relevant conversations and opportunities.</p>
-        <small className={styles.monitoringTermsNote}>Based on the initial scan and recent monitoring activity.</small>
+    <section className={`${styles.card} ${styles.subredditTopCard}`}>
+      <div className={styles.subredditTopHeader}>
+        <div>
+          <h2>Top subreddits</h2>
+          <p>Communities producing the most relevant conversations and opportunities.</p>
+        </div>
+        <small className={styles.subredditTopScope}>Based on the initial scan and recent monitoring activity.</small>
       </div>
       {!data ? (
         // Reuses the same generic spinner already built for AI Visibility
@@ -1077,11 +1079,11 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
         </p>
       ) : (
         <div className={styles.subredditTableScroll}>
-          <table className={styles.answerTable}>
+          <table className={`${styles.answerTable} ${styles.subredditTopTable}`}>
             <thead>
               <tr>
                 {SUBREDDIT_COLUMNS.map((column) => (
-                  <th key={column.id}>
+                  <th key={column.id} className={column.id === "subreddit" ? undefined : styles.subredditNumericHead}>
                     <button type="button" className={styles.textButton} onClick={() => clickColumn(column.id)}>
                       {column.label}
                       {sortColumn === column.id ? (sortDirection === "desc" ? " \u2193" : " \u2191") : ""}
@@ -1091,14 +1093,28 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
               </tr>
             </thead>
             <tbody>
-              {(sortColumn ? sortSubredditRows(data.rows, sortColumn, sortDirection) : [...data.rows].sort(defaultSubredditSort)).map((row) => (
-                <tr key={row.subreddit}>
-                  <td>r/{row.subreddit}</td>
-                  <td>{row.relevantConversations}</td>
-                  <td>{row.opportunities}</td>
-                  <td>{row.avgRelevance === null ? "\u2014" : row.avgRelevance}</td>
-                  <td>{row.aiCited}</td>
-                  <td>{row.latest ? relativeTime(row.latest) : "\u2014"}</td>
+              {(sortColumn ? sortSubredditRows(data.rows, sortColumn, sortDirection) : [...data.rows].sort(defaultSubredditSort)).map((row, index) => (
+                <tr key={row.subreddit} className={index === 0 ? styles.subredditTopRow : undefined}>
+                  <td className={styles.subredditNameCell}>r/{row.subreddit}</td>
+                  <td className={styles.subredditNumericCell}>
+                    {row.relevantConversations > 0 ? row.relevantConversations : <span className={styles.subredditMuted}>0</span>}
+                  </td>
+                  <td className={styles.subredditNumericCell}>
+                    {row.opportunities > 0 ? row.opportunities : <span className={styles.subredditMuted}>0</span>}
+                  </td>
+                  <td className={styles.subredditNumericCell}>
+                    {row.avgRelevance === null ? (
+                      <span className={styles.subredditMuted}>{"\u2014"}</span>
+                    ) : (
+                      <span className={row.avgRelevance >= 85 ? styles.subredditScoreBadgeHigh : styles.subredditScoreBadge}>{row.avgRelevance}</span>
+                    )}
+                  </td>
+                  <td className={styles.subredditNumericCell}>
+                    {row.aiCited > 0 ? <span className={styles.subredditAiCited}>{row.aiCited}</span> : <span className={styles.subredditMuted}>0</span>}
+                  </td>
+                  <td className={`${styles.subredditNumericCell} ${styles.subredditLatestCell}`}>
+                    {row.latest ? relativeTime(row.latest) : <span className={styles.subredditMuted}>{"\u2014"}</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>

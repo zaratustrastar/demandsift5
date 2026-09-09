@@ -161,8 +161,8 @@ test("default sort is opportunities desc, then relevant conversations desc, then
 
 test("the table shows an em dash, not a fabricated number, for avg relevance and latest when they don't exist", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /row\.avgRelevance === null \? "\\u2014" : row\.avgRelevance/);
-  assert.match(body, /row\.latest \? relativeTime\(row\.latest\) : "\\u2014"/);
+  assert.match(body, /row\.avgRelevance === null \? \(\s*<span className=\{styles\.subredditMuted\}>\{"\\u2014"\}<\/span>/);
+  assert.match(body, /row\.latest \? relativeTime\(row\.latest\) : <span className=\{styles\.subredditMuted\}>\{"\\u2014"\}<\/span>/);
 });
 
 test("the table reuses the existing .answerTable style -- no new table CSS class was introduced", () => {
@@ -299,4 +299,96 @@ test("the KPI row, charts row, and insight cards row all collapse to fewer colum
   const mobileBlock = css.slice(css.indexOf(".analyticsKpiRow { grid-template-columns: repeat(2, 1fr); }") - 40, css.indexOf(".analyticsKpiRow { grid-template-columns: repeat(2, 1fr); }") + 250);
   assert.match(mobileBlock, /\.analyticsChartsRow \{ grid-template-columns: 1fr; \}/);
   assert.match(mobileBlock, /\.analyticsInsightsRow \{ grid-template-columns: 1fr; \}/);
+});
+
+// ---- Top subreddits table: premium presentation upgrade ----
+
+test("the table's outer card now has its own padding class paired with .card, matching every sibling analytics card above it -- previously it used bare .card with no padding at all", () => {
+  assert.match(dashboard, /className=\{`\$\{styles\.card\} \$\{styles\.subredditTopCard\}`\}/);
+  const cssBody = css.slice(css.indexOf(".subredditTopCard {"), css.indexOf(".subredditTopCard {") + 100);
+  assert.match(cssBody, /padding:/);
+});
+
+test("sort logic, column definitions, and data flow into the table are completely unchanged by this visual pass", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /sortSubredditRows\(data\.rows, sortColumn, sortDirection\)/);
+  assert.match(body, /\[\.\.\.data\.rows\]\.sort\(defaultSubredditSort\)/);
+  assert.match(body, /SUBREDDIT_COLUMNS\.map\(\(column\)/);
+});
+
+test("no new metrics, fake trends, or comparison values were introduced in this visual pass", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.equal(/[+-]\d+%|vs\. previous|vs previous|2x|better than average/i.test(body), false);
+});
+
+test("the header is restructured into a title/subtitle group and a separately-positioned, muted scope note, with a divider before the table", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /styles\.subredditTopHeader/);
+  assert.match(body, /styles\.subredditTopScope/);
+  const cssBody = css.slice(css.indexOf(".subredditTopHeader {"), css.indexOf(".subredditTopHeader {") + 250);
+  assert.match(cssBody, /border-bottom: 1px solid var\(--line\);/);
+});
+
+test("the table no longer draws a full grid line around every cell -- horizontal row separators only, matching a real analytics product rather than a spreadsheet export", () => {
+  const cssBody = css.slice(css.indexOf(".subredditTopTable {"), css.indexOf(".subredditTopTable tbody tr:hover"));
+  assert.match(cssBody, /border: none;/);
+  assert.match(cssBody, /border-bottom: 1px solid var\(--line\);/);
+});
+
+test("numeric columns are right-aligned and use tabular figures so values scan cleanly in a column, unlike the previous left-aligned plain cells", () => {
+  const cssBody = css.slice(css.indexOf(".subredditNumericCell {"), css.indexOf(".subredditNumericCell {") + 200);
+  assert.match(cssBody, /text-align: right;/);
+  assert.match(cssBody, /font-variant-numeric: tabular-nums;/);
+});
+
+test("row hover state exists, and the current top row gets a subtle background emphasis without any sort-logic change", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /className=\{index === 0 \? styles\.subredditTopRow : undefined\}/);
+  const hoverCss = css.slice(css.indexOf(".subredditTopTable tbody tr:hover {"), css.indexOf(".subredditTopTable tbody tr:hover {") + 100);
+  assert.match(hoverCss, /background: #fafbfd;/);
+});
+
+test("Subreddit is rendered as the bold visual anchor of each row", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /className=\{styles\.subredditNameCell\}>r\/\{row\.subreddit\}/);
+  const cssBody = css.slice(css.indexOf(".subredditNameCell {"), css.indexOf(".subredditNameCell {") + 100);
+  assert.match(cssBody, /font-weight: 700;/);
+});
+
+test("Avg relevance renders as a small score badge (reusing the existing blue accent tokens), not plain text -- and a high score gets a visually stronger tint than an ordinary one", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /row\.avgRelevance >= 85 \? styles\.subredditScoreBadgeHigh : styles\.subredditScoreBadge/);
+  const secondOccurrence = css.indexOf(".subredditScoreBadgeHigh {", css.indexOf(".subredditScoreBadgeHigh {") + 1);
+  const cssBody = css.slice(secondOccurrence, secondOccurrence + 100);
+  assert.match(cssBody, /var\(--green-soft\)/);
+  assert.match(cssBody, /var\(--green-dark\)/);
+});
+
+test("AI cited shows a real tinted badge when there is a real citation count, and a muted zero otherwise -- no fabricated signal", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /row\.aiCited > 0 \? <span className=\{styles\.subredditAiCited\}>\{row\.aiCited\}<\/span> : <span className=\{styles\.subredditMuted\}>0<\/span>/);
+});
+
+test("zero-value relevant-conversations and opportunities cells are visually muted, distinct from real positive values", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /row\.relevantConversations > 0 \? row\.relevantConversations : <span className=\{styles\.subredditMuted\}>0<\/span>/);
+  assert.match(body, /row\.opportunities > 0 \? row\.opportunities : <span className=\{styles\.subredditMuted\}>0<\/span>/);
+});
+
+test("Latest is rendered quieter/secondary than the other numeric cells", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /styles\.subredditLatestCell/);
+  const cssBody = css.slice(css.indexOf(".subredditLatestCell {"), css.indexOf(".subredditLatestCell {") + 100);
+  assert.match(cssBody, /color: var\(--faint\);/);
+});
+
+test("the existing safe mobile horizontal-scroll wrapper is preserved unchanged -- .subredditTableScroll still wraps the table, and its min-width rule is untouched", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /styles\.subredditTableScroll/);
+  assert.match(css, /\.subredditTableScroll \.answerTable \{\s*\n\s*min-width: 560px;/);
+});
+
+test("the header stacks into a single column on mobile so the scope note doesn't get cramped against the title", () => {
+  const cssBody = css.slice(css.indexOf(".subredditTopHeader {\n    flex-direction: column;") - 30, css.indexOf(".subredditTopHeader {\n    flex-direction: column;") + 150);
+  assert.match(cssBody, /flex-direction: column;/);
 });

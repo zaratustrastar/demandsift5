@@ -1,8 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: Analytics screen redesign -- KPI row, activity chart,
-# demand-mix donut, two insight cards (hand-rolled SVG, no new
-# dependency). Top subreddits table renamed, behavior unchanged. No
-# schema/scraping/ranking changes (2026-09-09).
+# Release marker: Premium visual upgrade of the "Top subreddits" table
+# -- card padding fix, redesigned header, row separators instead of
+# full grid lines, right-aligned numeric columns, relevance/AI-cited
+# badges, top-row emphasis, hover state. Visual only, no logic/data
+# changes (2026-09-09).
 
 on:
   push:

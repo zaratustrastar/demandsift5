@@ -1055,7 +1055,22 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
   return (
     <section className={`${styles.card} ${styles.subredditTopCard}`}>
       <div className={styles.subredditTopHeader}>
-        <h2>Top subreddits</h2>
+        <div className={styles.subredditTopTitleRow}>
+          {/* A simple, monochrome alien-face glyph rather than Reddit's
+           * own trademarked orange logo -- recognizable as "this is
+           * Reddit data" without introducing a third brand color or any
+           * asset/trademark concern into Scooptr's own white/blue system. */}
+          <svg className={styles.subredditTopIcon} viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="10" cy="12" r="7" fill="currentColor" opacity="0.12" />
+            <circle cx="7.2" cy="12" r="1.15" fill="currentColor" />
+            <circle cx="12.8" cy="12" r="1.15" fill="currentColor" />
+            <path d="M6.3 14.8c1 1.1 2.3 1.7 3.7 1.7s2.7-.6 3.7-1.7" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" fill="none" />
+            <line x1="10" y1="5.2" x2="10" y2="3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+            <circle cx="10" cy="2.3" r="0.9" fill="currentColor" />
+          </svg>
+          <h2>Top subreddits</h2>
+          {data && data.rows.length > 0 && <span className={styles.subredditTopCount}>{data.rows.length}</span>}
+        </div>
         <p>Communities producing the most relevant conversations and opportunities.</p>
       </div>
       {!data ? (
@@ -1077,7 +1092,14 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
       ) : (
         <>
           <div className={styles.subredditTableScroll}>
-            <table className={`${styles.answerTable} ${styles.subredditTopTable}`}>
+            {/* Deliberately not sharing .answerTable as a base class here
+             * (previously did) -- that class's own th/td rule has the
+             * exact same specificity as this table's own, and being
+             * defined later in the stylesheet, was silently winning the
+             * cascade tie and re-applying full per-cell borders and
+             * left/top alignment underneath this component's intended
+             * styles. This table is now fully self-contained. */}
+            <table className={styles.subredditTopTable}>
               <colgroup>
                 {SUBREDDIT_COLUMNS.map((column) => (
                   <col key={column.id} style={{ width: column.width }} />
@@ -1112,8 +1134,10 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
                     <td className={styles.subredditNumericCell}>
                       {row.avgRelevance === null ? (
                         <span className={styles.subredditMuted}>{"\u2014"}</span>
+                      ) : row.avgRelevance >= 85 ? (
+                        <span className={styles.subredditScoreHigh}>{row.avgRelevance}</span>
                       ) : (
-                        <span className={row.avgRelevance >= 85 ? styles.subredditScoreBadgeHigh : styles.subredditScoreBadge}>{row.avgRelevance}</span>
+                        <span className={styles.subredditScore}>{row.avgRelevance}</span>
                       )}
                     </td>
                     <td className={styles.subredditNumericCell}>

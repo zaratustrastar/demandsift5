@@ -165,9 +165,10 @@ test("the table shows an em dash, not a fabricated number, for avg relevance and
   assert.match(body, /row\.latest \? relativeTime\(row\.latest\) : <span className=\{styles\.subredditMuted\}>\{"\\u2014"\}<\/span>/);
 });
 
-test("the table reuses the existing .answerTable style -- no new table CSS class was introduced", () => {
+test("the table is fully self-contained and no longer shares .answerTable as a base class -- that shared class's own th/td rule had identical CSS specificity to this table's own rule and, being defined later in the stylesheet, was silently winning the cascade tie and re-applying full per-cell borders underneath every intended style", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /styles\.answerTable/);
+  assert.equal(/styles\.answerTable/.test(body), false);
+  assert.match(body, /<table className=\{styles\.subredditTopTable\}>/);
 });
 
 test("the scope note matches exactly what was specified", () => {
@@ -175,9 +176,12 @@ test("the scope note matches exactly what was specified", () => {
   assert.match(body, /Based on the initial scan and recent monitoring activity\./);
 });
 
-test("no chart library or chart component is used anywhere in the analytics table", () => {
+test("no chart library or chart-style SVG (bars, arcs, paths for data) is used in this table -- the only <svg> present is the small, static Reddit-identity glyph in the header", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.equal(/recharts|chart\.js|<svg|d3\./i.test(body), false);
+  assert.equal(/recharts|chart\.js|d3\./i.test(body), false);
+  const svgMatches = body.match(/<svg/g) ?? [];
+  assert.equal(svgMatches.length, 1);
+  assert.match(body, /className=\{styles\.subredditTopIcon\}/);
 });
 
 test("'analytics' is a real navigation section, added alongside the existing sections, not replacing monitoring", () => {
@@ -359,18 +363,20 @@ test("Subreddit is rendered as the visual anchor of each row with a semibold (no
   assert.match(cssBody, /font-weight: 600;/);
 });
 
-test("Avg relevance renders as a small score badge (reusing the existing blue accent tokens), not plain text -- and a high score gets a visually stronger tint than an ordinary one", () => {
+test("Avg relevance is styled text for an ordinary score (a metric, not a generic gray chip) -- only a genuinely high score earns a subtle blue-tinted badge, reusing the existing blue accent tokens", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
-  assert.match(body, /row\.avgRelevance >= 85 \? styles\.subredditScoreBadgeHigh : styles\.subredditScoreBadge/);
-  const secondOccurrence = css.indexOf(".subredditScoreBadgeHigh {", css.indexOf(".subredditScoreBadgeHigh {") + 1);
-  const cssBody = css.slice(secondOccurrence, secondOccurrence + 100);
+  assert.match(body, /row\.avgRelevance >= 85 \? \(\s*<span className=\{styles\.subredditScoreHigh\}>\{row\.avgRelevance\}<\/span>/);
+  assert.match(body, /<span className=\{styles\.subredditScore\}>\{row\.avgRelevance\}<\/span>/);
+  const cssBody = css.slice(css.indexOf(".subredditScoreHigh {"), css.indexOf(".subredditScoreHigh {") + 250);
   assert.match(cssBody, /var\(--green-soft\)/);
   assert.match(cssBody, /var\(--green-dark\)/);
 });
 
-test("the score badge has an explicit minimum width in the specified 28-34px range, not left to shrink-wrap arbitrarily", () => {
-  const cssBody = css.slice(css.indexOf(".subredditScoreBadge,"), css.indexOf(".subredditScoreBadge,") + 300);
+test("the high-score badge has an explicit minimum width in the specified 28-34px range, not left to shrink-wrap arbitrarily; the ordinary score has no badge shape at all", () => {
+  const cssBody = css.slice(css.indexOf(".subredditScoreHigh {"), css.indexOf(".subredditScoreHigh {") + 200);
   assert.match(cssBody, /min-width: 30px;/);
+  const ordinaryCss = css.slice(css.indexOf(".subredditScore {"), css.indexOf(".subredditScore {") + 100);
+  assert.equal(/background|border-radius|padding/.test(ordinaryCss), false);
 });
 
 test("Opportunities gets a distinct, stronger visual treatment than a plain number when its value is genuinely positive -- Scooptr blue text, not a giant badge", () => {
@@ -381,18 +387,15 @@ test("Opportunities gets a distinct, stronger visual treatment than a plain numb
   assert.equal(/border-radius|background/.test(cssBody), false);
 });
 
-test("AI cited shows a real tinted badge when there is a real citation count, and a muted zero otherwise -- no fabricated signal", () => {
+test("AI cited shows real blue text when there is a real citation count, and a muted zero otherwise -- no fabricated signal", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /row\.aiCited > 0 \? <span className=\{styles\.subredditAiCited\}>\{row\.aiCited\}<\/span> : <span className=\{styles\.subredditMuted\}>0<\/span>/);
 });
 
-test("AI cited's badge is visually quieter (smaller font, tighter padding) than the Avg relevance score badge, so it never competes with Opportunities or reads louder than the score", () => {
-  const aiCss = css.slice(css.indexOf(".subredditAiCited {"), css.indexOf(".subredditAiCited {") + 250);
-  const aiFontMatch = aiCss.match(/font-size: ([\d.]+)px;/);
-  const badgeCss = css.slice(css.indexOf(".subredditScoreBadge,"), css.indexOf(".subredditScoreBadge,") + 300);
-  const badgeFontMatch = badgeCss.match(/font-size: ([\d.]+)px;/);
-  assert.ok(aiFontMatch && badgeFontMatch);
-  assert.ok(Number(aiFontMatch[1]) <= Number(badgeFontMatch[1]));
+test("AI cited is plain blue text with no pill/badge shape at all, so it never reads louder than Opportunities or the Avg relevance high-score badge next to it", () => {
+  const aiCss = css.slice(css.indexOf(".subredditAiCited {"), css.indexOf(".subredditAiCited {") + 150);
+  assert.equal(/background|border-radius|padding/.test(aiCss), false);
+  assert.match(aiCss, /color: var\(--green-dark\);/);
 });
 
 test("zero-value relevant-conversations and opportunities cells are visually muted, distinct from real positive values", () => {
@@ -408,10 +411,23 @@ test("Latest is rendered quieter/secondary than the other numeric cells", () => 
   assert.match(cssBody, /color: var\(--faint\);/);
 });
 
-test("the existing safe mobile horizontal-scroll wrapper is preserved unchanged -- .subredditTableScroll still wraps the table, and its min-width rule is untouched", () => {
+test("the existing safe mobile horizontal-scroll wrapper is preserved unchanged -- .subredditTableScroll still wraps the table, and its min-width rule (now targeting .subredditTopTable directly, since the table no longer shares .answerTable) still applies", () => {
   const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
   assert.match(body, /styles\.subredditTableScroll/);
-  assert.match(css, /\.subredditTableScroll \.answerTable \{\s*\n\s*min-width: 560px;/);
+  assert.match(css, /\.subredditTableScroll \.subredditTopTable \{\s*\n\s*min-width: 560px;/);
+});
+
+test("a small, monochrome Reddit-identity glyph sits next to the section title -- not Reddit's own trademarked orange logo, and using the muted faint color token rather than a new one", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /styles\.subredditTopIcon/);
+  const cssBody = css.slice(css.indexOf(".subredditTopIcon {"), css.indexOf(".subredditTopIcon {") + 150);
+  assert.equal(/#ff4500/i.test(cssBody), false);
+  assert.match(cssBody, /color: var\(--faint\);/);
+});
+
+test("a muted subreddit count sits next to the title, shown only once there are real rows to count", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /data && data\.rows\.length > 0 && <span className=\{styles\.subredditTopCount\}>\{data\.rows\.length\}<\/span>/);
 });
 
 test("explicit column width proportions are set via <col>, matching the specified percentage breakdown, rather than left to browser auto-sizing", () => {

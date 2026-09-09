@@ -1,8 +1,7 @@
 name: DemandSift trusted VPS release
-# Release marker: Prompt 9B -- new Analytics screen, "Subreddit
-# performance" table (read-only aggregation of existing scan +
-# monitoring + AI Visibility citation data). No schema change, no new
-# scraping, no new ranking (2026-09-09).
+# Release marker: Prompt 10 -- small visual consistency pass (status-
+# label pill unification, sub-card radius alignment, Analytics intro
+# copy). Cosmetic only, no logic/architecture/API changes (2026-09-09).
 
 on:
   push:

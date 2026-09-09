@@ -743,7 +743,15 @@ export type MonitoringScheduleRecord = {
   updatedAt: string;
 };
 
-export type RedditWatchTermKind = "brand" | "competitor" | "keyword";
+/**
+ * "subreddit" added for lightweight ongoing-monitoring control (see
+ * runRedditMonitorScan's own doc comment on where it's filtered): the
+ * search itself stays keyword-driven and global (no new scraping logic
+ * added for this), so a subreddit-kind entry only ever controls whether
+ * candidates from that community are kept or dropped after the fetch --
+ * it can never make monitoring proactively search a specific community.
+ */
+export type RedditWatchTermKind = "brand" | "competitor" | "keyword" | "subreddit";
 
 export type RedditWatchTerm = {
   value: string;

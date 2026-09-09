@@ -6,6 +6,7 @@ import {
   getRedditMonitorSettings,
   latestRedditMonitorRun,
   listRedditMonitorRuns,
+  recommendedSubreddits,
   saveRedditMonitorSettings,
 } from "@/lib/server/reddit-monitor-repository";
 import type { RedditWatchTerm, ScanRecord } from "@/lib/server/contracts";
@@ -28,7 +29,7 @@ function parseWatchTerms(value: unknown): RedditWatchTerm[] {
     }
     return {
       value: object.value,
-      kind: object.kind === "brand" || object.kind === "competitor" ? object.kind : "keyword",
+      kind: object.kind === "brand" || object.kind === "competitor" || object.kind === "subreddit" ? object.kind : "keyword",
       active: object.active !== false,
     };
   });
@@ -76,7 +77,12 @@ export async function GET(request: Request) {
       latestRedditMonitorRun(actor.workspaceId, seed.id),
       listRedditMonitorRuns(actor.workspaceId, seed.id, 10),
     ]);
-    return Response.json({ monitoring: settings, latestRun, recentRuns }, {
+    return Response.json({
+      monitoring: settings,
+      latestRun,
+      recentRuns,
+      recommendedSubreddits: await recommendedSubreddits(seed, recentRuns),
+    }, {
       headers: { "cache-control": "no-store" },
     });
   } catch (error) {
@@ -105,11 +111,13 @@ export async function PUT(request: Request) {
       enabled: body.enabled,
       watchTerms,
     });
+    const recentRuns = await listRedditMonitorRuns(actor.workspaceId, seed.id, 10);
     return Response.json(
       {
         monitoring: settings,
         latestRun: await latestRedditMonitorRun(actor.workspaceId, seed.id),
-        recentRuns: await listRedditMonitorRuns(actor.workspaceId, seed.id, 10),
+        recentRuns,
+        recommendedSubreddits: await recommendedSubreddits(seed, recentRuns),
       },
       { headers: { "cache-control": "no-store" } },
     );

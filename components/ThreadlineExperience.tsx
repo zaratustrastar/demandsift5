@@ -2116,6 +2116,7 @@ export function ThreadlineExperience() {
     useState<RedditConnectionStatus>(disconnectedReddit);
   const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
   const [monitorRuns, setMonitorRuns] = useState<RedditMonitorRunSummary[] | null>(null);
+  const [recommendedSubreddits, setRecommendedSubreddits] = useState<string[] | null>(null);
   const [aiVisibility, setAiVisibility] = useState<AiVisibilityStatus | null>(null);
   const [visibilityScans, setVisibilityScans] = useState<AiVisibilityScanSummary[] | null>(null);
   // undefined = still checking; null = signed out; object = signed in. Read
@@ -2378,10 +2379,12 @@ export function ThreadlineExperience() {
         const payload = (await response.json()) as {
           monitoring?: RedditMonitoringStatus;
           recentRuns?: RedditMonitorRunSummary[];
+          recommendedSubreddits?: string[];
         };
         if (response.ok && payload.monitoring && !cancelled) {
           setMonitoring(payload.monitoring);
           setMonitorRuns(payload.recentRuns ?? []);
+          setRecommendedSubreddits(payload.recommendedSubreddits ?? []);
         }
       } catch {
         // Monitoring is independent from Reddit OAuth. A transient settings
@@ -2468,6 +2471,7 @@ export function ThreadlineExperience() {
     }
     setMonitoring(null);
     setMonitorRuns(null);
+    setRecommendedSubreddits(null);
     setAiVisibility(null);
     setVisibilityScans(null);
     resumedScanRef.current = null;
@@ -3000,6 +3004,7 @@ export function ThreadlineExperience() {
       const payload = (await response.json()) as {
         monitoring?: RedditMonitoringStatus;
         recentRuns?: RedditMonitorRunSummary[];
+        recommendedSubreddits?: string[];
         error?: { message?: string };
       };
       if (!response.ok || !payload.monitoring) {
@@ -3007,6 +3012,7 @@ export function ThreadlineExperience() {
       }
       setMonitoring(payload.monitoring);
       setMonitorRuns(payload.recentRuns ?? []);
+      setRecommendedSubreddits(payload.recommendedSubreddits ?? []);
       setStatusMessage(enabled
         ? "Daily Reddit monitoring is on. All active terms will be checked together."
         : "Daily Reddit monitoring is off.");
@@ -3413,6 +3419,7 @@ export function ThreadlineExperience() {
         onUpdateMonitoring={updateMonitoring}
         onUpdateBusinessSummary={updateBusinessSummary}
         monitorRuns={monitorRuns}
+        recommendedSubreddits={recommendedSubreddits}
         onViewMonitorRun={viewMonitorRun}
         aiVisibility={aiVisibility}
         onUpdateAiVisibility={updateAiVisibility}

@@ -129,8 +129,19 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
     if (!seed || seed.workspaceId !== run.workspaceId || seed.status !== "complete" || !seed.discoveryProfile) {
       throw new Error("Reddit monitoring requires an owned completed Market Scan.");
     }
-    const watchTerms = settings.watchTerms.filter((term) => term.active).map((term) => term.value);
+    // subreddit-kind entries are a post-fetch filter, never a search
+    // query -- they must never reach fetchRedditMonitorCandidates's
+    // searchTerms (see RedditWatchTermKind's own doc comment on why: the
+    // search stays keyword-driven and global, no new scraping logic).
+    const watchTerms = settings.watchTerms
+      .filter((term) => term.active && term.kind !== "subreddit")
+      .map((term) => term.value);
     if (watchTerms.length === 0) throw new Error("Reddit monitoring has no active watch terms.");
+    const excludedSubreddits = new Set(
+      settings.watchTerms
+        .filter((term) => term.kind === "subreddit" && !term.active)
+        .map((term) => term.value.toLocaleLowerCase("en-US")),
+    );
 
     run = { ...run, status: "running", error: null, updatedAt: new Date().toISOString() };
     await saveRedditMonitorRun(run);
@@ -144,10 +155,18 @@ export async function runRedditMonitorScan(monitorRunId: string): Promise<Reddit
       actorCapacity: providerCapacity?.capacity,
       actorCapacityLimit: providerCapacity?.configuration.apifyActorLimit,
     });
+    // Lightweight subreddit control (see reddit-monitor-repository.ts's
+    // subreddit-recommendation helper for where "Recommended" comes from
+    // on the settings screen): the fetch itself is never subreddit-scoped,
+    // this only drops already-fetched candidates from a community the
+    // user explicitly excluded, before they're ever persisted as seen.
+    const filteredCandidates = excludedSubreddits.size === 0
+      ? fetched.candidates
+      : fetched.candidates.filter((candidate) => !excludedSubreddits.has(candidate.subreddit.toLocaleLowerCase("en-US")));
     const unseen = await ingestRedditMonitorMatches({
       workspaceId: run.workspaceId,
       runId: run.id,
-      candidates: fetched.candidates,
+      candidates: filteredCandidates,
     });
     run = {
       ...run,

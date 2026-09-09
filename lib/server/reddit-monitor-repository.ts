@@ -9,6 +9,7 @@ import {
 } from "@/db/postgres/schema";
 import type { RedditDiscoveryCandidate } from "@/lib/domain/types";
 import { REDDIT_MONITOR_LIMITS } from "@/lib/intelligence/reddit-monitor-limits";
+import { getStateRepository } from "@/lib/server/repository";
 import type {
   RedditMonitorRunRecord,
   RedditMonitorSettingsRecord,
@@ -100,6 +101,52 @@ export function defaultWatchTerms(scan: ScanRecord): RedditWatchTerm[] {
     })),
   ];
   return normalizedWatchTermRecords(terms);
+}
+
+/**
+ * The "Recommended" subreddits for the Subreddits section on the
+ * monitoring config screen -- the union of subreddits already found
+ * relevant, reusing two already-persisted sources, not a new one:
+ *
+ * 1. The seed scan's own result (OpportunityRecord.subreddit and
+ *    MarketIntelligenceRecord.subreddit both already exist and are
+ *    already populated, stripped of any "r/" prefix -- see
+ *    reddit.server.ts's own normalization).
+ * 2. Ongoing monitoring's own recent runs: each run that found unseen
+ *    relevant matches creates its own scan (see monitoringScan in
+ *    reddit-monitor-workflow.ts), with the exact same
+ *    opportunities/marketIntelligence shape as the seed scan -- so the
+ *    same subreddit values are already sitting there too, just on a
+ *    different scan record. Bounded to whatever recentRuns the caller
+ *    already fetched (reused, not re-queried, to avoid a duplicate
+ *    listRedditMonitorRuns call -- the settings route already fetches
+ *    this same list for its own response), and only runs that actually
+ *    produced a scan (many monitoring runs find nothing unseen and
+ *    never create one) actually cost an extra fetch.
+ *
+ * No new scraping, ranking, or storage: this is a read-only aggregation
+ * over data two other, already-shipped features already write.
+ */
+export async function recommendedSubreddits(scan: ScanRecord, recentRuns: RedditMonitorRunRecord[]): Promise<string[]> {
+  const names = new Set<string>();
+  const collectFrom = (result: ScanRecord["result"]) => {
+    if (!result) return;
+    for (const opportunity of result.opportunities) {
+      if (opportunity.subreddit) names.add(opportunity.subreddit);
+    }
+    for (const intelligence of result.marketIntelligence) {
+      if (intelligence.subreddit) names.add(intelligence.subreddit);
+    }
+  };
+  collectFrom(scan.result);
+
+  const repository = getStateRepository();
+  for (const run of recentRuns) {
+    if (!run.scanId) continue;
+    const runScan = await repository.getScan(run.scanId);
+    if (runScan) collectFrom(runScan.result);
+  }
+  return [...names];
 }
 
 export async function getRedditMonitorSettings(workspaceId: string, seedScanId: string) {

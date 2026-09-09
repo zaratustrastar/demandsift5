@@ -41,7 +41,7 @@ export type RedditMonitoringStatus = {
   enabled: boolean;
   watchTerms: Array<{
     value: string;
-    kind: "brand" | "competitor" | "keyword";
+    kind: "brand" | "competitor" | "keyword" | "subreddit";
     active: boolean;
   }>;
   lastSuccessfulMonitorAt: string | null;
@@ -169,6 +169,8 @@ export interface ProductDashboardProps {
   monitorRuns?: RedditMonitorRunSummary[] | null;
   /** Loads a completed monitoring run's own scan into view, in place, without leaving the dashboard. */
   onViewMonitorRun?: (scanId: string) => Promise<void> | void;
+  /** The seed scan's own already-found subreddits (see recommendedSubreddits in reddit-monitor-repository.ts) -- feeds the Subreddits section's "Recommended" rows. */
+  recommendedSubreddits?: string[] | null;
   aiVisibility?: AiVisibilityStatus | null;
   onUpdateAiVisibility?: (
     enabled: boolean,
@@ -406,11 +408,13 @@ function RedditMonitoringPanel({
   onUpdate,
   runs,
   onViewRun,
+  recommendedSubredditNames,
 }: {
   monitoring: RedditMonitoringStatus | null;
   onUpdate?: ProductDashboardProps["onUpdateMonitoring"];
   runs?: RedditMonitorRunSummary[] | null;
   onViewRun?: ProductDashboardProps["onViewMonitorRun"];
+  recommendedSubredditNames?: string[] | null;
 }) {
   // Three sections purely for editing clarity -- RedditWatchTerm already
   // distinguishes kind: "brand" | "competitor" | "keyword" in the
@@ -423,9 +427,54 @@ function RedditMonitoringPanel({
   const [brandTerms, setBrandTerms] = useState(() => termsByKind("brand"));
   const [competitorTerms, setCompetitorTerms] = useState(() => termsByKind("competitor"));
   const [keywordTerms, setKeywordTerms] = useState(() => termsByKind("keyword"));
+  // Subreddits section: "Recommended" is the seed scan's own already-found
+  // subreddits (see recommendedSubreddits in reddit-monitor-repository.ts
+  // -- a real aggregation of existing OpportunityRecord/
+  // MarketIntelligenceRecord.subreddit values, not a new relevance score).
+  // A recommended name the user has excluded, or a manually-added name,
+  // both persist as kind: "subreddit" watch terms -- active means
+  // Included, matching the same active/inactive convention the other
+  // three sections already use.
+  const [subreddits, setSubreddits] = useState<Array<{ name: string; source: "recommended" | "manual"; active: boolean }>>(() => {
+    const existingByName = new Map(
+      (monitoring?.watchTerms ?? [])
+        .filter((term) => term.kind === "subreddit")
+        .map((term) => [term.value.toLocaleLowerCase("en-US"), term]),
+    );
+    const recommendedSet = new Set((recommendedSubredditNames ?? []).map((name) => name.toLocaleLowerCase("en-US")));
+    const rows: Array<{ name: string; source: "recommended" | "manual"; active: boolean }> = (recommendedSubredditNames ?? []).map((name) => ({
+      name,
+      source: "recommended" as const,
+      active: existingByName.get(name.toLocaleLowerCase("en-US"))?.active ?? true,
+    }));
+    for (const term of existingByName.values()) {
+      if (!recommendedSet.has(term.value.toLocaleLowerCase("en-US"))) {
+        rows.push({ name: term.value, source: "manual", active: term.active });
+      }
+    }
+    return rows;
+  });
+  const [newSubreddit, setNewSubreddit] = useState("");
   const [saving, setSaving] = useState(false);
   const [viewingRunId, setViewingRunId] = useState<string | null>(null);
   if (!monitoring) return null;
+
+  const toggleSubreddit = (name: string) => {
+    setSubreddits((current) => current.map((row) => (row.name === name ? { ...row, active: !row.active } : row)));
+  };
+  const removeSubreddit = (name: string) => {
+    setSubreddits((current) => current.filter((row) => row.name !== name));
+  };
+  const addSubreddit = () => {
+    const name = newSubreddit.replace(/^\s*r\//i, "").replace(/\s+/g, "").trim();
+    if (!name) return;
+    if (subreddits.some((row) => row.name.toLocaleLowerCase("en-US") === name.toLocaleLowerCase("en-US"))) {
+      setNewSubreddit("");
+      return;
+    }
+    setSubreddits((current) => [...current, { name, source: "manual", active: true }]);
+    setNewSubreddit("");
+  };
 
   const parseLines = (value: string) =>
     value.split(/\r?\n|,/u).map((line) => line.replace(/\s+/gu, " ").trim()).filter(Boolean);
@@ -434,17 +483,20 @@ function RedditMonitoringPanel({
   // kind now comes directly from which box a term was typed into,
   // rather than the old logic's guess (look up an existing term with
   // the same value, or fall back to "keyword") -- each box IS the kind,
-  // so there is nothing left to guess.
+  // so there is nothing left to guess. Dedupe key now includes kind, not
+  // just value: a competitor named "Notion" and an excluded r/Notion are
+  // different things and must not collide into one entry.
   const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => {
     const combined: RedditMonitoringStatus["watchTerms"] = [
       ...parseLines(brandTerms).map((value) => ({ value, kind: "brand" as const, active: true })),
       ...parseLines(competitorTerms).map((value) => ({ value, kind: "competitor" as const, active: true })),
       ...parseLines(keywordTerms).map((value) => ({ value, kind: "keyword" as const, active: true })),
+      ...subreddits.map((row) => ({ value: row.name, kind: "subreddit" as const, active: row.active })),
     ];
     const seen = new Set<string>();
     const deduped: RedditMonitoringStatus["watchTerms"] = [];
     for (const term of combined) {
-      const key = term.value.toLocaleLowerCase("en-US");
+      const key = `${term.kind}:${term.value.toLocaleLowerCase("en-US")}`;
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(term);
@@ -523,6 +575,57 @@ function RedditMonitoringPanel({
           onChange={(event) => setKeywordTerms(event.currentTarget.value)}
         />
       </label>
+      <div className={styles.monitoringTerms}>
+        <span>Subreddits</span>
+        <small className={styles.monitoringTermsNote}>
+          Scooptr automatically monitors relevant communities. You can exclude any that are not useful or add one manually.
+        </small>
+        {subreddits.length > 0 && (
+          <div className={styles.aiVisibilityDrawerBody}>
+            {subreddits.map((row) => (
+              <div key={row.name} className={styles.manageQuestionRow}>
+                <span
+                  className={row.active ? styles.manageQuestionText : `${styles.manageQuestionText} ${styles.manageQuestionInactive}`}
+                >
+                  r/{row.name}
+                </span>
+                <div className={styles.manageQuestionActions}>
+                  <span className={styles.manageQuestionStatus}>
+                    {row.source === "recommended" ? "Recommended" : "Added manually"} &middot; {row.active ? "Included" : "Excluded"}
+                  </span>
+                  <button type="button" className={styles.textButton} disabled={saving} onClick={() => toggleSubreddit(row.name)}>
+                    {row.active ? "Exclude" : "Include"}
+                  </button>
+                  {row.source === "manual" && (
+                    <button type="button" className={styles.textButton} disabled={saving} onClick={() => removeSubreddit(row.name)}>
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={styles.manageQuestionAddRow}>
+          <input
+            type="text"
+            className={styles.manageQuestionAddInput}
+            placeholder="Add a subreddit (e.g. projectmanagement)"
+            value={newSubreddit}
+            disabled={saving}
+            onChange={(event) => setNewSubreddit(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") { event.preventDefault(); addSubreddit(); }
+            }}
+          />
+          <button type="button" className={styles.textButton} disabled={saving} onClick={addSubreddit}>
+            + Add subreddit
+          </button>
+        </div>
+        <small className={styles.monitoringTermsNote}>
+          Adding a subreddit doesn&rsquo;t start a new search there -- it allows its results through when they already match your watch terms.
+        </small>
+      </div>
       <div className={styles.monitoringFooter}>
         <small>
           {monitoring.lastSuccessfulMonitorAt
@@ -2461,6 +2564,7 @@ export function ProductDashboard({
   onUpdateBusinessSummary,
   monitorRuns = null,
   onViewMonitorRun,
+  recommendedSubreddits = null,
   aiVisibility = null,
   onUpdateAiVisibility,
   visibilityScans = null,
@@ -3127,6 +3231,7 @@ export function ProductDashboard({
                     onUpdate={onUpdateMonitoring}
                     runs={monitorRuns}
                     onViewRun={onViewMonitorRun}
+                    recommendedSubredditNames={recommendedSubreddits}
                   />
                 </div>
               </div>
@@ -3440,6 +3545,7 @@ export function ProductDashboard({
                 onUpdate={onUpdateMonitoring}
                 runs={monitorRuns}
                 onViewRun={onViewMonitorRun}
+                recommendedSubredditNames={recommendedSubreddits}
               />
 
               <div className={styles.simpleCard}>

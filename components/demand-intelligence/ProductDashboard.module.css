@@ -657,6 +657,18 @@
   accent-color: var(--green);
 }
 
+/* Same full-width grid span as .monitoringTerms/.monitoringFooter below
+ * (this card is a 2-column grid for its header row only), same muted
+ * small-text values as the existing .resultsMeta -- just needs the grid
+ * span .resultsMeta doesn't have, since that class is also used outside
+ * this grid elsewhere. */
+.monitoringTermsNote {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
 .monitoringTerms {
   display: grid;
   grid-column: 1 / -1;
@@ -1007,6 +1019,83 @@
   background: #fbfcfb;
   border: 1px solid var(--line);
   border-radius: 12px;
+}
+
+/* Manage questions rows/inputs -- same card shell as
+ * .aiVisibilityDrawerProvider just above, same .textButton actions
+ * already used throughout this file, same .monitoringTerms textarea
+ * treatment for the inline edit field. No new visual language. */
+.manageQuestionRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding: 13px 15px;
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.manageQuestionText {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.manageQuestionInactive {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+.manageQuestionActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.manageQuestionStatus {
+  margin-right: 4px;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.manageQuestionEditInput {
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 9px 11px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.manageQuestionAddRow {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.manageQuestionAddInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fbfcfb;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 13px;
 }
 
 .sectionHeadingRow,

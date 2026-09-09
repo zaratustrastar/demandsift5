@@ -12,6 +12,7 @@ import type {
   AiVisibilityMetrics,
   AiVisibilityScanRecord,
   AiVisibilitySettingsRecord,
+  AiVisibilityTrackedQuestion,
 } from "@/lib/server/contracts";
 import { createId } from "@/lib/server/ids";
 import { isProductionRuntime } from "@/lib/server/runtime-env";
@@ -70,6 +71,7 @@ function settingsFromRow(row: typeof runtimeAiVisibilitySchedules.$inferSelect):
     lastSuccessfulScanAt: row.lastSuccessfulScanAt?.toISOString() ?? null,
     nextRunAt: row.nextRunAt.toISOString(),
     lastScanId: row.lastScanId,
+    questions: row.questions ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -151,6 +153,7 @@ export async function createAiVisibilitySettings(input: {
       lastSuccessfulScanAt: null,
       nextRunAt: input.nextRunAt.toISOString(),
       lastScanId: null,
+      questions: null,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     };
@@ -188,6 +191,82 @@ export async function createAiVisibilitySettings(input: {
  * it up instead of waiting for the stored Monday watermark, which could be
  * up to a week away and would otherwise make the toggle feel broken.
  */
+const MIN_ACTIVE_QUESTIONS = 1;
+const MAX_ACTIVE_QUESTIONS = 10;
+
+export type QuestionValidationError =
+  | "invalid_input"
+  | "empty_question"
+  | "duplicate_question"
+  | "too_few_active"
+  | "too_many_active";
+
+/**
+ * Validates a full desired question set for one workspace -- the client
+ * sends the whole array it wants saved (same "send the full list, replace
+ * wholesale" pattern as Reddit monitoring's own watch-term save), and this
+ * is the one place that enforces every safeguard before it's persisted:
+ * trimmed, non-empty, case-insensitive-unique text, and between 1 and 10
+ * active entries (the total list length, including inactive/disabled
+ * entries, is not capped -- only how many are active at once, matching
+ * the plainly-stated "max 10 active questions" requirement). "Remove" has
+ * no special handling here: the client simply omits that entry from the
+ * array it submits.
+ */
+export function sanitizeTrackedQuestions(
+  input: unknown,
+): { questions: AiVisibilityTrackedQuestion[] } | { error: QuestionValidationError } {
+  if (!Array.isArray(input)) return { error: "invalid_input" };
+  const cleaned: AiVisibilityTrackedQuestion[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") return { error: "invalid_input" };
+    const record = raw as Record<string, unknown>;
+    if (typeof record.text !== "string") return { error: "invalid_input" };
+    const text = record.text.replace(/\s+/g, " ").trim();
+    if (!text) return { error: "empty_question" };
+    const key = text.toLocaleLowerCase("en-US");
+    if (seen.has(key)) return { error: "duplicate_question" };
+    seen.add(key);
+    cleaned.push({ text, active: record.active !== false });
+  }
+  const activeCount = cleaned.filter((question) => question.active).length;
+  if (activeCount < MIN_ACTIVE_QUESTIONS) return { error: "too_few_active" };
+  if (activeCount > MAX_ACTIVE_QUESTIONS) return { error: "too_many_active" };
+  return { questions: cleaned };
+}
+
+/**
+ * Low-level write, no validation -- used both by the user-facing update
+ * path below (after sanitizeTrackedQuestions has already validated the
+ * input) and by runAiVisibilityScan's own first-run seeding (writing back
+ * the freshly-generated, already-known-good initial 3 questions from
+ * generateQuestions(), which has no reason to be re-run through the same
+ * user-input rules).
+ */
+export async function setAiVisibilityQuestions(input: {
+  workspaceId: string;
+  seedScanId: string;
+  questions: AiVisibilityTrackedQuestion[];
+}): Promise<AiVisibilitySettingsRecord> {
+  const now = new Date();
+  if (isMemoryStore()) {
+    const key = settingsKey(input.workspaceId, input.seedScanId);
+    const existing = memorySettings.get(key);
+    if (!existing) throw new Error("AI visibility settings have not been created for this workspace yet.");
+    const record: AiVisibilitySettingsRecord = { ...existing, questions: input.questions, updatedAt: now.toISOString() };
+    memorySettings.set(key, record);
+    return record;
+  }
+  const [row] = await getDb()
+    .update(runtimeAiVisibilitySchedules)
+    .set({ questions: input.questions, updatedAt: now })
+    .where(and(eq(runtimeAiVisibilitySchedules.workspaceId, input.workspaceId), eq(runtimeAiVisibilitySchedules.seedScanId, input.seedScanId)))
+    .returning();
+  if (!row) throw new Error("AI visibility settings have not been created for this workspace yet.");
+  return settingsFromRow(row);
+}
+
 export async function updateAiVisibilitySettings(input: {
   workspaceId: string;
   seedScanId: string;

@@ -21,6 +21,7 @@ import { sql } from "drizzle-orm";
 import type { OpportunityClassification } from "@/lib/domain/types";
 import type {
   AiVisibilityAnswer,
+  AiVisibilityTrackedQuestion,
   CheckoutRecord,
   ConversionRecord,
   EntitlementRecord,
@@ -585,6 +586,17 @@ export const runtimeAiVisibilitySchedules = pgTable("runtime_ai_visibility_sched
   lastSuccessfulScanAt: timestamp("last_successful_scan_at", { withTimezone: true }),
   nextRunAt: timestamp("next_run_at", { withTimezone: true }).defaultNow().notNull(),
   lastScanId: varchar("last_scan_id", { length: 96 }),
+  /**
+   * Nullable, no default -- NULL (every row before this column existed,
+   * and every new workspace's first row) means "not yet seeded," which
+   * runAiVisibilityScan treats as "generate the initial 3 via the
+   * existing generateQuestions() logic, then persist here." Deliberately
+   * not `.default([]).notNull()` like runtimeAiVisibilityScans.questions
+   * below: an empty array would be indistinguishable from "seeded with
+   * zero questions," which is never a valid state, whereas NULL cleanly
+   * means "not seeded yet" with no ambiguity.
+   */
+  questions: jsonb("questions").$type<AiVisibilityTrackedQuestion[]>(),
   createdAt,
   updatedAt,
 }, (table) => [

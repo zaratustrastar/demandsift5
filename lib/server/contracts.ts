@@ -869,6 +869,18 @@ export type AiVisibilityScanRecord = {
   updatedAt: string;
 };
 
+/**
+ * One entry in a workspace's persisted, user-manageable AI Visibility
+ * question set. Text is the only identity -- no id/versioning (see
+ * AiVisibilitySettingsRecord.questions's own doc comment for why):
+ * editing a question's wording is treated as retiring the old text and
+ * tracking a new one, not as continuity of the same identity.
+ */
+export type AiVisibilityTrackedQuestion = {
+  text: string;
+  active: boolean;
+};
+
 /** Per-workspace weekly (Monday) schedule for AI visibility tracking. */
 export type AiVisibilitySettingsRecord = {
   workspaceId: string;
@@ -877,6 +889,18 @@ export type AiVisibilitySettingsRecord = {
   lastSuccessfulScanAt: string | null;
   nextRunAt: string;
   lastScanId: string | null;
+  /**
+   * NULL means this workspace has never had its persistent question set
+   * seeded yet -- the next run should generate the initial 3 via the
+   * existing generateQuestions() logic (exactly as every run did before
+   * this field existed) and persist the result here. A populated array
+   * means the workspace already has a managed set; future runs reuse its
+   * active entries and skip generation entirely. An empty array is never
+   * a valid saved state (the UI must not allow zero active questions),
+   * so the only two real states are "null, not yet seeded" and
+   * "populated, at least one active."
+   */
+  questions: AiVisibilityTrackedQuestion[] | null;
   createdAt: string;
   updatedAt: string;
 };

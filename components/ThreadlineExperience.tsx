@@ -8,6 +8,7 @@ import {
   type RedditMonitorRunSummary,
   type AiVisibilityStatus,
   type AiVisibilityScanSummary,
+  type AiVisibilityTrackedQuestion,
   type NavigationSectionId,
   type RedditOpportunity,
   type RelevantConversation,
@@ -3016,7 +3017,7 @@ export function ThreadlineExperience() {
     }
   }
 
-  async function updateAiVisibility(enabled: boolean): Promise<boolean> {
+  async function updateAiVisibility(enabled: boolean, questions?: AiVisibilityTrackedQuestion[]): Promise<boolean> {
     const scanId = scanResponse?.scan.id;
     if (!scanId) {
       setStatusMessage("AI visibility tracking could not be updated.");
@@ -3026,7 +3027,7 @@ export function ThreadlineExperience() {
       const response = await fetch("/api/ai-visibility/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled, scanId }),
+        body: JSON.stringify(questions === undefined ? { enabled, scanId } : { enabled, scanId, questions }),
       });
       const payload = (await response.json()) as {
         visibility?: AiVisibilityStatus;
@@ -3038,9 +3039,14 @@ export function ThreadlineExperience() {
       }
       setAiVisibility(payload.visibility);
       setVisibilityScans(payload.recentScans ?? []);
-      setStatusMessage(enabled
-        ? "AI visibility tracking is on. ChatGPT, Gemini and Perplexity will be checked weekly."
-        : "AI visibility tracking is off.");
+      // A questions-only save (from Manage questions) is a different action
+      // from the tracking on/off toggle -- it must not claim "tracking is
+      // on/off" when what actually happened was a question-list edit.
+      setStatusMessage(questions !== undefined
+        ? "Tracked questions updated."
+        : enabled
+          ? "AI visibility tracking is on. ChatGPT, Gemini and Perplexity will be checked weekly."
+          : "AI visibility tracking is off.");
       return true;
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "AI visibility tracking could not be updated.");

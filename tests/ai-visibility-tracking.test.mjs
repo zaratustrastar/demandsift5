@@ -171,9 +171,14 @@ test("OpenAiProvider implements both new AiProvider methods on the economy model
   assert.match(mentionsFnBody, /model: request\.models\.economyModel/);
 });
 
-test("exactly 3 questions are required end to end", () => {
+test("exactly 3 questions are required end to end, for the initial AI-generated set", () => {
   assert.match(openaiProvider, /minItems: 3,\s*\n\s*maxItems: 3,/);
-  assert.match(workflowSource, /questions\.length !== 3/);
+  // The check now applies specifically to the freshly-generated set
+  // (variable renamed to `generated` when persisted-question reuse was
+  // added) -- a workspace's persisted, user-managed set can have any
+  // count from 1-10 active questions once seeded; this rule only governs
+  // the one-time initial generation via generateQuestions().
+  assert.match(workflowSource, /generated\.length !== 3/);
 });
 
 test("all 3 questions are batched into a single Actor run per provider, not one run per question", () => {

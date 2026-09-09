@@ -18,6 +18,7 @@ import {
   getAiVisibilitySettings,
   nextMonday,
   saveAiVisibilityScan,
+  setAiVisibilityQuestions,
 } from "@/lib/server/ai-visibility-repository";
 import type {
   AiVisibilityAiProvider,
@@ -168,9 +169,27 @@ export async function runAiVisibilityScan(visibilityScanId: string): Promise<AiV
     record = { ...record, status: "running", error: null, updatedAt: new Date().toISOString() };
     await saveAiVisibilityScan(record);
 
-    const questions = await generateQuestions(business, competitors);
-    if (questions.length !== 3) {
-      throw new Error(`Expected exactly 3 visibility questions, got ${questions.length}.`);
+    // Reuse the workspace's persisted, user-manageable question set once
+    // one exists (settings.questions !== null); only the very first run
+    // for a workspace generates one, exactly as every run did before this
+    // persistence existed. Read via seedScanId, not record.seedScanId's
+    // own history -- the settings row is the one durable place this lives,
+    // keyed the same way ensureAiVisibilityTrackingStarted already keys it.
+    const settings = await getAiVisibilitySettings(record.workspaceId, record.seedScanId);
+    let questions: string[];
+    if (settings?.questions) {
+      questions = settings.questions.filter((question) => question.active).map((question) => question.text);
+    } else {
+      const generated = await generateQuestions(business, competitors);
+      if (generated.length !== 3) {
+        throw new Error(`Expected exactly 3 visibility questions, got ${generated.length}.`);
+      }
+      questions = generated;
+      await setAiVisibilityQuestions({
+        workspaceId: record.workspaceId,
+        seedScanId: record.seedScanId,
+        questions: generated.map((text) => ({ text, active: true })),
+      });
     }
     record = { ...record, questions, updatedAt: new Date().toISOString() };
     await saveAiVisibilityScan(record);

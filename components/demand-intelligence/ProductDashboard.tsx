@@ -48,10 +48,22 @@ export type RedditMonitoringStatus = {
   nextRunAt: string;
 };
 
+/**
+ * One entry in the workspace's persisted, user-manageable AI Visibility
+ * question set -- see AiVisibilityTrackedQuestion in lib/server/contracts.ts.
+ * Text is the only identity; there is no id/versioning in this data model.
+ */
+export type AiVisibilityTrackedQuestion = {
+  text: string;
+  active: boolean;
+};
+
 export type AiVisibilityStatus = {
   enabled: boolean;
   lastSuccessfulScanAt: string | null;
   nextRunAt: string;
+  /** NULL until the workspace's first AI Visibility run seeds it -- see runAiVisibilityScan's own doc comment on this. */
+  questions: AiVisibilityTrackedQuestion[] | null;
 };
 
 /**
@@ -158,7 +170,10 @@ export interface ProductDashboardProps {
   /** Loads a completed monitoring run's own scan into view, in place, without leaving the dashboard. */
   onViewMonitorRun?: (scanId: string) => Promise<void> | void;
   aiVisibility?: AiVisibilityStatus | null;
-  onUpdateAiVisibility?: (enabled: boolean) => Promise<boolean>;
+  onUpdateAiVisibility?: (
+    enabled: boolean,
+    questions?: AiVisibilityTrackedQuestion[],
+  ) => Promise<boolean>;
   /** Recent weekly AI visibility scans, most recent first -- the "where will I see results" answer for AI visibility tracking. */
   visibilityScans?: AiVisibilityScanSummary[] | null;
   /**
@@ -397,25 +412,45 @@ function RedditMonitoringPanel({
   runs?: RedditMonitorRunSummary[] | null;
   onViewRun?: ProductDashboardProps["onViewMonitorRun"];
 }) {
-  const [terms, setTerms] = useState(() =>
-    monitoring?.watchTerms
-      .filter((term) => term.active)
-      .slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms)
-      .map((term) => term.value)
-      .join("\n") ?? "",
-  );
+  // Three sections purely for editing clarity -- RedditWatchTerm already
+  // distinguishes kind: "brand" | "competitor" | "keyword" in the
+  // persisted model; this just surfaces that existing distinction
+  // instead of collapsing all three into one flat textarea. Each box
+  // seeds from its matching kind's currently active terms only, the
+  // same active-only filtering the single textarea already did.
+  const termsByKind = (kind: RedditMonitoringStatus["watchTerms"][number]["kind"]) =>
+    monitoring?.watchTerms.filter((term) => term.active && term.kind === kind).map((term) => term.value).join("\n") ?? "";
+  const [brandTerms, setBrandTerms] = useState(() => termsByKind("brand"));
+  const [competitorTerms, setCompetitorTerms] = useState(() => termsByKind("competitor"));
+  const [keywordTerms, setKeywordTerms] = useState(() => termsByKind("keyword"));
   const [saving, setSaving] = useState(false);
   const [viewingRunId, setViewingRunId] = useState<string | null>(null);
   if (!monitoring) return null;
 
-  const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => [...new Set(
-    terms.split(/\r?\n|,/u).map((value) => value.replace(/\s+/gu, " ").trim()).filter(Boolean),
-  )].slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms).map((value) => {
-    const existing = monitoring.watchTerms.find(
-      (term) => term.value.toLocaleLowerCase("en-US") === value.toLocaleLowerCase("en-US"),
-    );
-    return { value, kind: existing?.kind ?? "keyword", active: true };
-  });
+  const parseLines = (value: string) =>
+    value.split(/\r?\n|,/u).map((line) => line.replace(/\s+/gu, " ").trim()).filter(Boolean);
+
+  // Same combine-dedupe-cap behavior the single textarea already had.
+  // kind now comes directly from which box a term was typed into,
+  // rather than the old logic's guess (look up an existing term with
+  // the same value, or fall back to "keyword") -- each box IS the kind,
+  // so there is nothing left to guess.
+  const parsedTerms = (): RedditMonitoringStatus["watchTerms"] => {
+    const combined: RedditMonitoringStatus["watchTerms"] = [
+      ...parseLines(brandTerms).map((value) => ({ value, kind: "brand" as const, active: true })),
+      ...parseLines(competitorTerms).map((value) => ({ value, kind: "competitor" as const, active: true })),
+      ...parseLines(keywordTerms).map((value) => ({ value, kind: "keyword" as const, active: true })),
+    ];
+    const seen = new Set<string>();
+    const deduped: RedditMonitoringStatus["watchTerms"] = [];
+    for (const term of combined) {
+      const key = term.value.toLocaleLowerCase("en-US");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(term);
+    }
+    return deduped.slice(0, REDDIT_MONITOR_LIMITS.maxWatchTerms);
+  };
 
   const save = async (enabled: boolean) => {
     if (!onUpdate) return;
@@ -457,16 +492,35 @@ function RedditMonitoringPanel({
         />
         <span>{monitoring.enabled ? "Monitoring on" : "Monitoring off"}</span>
       </label>
+      <small className={styles.monitoringTermsNote}>
+        Up to {REDDIT_MONITOR_LIMITS.maxWatchTerms} terms across all three sections combined, and{" "}
+        {REDDIT_MONITOR_LIMITS.maxResultsPerRun} raw results per daily run.
+      </small>
       <label className={styles.monitoringTerms}>
-        <span>Brand, competitor and keyword watch terms</span>
-        <small>
-          Up to {REDDIT_MONITOR_LIMITS.maxWatchTerms} terms and {REDDIT_MONITOR_LIMITS.maxResultsPerRun} raw results per daily run.
-        </small>
+        <span>Brand terms</span>
         <textarea
-          value={terms}
-          rows={Math.min(8, Math.max(4, terms.split("\n").length))}
+          value={brandTerms}
+          rows={Math.min(6, Math.max(2, brandTerms.split("\n").length))}
           disabled={saving}
-          onChange={(event) => setTerms(event.currentTarget.value)}
+          onChange={(event) => setBrandTerms(event.currentTarget.value)}
+        />
+      </label>
+      <label className={styles.monitoringTerms}>
+        <span>Competitors</span>
+        <textarea
+          value={competitorTerms}
+          rows={Math.min(6, Math.max(2, competitorTerms.split("\n").length))}
+          disabled={saving}
+          onChange={(event) => setCompetitorTerms(event.currentTarget.value)}
+        />
+      </label>
+      <label className={styles.monitoringTerms}>
+        <span>Topics &amp; phrases</span>
+        <textarea
+          value={keywordTerms}
+          rows={Math.min(8, Math.max(4, keywordTerms.split("\n").length))}
+          disabled={saving}
+          onChange={(event) => setKeywordTerms(event.currentTarget.value)}
         />
       </label>
       <div className={styles.monitoringFooter}>
@@ -701,6 +755,170 @@ function AiVisibilityAnswerDrawer({
   );
 }
 
+/**
+ * "Manage questions" -- reuses the exact same overlay/drawer technique as
+ * AiVisibilityAnswerDrawer above (built for the AI Visibility results
+ * redesign), since that is already the simplest existing-style management
+ * UI in this codebase, rather than inventing a second overlay pattern for
+ * this screen. Edits are staged locally (add/edit/enable-disable/remove)
+ * and only sent to the server on "Save changes," via the exact same PUT
+ * the tracking toggle already uses (see updateAiVisibility in
+ * ThreadlineExperience.tsx) -- same "send the full list, replace
+ * wholesale" pattern as Reddit monitoring's own watch-term save.
+ *
+ * The 1-10-active and no-duplicate rules are enforced here too (not just
+ * server-side) so the person sees why an action didn't take effect
+ * immediately, rather than only after a failed save round-trip -- but the
+ * server (sanitizeTrackedQuestions in ai-visibility-repository.ts) is the
+ * real authority; this is a UX convenience, not the only place the rule
+ * is enforced.
+ */
+function ManageQuestionsPanel({
+  questions,
+  onSave,
+  onClose,
+}: {
+  questions: AiVisibilityTrackedQuestion[];
+  onSave: (questions: AiVisibilityTrackedQuestion[]) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<AiVisibilityTrackedQuestion[]>(questions);
+  const [newQuestion, setNewQuestion] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const activeCount = draft.filter((question) => question.active).length;
+  const normalized = (value: string) => value.replace(/\s+/g, " ").trim();
+  const isDuplicate = (text: string, skipIndex?: number) =>
+    draft.some((question, index) => index !== skipIndex && question.text.toLocaleLowerCase("en-US") === text.toLocaleLowerCase("en-US"));
+
+  const addQuestion = () => {
+    const text = normalized(newQuestion);
+    if (!text) return;
+    if (isDuplicate(text)) { setError("That question is already tracked."); return; }
+    if (activeCount >= 10) { setError("Up to 10 questions can be active at once. Disable one first."); return; }
+    setDraft((current) => [...current, { text, active: true }]);
+    setNewQuestion("");
+    setError(null);
+  };
+
+  const toggleActive = (index: number) => {
+    const target = draft[index];
+    if (target.active && activeCount <= 1) { setError("At least 1 question must stay active."); return; }
+    setDraft((current) => current.map((question, i) => (i === index ? { ...question, active: !question.active } : question)));
+    setError(null);
+  };
+
+  const removeQuestion = (index: number) => {
+    const target = draft[index];
+    if (target.active && activeCount <= 1) {
+      setError("At least 1 question must stay active. Enable or add another before removing this one.");
+      return;
+    }
+    setDraft((current) => current.filter((_, i) => i !== index));
+    if (editingIndex === index) setEditingIndex(null);
+    setError(null);
+  };
+
+  const startEdit = (index: number) => {
+    setEditingIndex(index);
+    setEditingText(draft[index].text);
+    setError(null);
+  };
+
+  const saveEdit = () => {
+    if (editingIndex === null) return;
+    const text = normalized(editingText);
+    if (!text) { setError("Questions can't be empty."); return; }
+    if (isDuplicate(text, editingIndex)) { setError("That question is already tracked."); return; }
+    setDraft((current) => current.map((question, i) => (i === editingIndex ? { ...question, text } : question)));
+    setEditingIndex(null);
+    setEditingText("");
+    setError(null);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const ok = await onSave(draft);
+      if (ok) onClose();
+      else setError("Your changes could not be saved. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className={styles.aiVisibilityDrawerOverlay}>
+      <div className={styles.aiVisibilityDrawer}>
+        <button type="button" className={styles.valuePropClose} onClick={onClose} aria-label="Close">
+          &times;
+        </button>
+        <span className={styles.simpleCardEyebrow}>AI Visibility</span>
+        <h2 className={styles.aiVisibilityDrawerTitle}>Manage questions</h2>
+        <p className={styles.resultsMeta}>
+          The buyer questions Scooptr asks ChatGPT, Gemini and Perplexity every week. Keep between 1 and 10 active.
+        </p>
+        <div className={styles.aiVisibilityDrawerBody}>
+          {draft.map((question, index) => (
+            <div key={index} className={styles.manageQuestionRow}>
+              {editingIndex === index ? (
+                <>
+                  <textarea
+                    className={styles.manageQuestionEditInput}
+                    value={editingText}
+                    rows={2}
+                    onChange={(event) => setEditingText(event.currentTarget.value)}
+                  />
+                  <div className={styles.manageQuestionActions}>
+                    <button type="button" className={styles.textButton} onClick={saveEdit}>Save</button>
+                    <button type="button" className={styles.textButton} onClick={() => setEditingIndex(null)}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span className={question.active ? styles.manageQuestionText : `${styles.manageQuestionText} ${styles.manageQuestionInactive}`}>
+                    {question.text}
+                  </span>
+                  <div className={styles.manageQuestionActions}>
+                    <span className={styles.manageQuestionStatus}>{question.active ? "Active" : "Disabled"}</span>
+                    <button type="button" className={styles.textButton} onClick={() => toggleActive(index)}>
+                      {question.active ? "Disable" : "Enable"}
+                    </button>
+                    <button type="button" className={styles.textButton} onClick={() => startEdit(index)}>Edit</button>
+                    <button type="button" className={styles.textButton} onClick={() => removeQuestion(index)}>Remove</button>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className={styles.manageQuestionAddRow}>
+          <input
+            type="text"
+            className={styles.manageQuestionAddInput}
+            placeholder="Add a question"
+            value={newQuestion}
+            onChange={(event) => setNewQuestion(event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addQuestion(); } }}
+          />
+          <button type="button" className={styles.textButton} onClick={addQuestion}>+ Add question</button>
+        </div>
+        {error && <p className={styles.resultsError}>{error}</p>}
+        <div className={styles.monitoringFooter}>
+          <small>{activeCount} of 10 active</small>
+          <button type="button" className={styles.primaryButton} disabled={saving} onClick={() => void save()}>
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AiVisibilityPanel({
   status,
   onUpdate,
@@ -712,6 +930,7 @@ function AiVisibilityPanel({
 }) {
   const [saving, setSaving] = useState(false);
   const [openQuestion, setOpenQuestion] = useState<string | null>(null);
+  const [managingQuestions, setManagingQuestions] = useState(false);
   if (!status) return null;
 
   const save = async (enabled: boolean) => {
@@ -723,6 +942,12 @@ function AiVisibilityPanel({
       setSaving(false);
     }
   };
+
+  // Always sends the current enabled value alongside the edited question
+  // list -- the PUT route requires enabled on every request; this call
+  // only ever changes questions, never the on/off state itself.
+  const saveQuestions = (questions: AiVisibilityTrackedQuestion[]) =>
+    onUpdate ? onUpdate(status.enabled, questions) : Promise.resolve(false);
 
   const latest = scans?.[0] ?? null;
   // The main content shows the most recent SUCCESSFUL check even if a
@@ -857,7 +1082,12 @@ function AiVisibilityPanel({
           )}
 
           {/* Requirement 4: grouped by buyer question, not by provider. */}
-          <h3>Questions tracked</h3>
+          <div className={styles.resultsRowHead}>
+            <h3>Questions tracked</h3>
+            <button type="button" className={styles.textButton} onClick={() => setManagingQuestions(true)}>
+              Manage questions
+            </button>
+          </div>
           <div className={styles.resultsList}>
             {grouped.map((item) => (
               <TrackedQuestionRow key={item.question} grouped={item} onOpen={() => setOpenQuestion(item.question)} />
@@ -871,6 +1101,14 @@ function AiVisibilityPanel({
           grouped={openGrouped}
           checkedAt={latestSucceeded.createdAt}
           onClose={() => setOpenQuestion(null)}
+        />
+      )}
+
+      {managingQuestions && (
+        <ManageQuestionsPanel
+          questions={status.questions ?? []}
+          onSave={saveQuestions}
+          onClose={() => setManagingQuestions(false)}
         />
       )}
     </section>

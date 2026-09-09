@@ -16,6 +16,7 @@ export type {
   AiVisibilityAnswerSummary,
   AiVisibilityMetricsSummary,
   AiVisibilityScanSummary,
+  AiVisibilityTrackedQuestion,
 } from "./ProductDashboard";
 export {
   countLockedResults,

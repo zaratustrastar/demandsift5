@@ -400,6 +400,7 @@ const baseNavigation: NavigationSection[] = [
   },
   { id: "results", label: "Results" },
   { id: "monitoring", label: "Monitoring config" },
+  { id: "analytics", label: "Analytics" },
   { id: "settings", label: "Settings" },
   { id: "billing", label: "Billing" },
 ];

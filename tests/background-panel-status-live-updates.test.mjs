@@ -37,9 +37,9 @@ test("a dedicated, slower poll interval is defined for the background-scheduled 
   assert.match(polling, /const SCAN_POLL_INTERVAL_MS = 3_000;/);
 });
 
-test("loadRedditMonitoring and loadAiVisibility are re-invoked on a repeating interval, not just once on mount", () => {
+test("loadRedditMonitoring, loadAiVisibility, and loadSubredditPerformance are re-invoked on a repeating interval, not just once on mount", () => {
   const body = loadingEffectSource();
-  assert.match(body, /window\.setInterval\(\(\) => \{\s*void loadRedditMonitoring\(\);\s*void loadAiVisibility\(\);\s*\}, BACKGROUND_STATUS_POLL_INTERVAL_MS\)/);
+  assert.match(body, /window\.setInterval\(\(\) => \{\s*void loadRedditMonitoring\(\);\s*void loadAiVisibility\(\);\s*void loadSubredditPerformance\(\);\s*\}, BACKGROUND_STATUS_POLL_INTERVAL_MS\)/);
 });
 
 test("the interval is cleared on cleanup, so it does not keep polling after the view/access level changes or the component unmounts", () => {

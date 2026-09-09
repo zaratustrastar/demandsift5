@@ -37,6 +37,30 @@ export type RedditConnectionStatus = {
   requiresPaidAccess: boolean;
 };
 
+/**
+ * One subreddit's performance row for the Analytics screen -- a plain
+ * client-side mirror of SubredditPerformanceRow's fields
+ * (lib/server/subreddit-analytics.ts), not an import of the server type
+ * itself (see AiVisibilityStatus above for the same pattern already in
+ * use in this file).
+ */
+export type SubredditPerformanceRow = {
+  subreddit: string;
+  relevantConversations: number;
+  opportunities: number;
+  avgRelevance: number | null;
+  aiCited: number;
+  latest: string | null;
+};
+
+export type SubredditPerformanceSummary = {
+  rows: SubredditPerformanceRow[];
+  window: {
+    recentRunCount: number;
+    hasAiVisibilityData: boolean;
+  };
+};
+
 export type RedditMonitoringStatus = {
   enabled: boolean;
   watchTerms: Array<{
@@ -171,6 +195,8 @@ export interface ProductDashboardProps {
   onViewMonitorRun?: (scanId: string) => Promise<void> | void;
   /** The seed scan's own already-found subreddits (see recommendedSubreddits in reddit-monitor-repository.ts) -- feeds the Subreddits section's "Recommended" rows. */
   recommendedSubreddits?: string[] | null;
+  /** Aggregated subreddit performance for the Analytics screen (see aggregateSubredditPerformance in lib/server/subreddit-analytics.ts) -- separate from recommendedSubreddits above, which only feeds Monitoring config's control list. */
+  subredditPerformance?: SubredditPerformanceSummary | null;
   aiVisibility?: AiVisibilityStatus | null;
   onUpdateAiVisibility?: (
     enabled: boolean,
@@ -685,6 +711,138 @@ type GroupedVisibilityQuestion = {
   recommendedCount: number;
   totalSources: number;
 };
+
+type SubredditSortColumn = "subreddit" | "relevantConversations" | "opportunities" | "avgRelevance" | "aiCited" | "latest";
+
+/**
+ * Default sort mirrors the product's own priority: real demand first.
+ * Opportunities desc, then relevant conversations desc, then avg
+ * relevance desc (rows with no score sort after rows that have one) --
+ * a citation-only row (0 opportunities, 0 conversations, no score)
+ * naturally falls to the bottom of this order without any special-case
+ * rule, simply because every one of its comparison fields loses to any
+ * row with real demand behind it.
+ */
+function defaultSubredditSort(a: SubredditPerformanceRow, b: SubredditPerformanceRow): number {
+  if (b.opportunities !== a.opportunities) return b.opportunities - a.opportunities;
+  if (b.relevantConversations !== a.relevantConversations) return b.relevantConversations - a.relevantConversations;
+  const aScore = a.avgRelevance ?? -1;
+  const bScore = b.avgRelevance ?? -1;
+  return bScore - aScore;
+}
+
+function sortSubredditRows(rows: SubredditPerformanceRow[], column: SubredditSortColumn, direction: "asc" | "desc"): SubredditPerformanceRow[] {
+  const sorted = [...rows].sort((a, b) => {
+    switch (column) {
+      case "subreddit":
+        return a.subreddit.localeCompare(b.subreddit);
+      case "relevantConversations":
+        return a.relevantConversations - b.relevantConversations;
+      case "opportunities":
+        return a.opportunities - b.opportunities;
+      case "avgRelevance":
+        return (a.avgRelevance ?? -1) - (b.avgRelevance ?? -1);
+      case "aiCited":
+        return a.aiCited - b.aiCited;
+      case "latest":
+        return (a.latest ?? "").localeCompare(b.latest ?? "");
+      default:
+        return 0;
+    }
+  });
+  return direction === "asc" ? sorted : sorted.reverse();
+}
+
+const SUBREDDIT_COLUMNS: Array<{ id: SubredditSortColumn; label: string }> = [
+  { id: "subreddit", label: "Subreddit" },
+  { id: "relevantConversations", label: "Relevant conversations" },
+  { id: "opportunities", label: "Opportunities" },
+  { id: "avgRelevance", label: "Avg relevance" },
+  { id: "aiCited", label: "AI cited" },
+  { id: "latest", label: "Latest" },
+];
+
+/**
+ * "Subreddit performance" -- the Analytics screen's one table for this
+ * task (no charts yet, per scope). Reuses the existing .answerTable
+ * style (built for the AI Visibility results redesign) rather than
+ * introducing a new table look. Sorting is a plain local click-to-sort
+ * on already-fetched rows; the data itself was never re-ranked, just
+ * reordered.
+ */
+function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary | null }) {
+  const [sortColumn, setSortColumn] = useState<SubredditSortColumn | null>(null);
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+
+  const clickColumn = (column: SubredditSortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection((current) => (current === "desc" ? "asc" : "desc"));
+    } else {
+      setSortColumn(column);
+      setSortDirection("desc");
+    }
+  };
+
+  return (
+    <section className={styles.card}>
+      <div>
+        <span className={styles.eyebrow}>Analytics</span>
+        <h2>Subreddit performance</h2>
+        <p>
+          See which Reddit communities are actually producing relevant conversations, opportunities, and influencing
+          AI answers -- separate from Monitoring config, which controls where Scooptr is allowed to look.
+        </p>
+        <small className={styles.monitoringTermsNote}>Based on the initial scan and recent monitoring activity.</small>
+      </div>
+      {!data ? (
+        // Reuses the same generic spinner already built for AI Visibility
+        // (aiVisibilityLoading/aiVisibilitySpinner) rather than a new
+        // loading treatment -- this table's own data can take a moment
+        // to aggregate, so a blank section here would look broken.
+        <div className={styles.aiVisibilityLoading}>
+          <span className={styles.aiVisibilitySpinner} aria-hidden="true" />
+          <div>
+            <strong>Loading subreddit performance</strong>
+            <p>Aggregating your scan and recent monitoring activity.</p>
+          </div>
+        </div>
+      ) : data.rows.length === 0 ? (
+        <p className={styles.resultsEmpty}>
+          No subreddit activity yet -- once Scooptr finds relevant conversations or AI Visibility cites a community, it will appear here.
+        </p>
+      ) : (
+        <div className={styles.subredditTableScroll}>
+          <table className={styles.answerTable}>
+            <thead>
+              <tr>
+                {SUBREDDIT_COLUMNS.map((column) => (
+                  <th key={column.id}>
+                    <button type="button" className={styles.textButton} onClick={() => clickColumn(column.id)}>
+                      {column.label}
+                      {sortColumn === column.id ? (sortDirection === "desc" ? " \u2193" : " \u2191") : ""}
+                    </button>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(sortColumn ? sortSubredditRows(data.rows, sortColumn, sortDirection) : [...data.rows].sort(defaultSubredditSort)).map((row) => (
+                <tr key={row.subreddit}>
+                  <td>r/{row.subreddit}</td>
+                  <td>{row.relevantConversations}</td>
+                  <td>{row.opportunities}</td>
+                  <td>{row.avgRelevance === null ? "\u2014" : row.avgRelevance}</td>
+                  <td>{row.aiCited}</td>
+                  <td>{row.latest ? relativeTime(row.latest) : "\u2014"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 /**
  * Groups the scan's flat answers list (provider x question, up to 9
@@ -2565,6 +2723,7 @@ export function ProductDashboard({
   monitorRuns = null,
   onViewMonitorRun,
   recommendedSubreddits = null,
+  subredditPerformance = null,
   aiVisibility = null,
   onUpdateAiVisibility,
   visibilityScans = null,
@@ -2833,6 +2992,7 @@ export function ProductDashboard({
     replies: "Drafts, posted replies and what they did.",
     results: "Anything stored beyond what's already shown elsewhere in this scan.",
     monitoring: "Daily Reddit monitoring, watch terms and your Reddit connection.",
+    analytics: "Where useful demand is actually coming from.",
     settings: "Your business profile, competitors and Reddit connection.",
     billing: "Your plan and how to change it.",
   };
@@ -3578,6 +3738,12 @@ export function ProductDashboard({
                   <span className={styles.simpleCardMeta}>Posting to Reddit requires a paid plan.</span>
                 ) : null}
               </div>
+            </div>
+          )}
+
+          {activeSection === "analytics" && (
+            <div className={styles.lightSection}>
+              <SubredditPerformanceTable data={subredditPerformance} />
             </div>
           )}
 

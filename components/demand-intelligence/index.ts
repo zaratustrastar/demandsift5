@@ -17,6 +17,8 @@ export type {
   AiVisibilityMetricsSummary,
   AiVisibilityScanSummary,
   AiVisibilityTrackedQuestion,
+  SubredditPerformanceRow,
+  SubredditPerformanceSummary,
 } from "./ProductDashboard";
 export {
   countLockedResults,

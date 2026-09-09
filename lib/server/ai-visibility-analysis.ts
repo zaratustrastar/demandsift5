@@ -93,6 +93,25 @@ export function redditCitations(citations: readonly AiVisibilityCitation[]): AiV
   return citations.filter(isRedditCitation);
 }
 
+/**
+ * Deterministic subreddit extraction from a citation's own URL -- the
+ * standard reddit.com/old.reddit.com path shape is
+ * /r/<subreddit>/comments/... or /r/<subreddit>/, so a simple path match
+ * is reliable for the vast majority of citations without any network
+ * request. Returns null, never a guess, for anything that doesn't match:
+ * a redd.it short link doesn't encode the subreddit in the URL at all
+ * (isRedditCitation still returns true for it, but this regex simply
+ * won't match its path, which is the correct outcome -- resolving the
+ * redirect to find out would be a new network request, explicitly out
+ * of scope), and the same applies to any other Reddit URL shape that
+ * doesn't carry a /r/<subreddit>/ segment.
+ */
+export function subredditFromCitationUrl(citation: AiVisibilityCitation): string | null {
+  if (!isRedditCitation(citation)) return null;
+  const match = citation.url.match(/\/r\/([a-zA-Z0-9_]+)\b/i);
+  return match ? match[1] : null;
+}
+
 /** Every cited domain other than reddit.com and the business's own domain, deduplicated. */
 export function otherCitedDomains(
   citations: readonly AiVisibilityCitation[],

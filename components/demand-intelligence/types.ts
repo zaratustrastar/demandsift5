@@ -21,6 +21,7 @@ export type NavigationSectionId =
   | "replies"
   | "results"
   | "monitoring"
+  | "analytics"
   | "settings"
   | "billing";
 

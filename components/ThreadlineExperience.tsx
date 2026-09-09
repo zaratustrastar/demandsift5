@@ -9,6 +9,7 @@ import {
   type AiVisibilityStatus,
   type AiVisibilityScanSummary,
   type AiVisibilityTrackedQuestion,
+  type SubredditPerformanceSummary,
   type NavigationSectionId,
   type RedditOpportunity,
   type RelevantConversation,
@@ -2117,6 +2118,7 @@ export function ThreadlineExperience() {
   const [monitoring, setMonitoring] = useState<RedditMonitoringStatus | null>(null);
   const [monitorRuns, setMonitorRuns] = useState<RedditMonitorRunSummary[] | null>(null);
   const [recommendedSubreddits, setRecommendedSubreddits] = useState<string[] | null>(null);
+  const [subredditPerformance, setSubredditPerformance] = useState<SubredditPerformanceSummary | null>(null);
   const [aiVisibility, setAiVisibility] = useState<AiVisibilityStatus | null>(null);
   const [visibilityScans, setVisibilityScans] = useState<AiVisibilityScanSummary[] | null>(null);
   // undefined = still checking; null = signed out; object = signed in. Read
@@ -2409,15 +2411,30 @@ export function ThreadlineExperience() {
       }
     }
 
+    async function loadSubredditPerformance() {
+      try {
+        const response = await fetch(`/api/analytics/subreddits?scanId=${encodeURIComponent(activeScanId)}`, { cache: "no-store" });
+        const payload = (await response.json()) as SubredditPerformanceSummary;
+        if (response.ok && !cancelled) {
+          setSubredditPerformance(payload);
+        }
+      } catch {
+        // Same independence as the other background loaders above: a
+        // transient fetch failure must not disturb other loaded state.
+      }
+    }
+
     void loadRedditConnection();
     void loadRedditMonitoring();
     void loadAiVisibility();
+    void loadSubredditPerformance();
     // Reddit OAuth status changes only in response to a user action taken
     // on this same page (connect/disconnect), so it does not need the same
-    // repeating refetch -- only the two background-scheduled panels do.
+    // repeating refetch -- only the background-scheduled panels do.
     const backgroundStatusTimer = window.setInterval(() => {
       void loadRedditMonitoring();
       void loadAiVisibility();
+      void loadSubredditPerformance();
     }, BACKGROUND_STATUS_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
@@ -2472,6 +2489,7 @@ export function ThreadlineExperience() {
     setMonitoring(null);
     setMonitorRuns(null);
     setRecommendedSubreddits(null);
+    setSubredditPerformance(null);
     setAiVisibility(null);
     setVisibilityScans(null);
     resumedScanRef.current = null;
@@ -3420,6 +3438,7 @@ export function ThreadlineExperience() {
         onUpdateBusinessSummary={updateBusinessSummary}
         monitorRuns={monitorRuns}
         recommendedSubreddits={recommendedSubreddits}
+        subredditPerformance={subredditPerformance}
         onViewMonitorRun={viewMonitorRun}
         aiVisibility={aiVisibility}
         onUpdateAiVisibility={updateAiVisibility}

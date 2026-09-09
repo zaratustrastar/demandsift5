@@ -839,6 +839,23 @@
   margin-bottom: 0;
 }
 
+/* Small, standard responsive-table fix: on a narrow viewport a
+ * 6-column table would otherwise cram its cells unreadably (the
+ * existing .answerTable itself has no overflow handling -- it was
+ * built for a 2-3 column citation table that never needed it). This
+ * lets the table scroll horizontally instead, without changing
+ * .answerTable's own look for its existing use elsewhere. */
+.subredditTableScroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Without a minimum, width: 100% on .answerTable would just shrink to
+ * the narrow container instead of triggering the scroll above. */
+.subredditTableScroll .answerTable {
+  min-width: 560px;
+}
+
 .answerTable th,
 .answerTable td {
   padding: 6px 8px;

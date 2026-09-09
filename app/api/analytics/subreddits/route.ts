@@ -4,7 +4,16 @@ import { assertRateLimit } from "@/lib/server/rate-limit";
 import { getAiVisibilitySettings, listAiVisibilityScans } from "@/lib/server/ai-visibility-repository";
 import { listRedditMonitorRuns } from "@/lib/server/reddit-monitor-repository";
 import { getStateRepository } from "@/lib/server/repository";
-import { aggregateSubredditPerformance } from "@/lib/server/subreddit-analytics";
+import {
+  aggregateSubredditActivityTimeline,
+  aggregateSubredditPerformance,
+  collectSubredditConversations,
+  computeDemandMix,
+  selectBestOpportunitySource,
+  selectTopAiCitedCommunities,
+  summarizeSubredditAnalytics,
+  topSubredditsByConversations,
+} from "@/lib/server/subreddit-analytics";
 import type { AiVisibilityAnswer } from "@/lib/server/contracts";
 
 /**
@@ -14,6 +23,10 @@ import type { AiVisibilityAnswer } from "@/lib/server/contracts";
  * recent window, never full history.
  */
 const RECENT_RUN_LIMIT = 10;
+
+/** Series count for the activity chart -- "top 3 as separate series,
+ * everything else grouped into Other", as specified. */
+const ACTIVITY_TOP_SERIES = 3;
 
 function requireScanId(value: string | null): string {
   if (!value || !value.trim()) {
@@ -52,9 +65,25 @@ export async function GET(request: Request) {
       aiVisibilityAnswers,
     });
 
+    // Everything below is derived purely from `rows` (already computed
+    // above) or from the same underlying conversation collection --
+    // no additional data fetching, no new scraping, no new AI calls.
+    const summary = summarizeSubredditAnalytics(rows);
+    const demandMix = computeDemandMix(rows);
+    const bestOpportunitySource = selectBestOpportunitySource(rows);
+    const aiCitedCommunities = selectTopAiCitedCommunities(rows);
+    const topActivitySubreddits = topSubredditsByConversations(rows, ACTIVITY_TOP_SERIES);
+    const bySubreddit = collectSubredditConversations(seedScan, recentRunScans);
+    const activityTimeline = aggregateSubredditActivityTimeline(bySubreddit, topActivitySubreddits);
+
     return Response.json(
       {
         rows,
+        summary,
+        demandMix,
+        bestOpportunitySource,
+        aiCitedCommunities,
+        activityTimeline: { series: topActivitySubreddits, points: activityTimeline },
         window: {
           recentRunCount: recentRunScans.length,
           hasAiVisibilityData: aiVisibilityAnswers.length > 0,

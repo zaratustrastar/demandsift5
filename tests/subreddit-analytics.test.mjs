@@ -20,6 +20,7 @@ const navTypes = await read("../components/demand-intelligence/types.ts");
 const demoData = await read("../components/demand-intelligence/demo-data.ts");
 const barrel = await read("../components/demand-intelligence/index.ts");
 const schema = await read("../db/postgres/schema.ts");
+const css = await read("../components/demand-intelligence/ProductDashboard.module.css");
 
 function fnBody(source, name, endMarker) {
   const start = source.indexOf(name);
@@ -40,21 +41,21 @@ test("no redirect resolution or new network request was added for redd.it short 
 });
 
 test("relevant conversations are deduplicated by sourceId, the field both OpportunityRecord and MarketIntelligenceRecord share", () => {
-  const body = fnBody(analytics, "export function aggregateSubredditPerformance", "\n}\n");
+  const body = fnBody(analytics, "export function collectSubredditConversations", "\n}\n");
   assert.match(body, /conversations\.get\(sourceId\)/);
   assert.match(body, /if \(existing\?\.isOpportunity\) return;/);
 });
 
-test("opportunities and market intelligence are both collected into the same per-subreddit map, from both the seed scan and recent monitoring-run scans", () => {
-  const body = fnBody(analytics, "export function aggregateSubredditPerformance", "\n}\n");
+test("opportunities and market intelligence are both collected into the same per-subreddit map, from both the seed scan and recent monitoring-run scans, via the shared collectSubredditConversations helper", () => {
+  const body = fnBody(analytics, "export function collectSubredditConversations", "\n}\n");
   assert.match(body, /result\.opportunities/);
   assert.match(body, /result\.marketIntelligence/);
-  assert.match(body, /collectFromResult\(input\.seedScan\.result\);/);
-  assert.match(body, /for \(const runScan of input\.recentRunScans\) collectFromResult\(runScan\.result\);/);
+  assert.match(body, /collectFromResult\(seedScan\.result\);/);
+  assert.match(body, /for \(const runScan of recentRunScans\) collectFromResult\(runScan\.result\);/);
 });
 
 test("avg relevance is computed from researchScore on both record types -- never from score/leadScore", () => {
-  const body = fnBody(analytics, "export function aggregateSubredditPerformance", "\n}\n");
+  const body = fnBody(analytics, "export function collectSubredditConversations", "\n}\n");
   assert.match(body, /researchScore: opportunity\.researchScore/);
   assert.match(body, /researchScore: intelligence\.researchScore/);
   assert.equal(/\.leadScore\b/.test(body), false);
@@ -77,8 +78,57 @@ test("a citation-only row's latest falls back to the citing answer's fetchedAt, 
 });
 
 test("AI cited reuses the already-computed AiVisibilityAnswer.redditCitations field rather than re-filtering citations itself", () => {
-  const body = fnBody(analytics, "export function aggregateSubredditPerformance", "\n}\n");
+  const body = fnBody(analytics, "function collectCitations", "\n}\n");
   assert.match(body, /for \(const citation of answer\.redditCitations\)/);
+});
+
+test("summarizeSubredditAnalytics is a pure function over already-computed rows -- no new data collection, and avg relevance is a count-weighted recombination, not an average of averages", () => {
+  const body = fnBody(analytics, "export function summarizeSubredditAnalytics");
+  assert.match(body, /rows\.reduce\(\(sum, row\) => sum \+ row\.relevantConversations, 0\)/);
+  assert.match(body, /rows\.reduce\(\(sum, row\) => sum \+ row\.opportunities, 0\)/);
+  assert.match(body, /row\.avgRelevance \* row\.relevantConversations/);
+  assert.equal(/fetch\(|await /.test(body), false);
+});
+
+test("summarizeSubredditAnalytics has no trend/delta field -- no historical comparison data exists to support one", () => {
+  const body = fnBody(analytics, "export type SubredditAnalyticsSummary", "\n};");
+  assert.equal(/trend|delta|percent|change|previous/i.test(body), false);
+});
+
+test("computeDemandMix groups the real top 4 subreddits plus a real Other bucket -- no artificial category names are invented", () => {
+  const body = fnBody(analytics, "export function computeDemandMix");
+  assert.match(body, /topSubredditsByConversations\(rows, 4\)/);
+  assert.match(body, /label: "Other"/);
+  assert.equal(/Productivity|Career|Management/i.test(body), false);
+});
+
+test("computeDemandMix percentages are derived from real counts via division, not hardcoded", () => {
+  const body = fnBody(analytics, "export function computeDemandMix");
+  assert.match(body, /percent: Math\.round\(\(row\.relevantConversations \/ total\) \* 100\)/);
+});
+
+test("selectBestOpportunitySource returns null (not a fabricated pick) when nothing has any opportunities, and never computes a comparison statement", () => {
+  const body = fnBody(analytics, "export function selectBestOpportunitySource");
+  assert.match(body, /if \(candidates\.length === 0\) return null;/);
+  assert.equal(/2x|better|comparison/i.test(body), false);
+});
+
+test("selectTopAiCitedCommunities only includes subreddits with a real, positive citation count", () => {
+  const body = fnBody(analytics, "export function selectTopAiCitedCommunities");
+  assert.match(body, /\.filter\(\(row\) => row\.aiCited > 0\)/);
+});
+
+test("the activity timeline groups by real calendar date from each conversation's own postedAt/sourceCreatedAt -- no gap-filling, no fabricated dates", () => {
+  const body = fnBody(analytics, "export function aggregateSubredditActivityTimeline");
+  assert.match(body, /conversation\.postedAt\.slice\(0, 10\)/);
+  assert.match(body, /if \(!date \|\| Number\.isNaN\(Date\.parse\(conversation\.postedAt\)\)\) continue;/);
+  assert.equal(/for \(let i = 0; i <.*days|fillGap|eachDay/i.test(body), false);
+});
+
+test("the activity timeline groups subreddits outside the given top set into a real 'other' count, not a fabricated series", () => {
+  const body = fnBody(analytics, "export function aggregateSubredditActivityTimeline");
+  assert.match(body, /if \(topSet\.has\(subreddit\)\) \{/);
+  assert.match(body, /point\.other \+= 1;/);
 });
 
 test("the analytics route is read-only (GET only) and reuses the same recent-run bound already established in Prompt 9A", () => {
@@ -136,8 +186,8 @@ test("'analytics' is a real navigation section, added alongside the existing sec
 });
 
 test("the Analytics section renders SubredditPerformanceTable under its own activeSection branch, separate from monitoring's own branch", () => {
-  const analyticsSection = dashboard.slice(dashboard.indexOf('activeSection === "analytics"'));
-  assert.match(analyticsSection.slice(0, 300), /<SubredditPerformanceTable data=\{subredditPerformance\} \/>/);
+  const analyticsSection = dashboard.slice(dashboard.indexOf('activeSection === "analytics"'), dashboard.indexOf('activeSection === "settings"'));
+  assert.match(analyticsSection, /<SubredditPerformanceTable data=\{subredditPerformance\} \/>/);
 });
 
 test("ThreadlineExperience.tsx fetches /api/analytics/subreddits and passes the result down to ProductDashboard", () => {
@@ -147,4 +197,106 @@ test("ThreadlineExperience.tsx fetches /api/analytics/subreddits and passes the 
 
 test("the new types are re-exported from the barrel file so ThreadlineExperience.tsx can import them", () => {
   assert.match(barrel, /SubredditPerformanceRow,\s*\n\s*SubredditPerformanceSummary,/);
+});
+
+// ---- Prompt 10B: the redesigned Analytics screen's infographics ----
+
+test("no third-party chart library was added anywhere in the codebase -- the new charts are hand-rolled SVG", async () => {
+  assert.equal(/from "recharts"|from "chart\.js"|from "d3"|from "victory"|from "@nivo|from "@visx/i.test(dashboard), false);
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  const chartDeps = Object.keys(deps).filter((name) => /chart|recharts|d3|victory|nivo|visx/i.test(name));
+  assert.deepEqual(chartDeps, []);
+});
+
+test("AnalyticsKpiRow renders exactly the four specified KPIs from the pure summary object, with no trend/delta shown -- only a shared muted context label", () => {
+  const body = fnBody(dashboard, "function AnalyticsKpiRow", "\n}\n");
+  assert.match(body, /label: "Relevant conversations", value: summary\.relevantConversations/);
+  assert.match(body, /label: "Opportunities", value: summary\.opportunities/);
+  assert.match(body, /label: "Avg relevance", value: summary\.avgRelevance === null \? "\\u2014" : summary\.avgRelevance/);
+  assert.match(body, /label: "AI-cited communities", value: summary\.aiCitedCommunities/);
+  assert.match(body, /Recent monitoring activity/);
+  assert.equal(/[+-]\d+%|vs\. previous|vs previous/i.test(body), false);
+});
+
+test("SubredditActivityChart renders one bar per real activity point with a truthful empty state, and shows no fabricated data when there is nothing to chart", () => {
+  const body = fnBody(dashboard, "function SubredditActivityChart", "\n}\n");
+  assert.match(body, /points\.length === 0/);
+  assert.match(body, /Not enough dated activity yet to chart\./);
+  assert.match(body, /points\.map\(\(point, index\)/);
+});
+
+test("SubredditActivityChart's own SVG is capped so it never renders wider than its native viewBox scale on desktop, keeping label text legible instead of oversized", () => {
+  const cssBody = css.slice(css.indexOf(".analyticsActivitySvg"), css.indexOf(".analyticsActivitySvg") + 200);
+  assert.match(cssBody, /max-width: 560px;/);
+});
+
+test("SubredditActivityChart's axis label font size is large enough to stay legible when the SVG scales down on a narrow mobile container", () => {
+  const body = fnBody(dashboard, "function SubredditActivityChart", "\n}\n");
+  const match = body.match(/fontSize="(\d+)" fill="#8b93a1"/);
+  assert.ok(match, "axis label fontSize not found");
+  assert.ok(Number(match[1]) >= 12, `axis label fontSize ${match[1]} is too small to survive mobile scaling`);
+});
+
+test("SubredditActivityChart's legend can wrap and does not force a fixed single-line width", () => {
+  const cssBody = css.slice(css.indexOf(".analyticsChartLegend {"), css.indexOf(".analyticsChartLegend {") + 200);
+  assert.match(cssBody, /flex-wrap: wrap;/);
+});
+
+test("DemandMixDonut renders a real donut from computeDemandMix's own slices, with a truthful empty state and no fabricated category names", () => {
+  const body = fnBody(dashboard, "function DemandMixDonut", "\n}\n");
+  assert.match(body, /data\.demandMix/);
+  assert.match(body, /No relevant conversations yet to chart\./);
+  assert.equal(/Productivity|Career|Management/i.test(body), false);
+});
+
+test("DemandMixDonut's center label shows the real total and 'conversations', matching the specified center-of-donut format", () => {
+  const body = fnBody(dashboard, "function DemandMixDonut", "\n}\n");
+  assert.match(body, /\{total\}<\/text>/);
+  assert.match(body, />conversations<\/text>/);
+});
+
+test("BestOpportunitySourceCard selects from data.bestOpportunitySource and shows a truthful empty state rather than a fabricated pick, with no unsupported comparison statement", () => {
+  const body = fnBody(dashboard, "function BestOpportunitySourceCard", "\n}\n");
+  assert.match(body, /const best = data\.bestOpportunitySource;/);
+  assert.match(body, /No opportunities found yet in any monitored community\./);
+  assert.equal(/2x|more opportunities than average/i.test(body), false);
+});
+
+test("AiCitedCommunitiesCard renders compact pills from data.aiCitedCommunities with a truthful empty state", () => {
+  const body = fnBody(dashboard, "function AiCitedCommunitiesCard", "\n}\n");
+  assert.match(body, /data\.aiCitedCommunities/);
+  assert.match(body, /styles\.analyticsPill/);
+  assert.match(body, /No AI Visibility citations attributable to a subreddit yet\./);
+});
+
+test("the Top subreddits table still renders with its existing loading/empty states, sourceId-deduplicated rows, and mobile scroll wrapper unchanged", () => {
+  const body = fnBody(dashboard, "function SubredditPerformanceTable", "\n}\n");
+  assert.match(body, /<h2>Top subreddits<\/h2>/);
+  assert.match(body, /Communities producing the most relevant conversations and opportunities\./);
+  assert.match(body, /styles\.subredditTableScroll/);
+  assert.match(body, /styles\.aiVisibilityLoading/);
+  assert.match(body, /No subreddit activity yet/);
+});
+
+test("the Analytics section renders the KPI row, the two charts, the two insight cards, and the table together, in that order", () => {
+  const section = dashboard.slice(dashboard.indexOf('activeSection === "analytics"'), dashboard.indexOf('activeSection === "settings"'));
+  const kpiIndex = section.indexOf("<AnalyticsKpiRow");
+  const chartIndex = section.indexOf("<SubredditActivityChart");
+  const donutIndex = section.indexOf("<DemandMixDonut");
+  const bestIndex = section.indexOf("<BestOpportunitySourceCard");
+  const aiIndex = section.indexOf("<AiCitedCommunitiesCard");
+  const tableIndex = section.indexOf("<SubredditPerformanceTable");
+  assert.ok(kpiIndex > -1 && chartIndex > kpiIndex && donutIndex > chartIndex && bestIndex > donutIndex && aiIndex > bestIndex && tableIndex > aiIndex);
+});
+
+test("the two insight cards sit in a two-column grid so they stretch to a balanced, matching height by default", () => {
+  const cssBody = css.slice(css.indexOf(".analyticsInsightsRow {"), css.indexOf(".analyticsInsightsRow {") + 200);
+  assert.match(cssBody, /grid-template-columns: 1fr 1fr;/);
+});
+
+test("the KPI row, charts row, and insight cards row all collapse to fewer columns on mobile", () => {
+  const mobileBlock = css.slice(css.indexOf(".analyticsKpiRow { grid-template-columns: repeat(2, 1fr); }") - 40, css.indexOf(".analyticsKpiRow { grid-template-columns: repeat(2, 1fr); }") + 250);
+  assert.match(mobileBlock, /\.analyticsChartsRow \{ grid-template-columns: 1fr; \}/);
+  assert.match(mobileBlock, /\.analyticsInsightsRow \{ grid-template-columns: 1fr; \}/);
 });

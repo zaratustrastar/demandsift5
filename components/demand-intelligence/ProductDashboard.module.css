@@ -856,6 +856,162 @@
   min-width: 560px;
 }
 
+/* Analytics screen infographics -- KPI row, activity chart, donut, two
+ * insight cards. All new classes below reuse the existing card shell
+ * (.card), spacing scale, borders, and the same blue accent family
+ * (var(--green)/var(--green-dark)/var(--green-soft)) already used
+ * throughout this stylesheet -- no new visual system, no RedShip colors. */
+.analyticsKpiSection {
+  margin-bottom: 22px;
+}
+.analyticsKpiRow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.analyticsKpiCard {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 16px 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--surface);
+  box-shadow: 0 8px 30px rgba(13, 13, 15, 0.035);
+}
+.analyticsKpiCard strong {
+  font-size: 26px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.analyticsKpiCard span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.analyticsKpiSection > .monitoringTermsNote {
+  display: block;
+  margin-top: 8px;
+}
+
+.analyticsChartsRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 16px;
+  margin-bottom: 16px;
+  align-items: stretch;
+}
+.analyticsInsightsRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.analyticsChartCard,
+.analyticsDonutCard,
+.analyticsInsightCard {
+  padding: 22px 24px;
+}
+.analyticsChartCard h2,
+.analyticsDonutCard h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.analyticsCardSubtitle {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.analyticsActivitySvg {
+  width: 100%;
+  max-width: 560px;
+  height: auto;
+  display: block;
+}
+.analyticsChartLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 12px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.analyticsChartLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.analyticsChartLegend i {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+
+.analyticsDonutCard {
+  display: flex;
+  flex-direction: column;
+}
+.analyticsDonutBody {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  justify-content: center;
+}
+.analyticsDonutSvg {
+  width: 150px;
+  height: 150px;
+}
+.analyticsDonutBody .analyticsChartLegend {
+  margin-top: 0;
+  justify-content: center;
+}
+
+.analyticsInsightCard h3 {
+  margin: 8px 0 10px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.analyticsInsightStats {
+  display: flex;
+  gap: 18px;
+}
+.analyticsInsightStats span {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.analyticsInsightStats strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+.analyticsPillRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.analyticsPill {
+  padding: 5px 11px;
+  border: 1px solid var(--green-soft);
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: var(--green-dark);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+@media (max-width: 900px) {
+  .analyticsKpiRow { grid-template-columns: repeat(2, 1fr); }
+  .analyticsChartsRow { grid-template-columns: 1fr; }
+  .analyticsInsightsRow { grid-template-columns: 1fr; }
+}
+
 .answerTable th,
 .answerTable td {
   padding: 6px 8px;

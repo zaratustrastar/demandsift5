@@ -53,8 +53,40 @@ export type SubredditPerformanceRow = {
   latest: string | null;
 };
 
+/** Client-side mirror of SubredditAnalyticsSummary -- the KPI row's own
+ * data. Deliberately has no trend/delta field: no historical comparison
+ * exists in this data, so the KPI row shows a muted context label
+ * instead of a fabricated percentage. */
+export type SubredditAnalyticsSummary = {
+  relevantConversations: number;
+  opportunities: number;
+  avgRelevance: number | null;
+  aiCitedCommunities: number;
+};
+
+/** Client-side mirror of DemandMixSlice -- the donut's own data. */
+export type DemandMixSlice = {
+  label: string;
+  count: number;
+  percent: number;
+};
+
+/** Client-side mirror of SubredditActivityPoint -- the activity chart's
+ * own data. Only dates with real activity appear; series holds a count
+ * per top-subreddit name, other holds everything else. */
+export type SubredditActivityPoint = {
+  date: string;
+  series: Record<string, number>;
+  other: number;
+};
+
 export type SubredditPerformanceSummary = {
   rows: SubredditPerformanceRow[];
+  summary: SubredditAnalyticsSummary;
+  demandMix: { total: number; slices: DemandMixSlice[] };
+  bestOpportunitySource: SubredditPerformanceRow | null;
+  aiCitedCommunities: SubredditPerformanceRow[];
+  activityTimeline: { series: string[]; points: SubredditActivityPoint[] };
   window: {
     recentRunCount: number;
     hasAiVisibilityData: boolean;
@@ -763,6 +795,243 @@ const SUBREDDIT_COLUMNS: Array<{ id: SubredditSortColumn; label: string }> = [
 ];
 
 /**
+ * Blue-shade palettes for the two Analytics infographics -- all within
+ * the same var(--green)/var(--green-dark)/var(--green-soft) family
+ * already used throughout this stylesheet (the variable name is
+ * misleading; the actual color is Scooptr's blue accent, #2563eb), not
+ * RedShip's colors or a new palette.
+ */
+const ACTIVITY_SERIES_COLORS = ["#1d4ed8", "#2563eb", "#60a5fa"];
+const ACTIVITY_OTHER_COLOR = "#c7d9fb";
+const DONUT_COLORS = ["#1e3a8a", "#1d4ed8", "#2563eb", "#60a5fa", "#c7d9fb"];
+
+function formatShortChartDate(iso: string): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+/**
+ * Four compact KPI cards. Every value comes straight from
+ * SubredditAnalyticsSummary (a pure aggregation of the already-fetched
+ * rows -- see summarizeSubredditAnalytics in subreddit-analytics.ts).
+ * Deliberately no trend arrows or +N% deltas: no previous-period data
+ * exists anywhere in this aggregation to support one truthfully, so a
+ * single shared muted label explains the omission instead of a fabricated
+ * number appearing next to each card.
+ */
+function AnalyticsKpiRow({ data }: { data: SubredditPerformanceSummary | null }) {
+  if (!data) return null;
+  const { summary } = data;
+  const cards = [
+    { label: "Relevant conversations", value: summary.relevantConversations },
+    { label: "Opportunities", value: summary.opportunities },
+    { label: "Avg relevance", value: summary.avgRelevance === null ? "\u2014" : summary.avgRelevance },
+    { label: "AI-cited communities", value: summary.aiCitedCommunities },
+  ];
+  return (
+    <div className={styles.analyticsKpiSection}>
+      <div className={styles.analyticsKpiRow}>
+        {cards.map((card) => (
+          <div className={styles.analyticsKpiCard} key={card.label}>
+            <strong>{card.value}</strong>
+            <span>{card.label}</span>
+          </div>
+        ))}
+      </div>
+      <small className={styles.monitoringTermsNote}>Recent monitoring activity</small>
+    </div>
+  );
+}
+
+/**
+ * "Subreddit activity over time" -- stacked vertical bars, one per
+ * calendar date that actually has activity (see
+ * aggregateSubredditActivityTimeline's own doc comment: no gap-filling,
+ * no fabricated dates). Top 3 subreddits by relevant-conversation count
+ * are their own series; everything else is folded into a single "Other"
+ * segment per bar, matching what was specified rather than inventing a
+ * longer legend. Plain hand-rolled SVG -- no chart library exists in
+ * this project (checked package.json and the whole codebase before
+ * writing this), and a library isn't needed for a chart this simple.
+ */
+function SubredditActivityChart({ data }: { data: SubredditPerformanceSummary | null }) {
+  if (!data) return null;
+  const { series, points } = data.activityTimeline;
+  const chartWidth = 560;
+  const chartHeight = 190;
+  const paddingBottom = 22;
+  const plotHeight = chartHeight - paddingBottom;
+  const maxTotal = Math.max(
+    1,
+    ...points.map((point) => series.reduce((sum, name) => sum + (point.series[name] ?? 0), point.other)),
+  );
+  const step = points.length > 0 ? chartWidth / points.length : chartWidth;
+  const barWidth = Math.min(30, step - 8);
+  const labelEvery = Math.max(1, Math.ceil(points.length / 8));
+
+  return (
+    <section className={`${styles.card} ${styles.analyticsChartCard}`}>
+      <h2>Subreddit activity over time</h2>
+      <p className={styles.analyticsCardSubtitle}>Relevant conversations found across monitored communities.</p>
+      {points.length === 0 ? (
+        <p className={styles.resultsEmpty}>Not enough dated activity yet to chart.</p>
+      ) : (
+        <>
+          <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className={styles.analyticsActivitySvg} role="img" aria-label="Subreddit activity over time">
+            {points.map((point, index) => {
+              const x = index * step + (step - barWidth) / 2;
+              const segments = [
+                ...series.map((name, seriesIndex) => ({ value: point.series[name] ?? 0, color: ACTIVITY_SERIES_COLORS[seriesIndex] })),
+                { value: point.other, color: ACTIVITY_OTHER_COLOR },
+              ];
+              let cursorY = plotHeight;
+              return (
+                <g key={point.date}>
+                  {segments.map((segment, segmentIndex) => {
+                    if (segment.value <= 0) return null;
+                    const height = (segment.value / maxTotal) * plotHeight;
+                    cursorY -= height;
+                    return <rect key={segmentIndex} x={x} y={cursorY} width={barWidth} height={height} fill={segment.color} rx={2} />;
+                  })}
+                  {index % labelEvery === 0 && (
+                    <text x={x + barWidth / 2} y={chartHeight - 6} textAnchor="middle" fontSize="14" fill="#8b93a1">
+                      {formatShortChartDate(point.date)}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+          <div className={styles.analyticsChartLegend}>
+            {series.map((name, index) => (
+              <span key={name}>
+                <i style={{ background: ACTIVITY_SERIES_COLORS[index] }} />r/{name}
+              </span>
+            ))}
+            <span>
+              <i style={{ background: ACTIVITY_OTHER_COLOR }} />Other
+            </span>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * "Demand mix by community" -- a real donut, not an artificial taxonomy:
+ * top 4 subreddits by relevant-conversation count plus a genuine "Other"
+ * slice (see computeDemandMix). Percentages are the real per-slice
+ * counts divided by the real total. Standard SVG donut technique
+ * (stroke-dasharray segments around a circle) -- no chart library.
+ */
+function DemandMixDonut({ data }: { data: SubredditPerformanceSummary | null }) {
+  if (!data) return null;
+  const { total, slices } = data.demandMix;
+  const radius = 60;
+  const circumference = 2 * Math.PI * radius;
+  const segments = slices.reduce<Array<DemandMixSlice & { dash: number; offset: number; color: string }>>((accumulated, slice, index) => {
+    const dash = (slice.percent / 100) * circumference;
+    const offset = accumulated.reduce((sum, previous) => sum + previous.dash, 0);
+    accumulated.push({ ...slice, dash, offset, color: DONUT_COLORS[index] ?? DONUT_COLORS[DONUT_COLORS.length - 1] });
+    return accumulated;
+  }, []);
+
+  return (
+    <section className={`${styles.card} ${styles.analyticsDonutCard}`}>
+      <h2>Demand mix by community</h2>
+      {total === 0 || segments.length === 0 ? (
+        <p className={styles.resultsEmpty}>No relevant conversations yet to chart.</p>
+      ) : (
+        <div className={styles.analyticsDonutBody}>
+          <svg viewBox="0 0 160 160" className={styles.analyticsDonutSvg} role="img" aria-label="Demand mix by community">
+            <g transform="rotate(-90 80 80)">
+              {segments.map((segment) => (
+                <circle
+                  key={segment.label}
+                  cx={80}
+                  cy={80}
+                  r={radius}
+                  fill="none"
+                  stroke={segment.color}
+                  strokeWidth={22}
+                  strokeDasharray={`${segment.dash} ${circumference - segment.dash}`}
+                  strokeDashoffset={-segment.offset}
+                />
+              ))}
+            </g>
+            <text x="80" y="76" textAnchor="middle" fontSize="22" fontWeight="700" fill="var(--ink)">{total}</text>
+            <text x="80" y="94" textAnchor="middle" fontSize="10" fill="var(--muted)">conversations</text>
+          </svg>
+          <div className={styles.analyticsChartLegend}>
+            {segments.map((segment) => (
+              <span key={segment.label}>
+                <i style={{ background: segment.color }} />
+                {segment.label === "Other" ? "Other" : `r/${segment.label}`} &middot; {segment.percent}%
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * "Best opportunity source" -- the subreddit with the real highest
+ * opportunity count (see selectBestOpportunitySource). No "2x better"
+ * or similar comparison is computed; nothing in this data supports one
+ * truthfully.
+ */
+function BestOpportunitySourceCard({ data }: { data: SubredditPerformanceSummary | null }) {
+  if (!data) return null;
+  const best = data.bestOpportunitySource;
+  return (
+    <section className={`${styles.card} ${styles.analyticsInsightCard}`}>
+      <span className={styles.eyebrow}>Best opportunity source</span>
+      {best ? (
+        <>
+          <h3>r/{best.subreddit}</h3>
+          <div className={styles.analyticsInsightStats}>
+            <span><strong>{best.opportunities}</strong> opportunit{best.opportunities === 1 ? "y" : "ies"}</span>
+            {best.avgRelevance !== null && <span><strong>{best.avgRelevance}</strong> avg relevance</span>}
+          </div>
+        </>
+      ) : (
+        <p className={styles.resultsEmpty}>No opportunities found yet in any monitored community.</p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * "Communities influencing AI answers" -- subreddits with at least one
+ * attributable AI Visibility citation (see selectTopAiCitedCommunities),
+ * as compact pills. Only citations where the subreddit was
+ * deterministically extractable from a standard Reddit URL are counted
+ * here at all -- no redd.it resolution, no additional network requests.
+ */
+function AiCitedCommunitiesCard({ data }: { data: SubredditPerformanceSummary | null }) {
+  if (!data) return null;
+  const communities = data.aiCitedCommunities;
+  return (
+    <section className={`${styles.card} ${styles.analyticsInsightCard}`}>
+      <span className={styles.eyebrow}>Communities influencing AI answers</span>
+      {communities.length > 0 ? (
+        <div className={styles.analyticsPillRow}>
+          {communities.map((row) => (
+            <span className={styles.analyticsPill} key={row.subreddit}>r/{row.subreddit}</span>
+          ))}
+        </div>
+      ) : (
+        <p className={styles.resultsEmpty}>No AI Visibility citations attributable to a subreddit yet.</p>
+      )}
+    </section>
+  );
+}
+
+/**
  * "Subreddit performance" -- the Analytics screen's one table for this
  * task (no charts yet, per scope). Reuses the existing .answerTable
  * style (built for the AI Visibility results redesign) rather than
@@ -786,12 +1055,8 @@ function SubredditPerformanceTable({ data }: { data: SubredditPerformanceSummary
   return (
     <section className={styles.card}>
       <div>
-        <span className={styles.eyebrow}>Analytics</span>
-        <h2>Subreddit performance</h2>
-        <p>
-          See which Reddit communities are actually producing relevant conversations and opportunities, and
-          which ones are influencing AI answers. Monitoring config controls where Scooptr is allowed to look.
-        </p>
+        <h2>Top subreddits</h2>
+        <p>Communities producing the most relevant conversations and opportunities.</p>
         <small className={styles.monitoringTermsNote}>Based on the initial scan and recent monitoring activity.</small>
       </div>
       {!data ? (
@@ -2992,7 +3257,7 @@ export function ProductDashboard({
     replies: "Drafts, posted replies and what they did.",
     results: "Anything stored beyond what's already shown elsewhere in this scan.",
     monitoring: "Daily Reddit monitoring, watch terms and your Reddit connection.",
-    analytics: "Where useful demand is actually coming from.",
+    analytics: "See where useful demand is coming from.",
     settings: "Your business profile, competitors and Reddit connection.",
     billing: "Your plan and how to change it.",
   };
@@ -3743,6 +4008,15 @@ export function ProductDashboard({
 
           {activeSection === "analytics" && (
             <div className={styles.lightSection}>
+              <AnalyticsKpiRow data={subredditPerformance} />
+              <div className={styles.analyticsChartsRow}>
+                <SubredditActivityChart data={subredditPerformance} />
+                <DemandMixDonut data={subredditPerformance} />
+              </div>
+              <div className={styles.analyticsInsightsRow}>
+                <BestOpportunitySourceCard data={subredditPerformance} />
+                <AiCitedCommunitiesCard data={subredditPerformance} />
+              </div>
               <SubredditPerformanceTable data={subredditPerformance} />
             </div>
           )}

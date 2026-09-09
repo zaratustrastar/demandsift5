@@ -1872,10 +1872,19 @@ function resultMarketingSummary(
 /**
  * Step 6 in the design handoff's onboarding sequence. Sits between a
  * completed scan and the account-creation step -- shows the real strongest
- * match in full, then the rest as compact rows, so "keep these results" has
+ * match compactly, then the rest as compact rows, so "save results" has
  * something concrete behind it before asking for an account. Every number
  * here comes from data.metrics / the ranked items themselves; nothing is
  * invented to match a target count.
+ *
+ * Redesigned for information hierarchy: the full generated reply used to
+ * render here in full (now only in the Opportunities/Replies workflow
+ * after continuing), and up to 10 raw conversation titles dominated the
+ * lower half of the screen. This version leads with a compact metrics
+ * summary, shows the strongest opportunity as a scannable preview (not
+ * its full reply), caps the secondary list at 3, and moves the 30-day
+ * expiration detail out of the lead position into a small note next to
+ * the CTA it actually explains.
  */
 function ResultsPreview({
   data,
@@ -1891,8 +1900,18 @@ function ResultsPreview({
   const items = useMemo(() => buildResultsItems(data), [data]);
   const summary = useMemo(() => resultMarketingSummary(data), [data]);
   const strongest = items[0];
-  const rest = items.slice(1, 11);
+  const additional = items.slice(1, 4);
   const { highIntentOpportunities } = data.metrics;
+
+  // Every card here is an already-computed existing metric -- nothing new
+  // is calculated for this screen. A metric with nothing behind it is
+  // omitted rather than shown as a hollow zero.
+  const metricCards = [
+    { value: summary.promisingConversations, label: "Relevant conversations" },
+    { value: highIntentOpportunities, label: "High-intent opportunities" },
+    { value: summary.readyReplies, label: "Replies ready" },
+    { value: summary.marketInsights, label: "Market insights" },
+  ].filter((card) => card.value > 0);
 
   return (
     <main className={styles.scanScreen}>
@@ -1901,54 +1920,65 @@ function ResultsPreview({
         <div className={styles.scanKicker}>
           {inputMode === "context" ? "Scan complete" : `Scan complete · ${domain}`}
         </div>
-        <h1>Here&apos;s what we found</h1>
+        <h1>We found real demand for {data.business.name}</h1>
         <p className={styles.resultsSummary}>
-          {summary.promisingConversations > 0
-            ? `${summary.promisingConversations} promising Reddit conversation${summary.promisingConversations === 1 ? "" : "s"} surfaced and ranked by relevance`
-            : summary.marketInsights + summary.competitorSignals > 0
-              ? `${summary.marketInsights + summary.competitorSignals} useful market finding${summary.marketInsights + summary.competitorSignals === 1 ? "" : "s"} surfaced`
-              : "Your first market scan is ready for review"}
-          {highIntentOpportunities > 0 ? `, including ${highIntentOpportunities} high-intent lead${highIntentOpportunities === 1 ? "" : "s"}` : ""}
-          {summary.readyReplies > 0 ? `, with ${summary.readyReplies} repl${summary.readyReplies === 1 ? "y" : "ies"} ready to use` : ""}.
+          Scooptr analyzed Reddit conversations and ranked the strongest opportunities for you.
         </p>
+
+        {metricCards.length > 0 && (
+          <div className={styles.resultsMetricsGrid}>
+            {metricCards.map((card) => (
+              <div className={styles.resultsMetricCard} key={card.label}>
+                <strong>{card.value}</strong>
+                <span>{card.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {strongest && (
           <div className={styles.resultsPrimaryCard}>
+            <span className={styles.resultsPrimaryLabel}>Your strongest opportunity</span>
+            <span className={styles.resultsRelevanceBadge}>
+              <strong>{Math.round(strongest.reliability)}</strong>
+              <span>{strongest.reliability >= 85 ? "High relevance" : "Relevance"}</span>
+            </span>
             {strongest.kind === "opportunity" ? (
               <>
-                <span className={styles.resultsPrimaryMeta}>
-                  {strongest.opportunity.subreddit} &middot; {strongest.opportunity.authorLabel}
-                </span>
+                <span className={styles.resultsPrimaryMeta}>{strongest.opportunity.subreddit}</span>
                 <h2 className={styles.resultsPrimaryTitle}>{strongest.opportunity.title}</h2>
                 {strongest.opportunity.matchReasons[0] && (
                   <p className={styles.resultsPrimaryWhy}>{strongest.opportunity.matchReasons[0]}</p>
                 )}
-                {strongest.opportunity.reply?.draft && (
-                  <p className={styles.resultsPrimaryReply}>{strongest.opportunity.reply.draft}</p>
-                )}
               </>
             ) : (
               <>
-                <span className={styles.resultsPrimaryMeta}>
-                  {strongest.conversation.subreddit} &middot; {strongest.conversation.authorLabel}
-                </span>
+                <span className={styles.resultsPrimaryMeta}>{strongest.conversation.subreddit}</span>
                 <h2 className={styles.resultsPrimaryTitle}>{strongest.conversation.title}</h2>
                 <p className={styles.resultsPrimaryWhy}>{strongest.conversation.summary}</p>
               </>
             )}
+            {/* Same underlying action as the main CTA below -- there is
+             * still only one real next step available before an account
+             * exists, this just offers it where attention already is. */}
+            <button type="button" className={styles.resultsPrimaryAction} onClick={onKeep}>
+              Review opportunity →
+            </button>
           </div>
         )}
 
-        {rest.length > 0 && (
+        {additional.length > 0 && (
           <div className={styles.resultsRowList}>
-            {rest.map((item) =>
+            {additional.map((item) =>
               item.kind === "opportunity" ? (
                 <div className={styles.resultsRow} key={`opportunity-${item.opportunity.id}`}>
+                  <span className={styles.resultsRowScore}>{Math.round(item.reliability)}</span>
                   <span className={styles.resultsRowSub}>{item.opportunity.subreddit}</span>
                   <span className={styles.resultsRowTitle}>{item.opportunity.title}</span>
                 </div>
               ) : (
                 <div className={styles.resultsRow} key={`conversation-${item.conversation.id}`}>
+                  <span className={styles.resultsRowScore}>{Math.round(item.reliability)}</span>
                   <span className={styles.resultsRowSub}>{item.conversation.subreddit}</span>
                   <span className={styles.resultsRowTitle}>{item.conversation.title}</span>
                 </div>
@@ -1957,11 +1987,21 @@ function ResultsPreview({
           </div>
         )}
 
+        <div className={styles.resultsOngoingValue}>
+          <strong>This doesn&apos;t have to be a one-time scan</strong>
+          <p>
+            Scooptr can keep watching Reddit for new conversations, track competitors and check how
+            ChatGPT, Gemini and Perplexity talk about your business.
+          </p>
+        </div>
+
         <p className={styles.resultsFooterNote}>
-          These stay on this browser for 30 days unless you keep them.
+          Save your scan to keep these results and continue monitoring.
+          <br />
+          Unsaved results expire after 30 days.
         </p>
         <button className={styles.tryAgain} type="button" onClick={onKeep} style={{ background: "var(--green)", color: "#fff", borderColor: "var(--green)" }}>
-          Keep these results
+          Save my results →
         </button>
       </section>
     </main>

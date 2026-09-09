@@ -198,6 +198,7 @@
   .liveResultsHeader { flex-direction: column; }
   .liveMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .liveCardMeta { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .resultsMetricsGrid { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -696,6 +697,103 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
   color: var(--muted);
   font-size: 14px;
 }
+.resultsMetricsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin: 0 0 22px;
+}
+.resultsMetricCard {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+.resultsMetricCard strong {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.resultsMetricCard span {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+.resultsPrimaryLabel {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.resultsRelevanceBadge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-bottom: 10px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: var(--mint);
+}
+.resultsRelevanceBadge strong {
+  color: var(--green-dark);
+  font-size: 13px;
+  font-weight: 800;
+}
+.resultsRelevanceBadge span {
+  color: var(--green-dark);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.resultsPrimaryAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--green-dark);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.resultsPrimaryAction:hover {
+  text-decoration: underline;
+}
+.resultsRowScore {
+  flex: 0 0 auto;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--green-dark);
+}
+.resultsOngoingValue {
+  margin: 22px 0 20px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: #fafafa;
+}
+.resultsOngoingValue strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13.5px;
+  color: var(--ink);
+}
+.resultsOngoingValue p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
 .resultsPrimaryCard {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -723,15 +821,6 @@ p.slHeroLead { font-size: 20px; line-height: 1.5; color: var(--sl-text-muted); m
   border-left: 2px solid var(--green);
   color: #27272a;
   font-size: 13.5px;
-  line-height: 1.5;
-}
-.resultsPrimaryReply {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: 9px;
-  background: var(--mint);
-  color: #1e3a8a;
-  font-size: 13px;
   line-height: 1.5;
 }
 .resultsRowList {

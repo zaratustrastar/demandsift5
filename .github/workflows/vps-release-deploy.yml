@@ -1,7 +1,8 @@
 name: DemandSift trusted VPS release
-# Release marker: Redesign of the Scan Complete / Results completion
-# screen (ResultsPreview) -- value-first information hierarchy, no
-# backend/logic/persistence/auth changes (2026-09-09).
+# Release marker: Analytics screen redesign -- KPI row, activity chart,
+# demand-mix donut, two insight cards (hand-rolled SVG, no new
+# dependency). Top subreddits table renamed, behavior unchanged. No
+# schema/scraping/ranking changes (2026-09-09).
 
 on:
   push:

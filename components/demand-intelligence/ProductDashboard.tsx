@@ -3289,7 +3289,18 @@ export function ProductDashboard({
 
   const hasAnyRelevantContent = carouselItems.length > 0;
 
-  const navSections = data.navigation ?? [];
+  const isFree = accessLevel === "free";
+  // "Results" only ever shows something real for a free-tier user who
+  // hasn't upgraded yet -- additionalLockedCounts (its whole basis) is
+  // hardcoded to all zeros for any fullAccess viewer (presenter.ts), so
+  // for every paid/authenticated user this tab is structurally
+  // guaranteed to always read "Nothing else is hidden," on every scan,
+  // forever. Hidden here rather than deleted outright: Opportunities
+  // and Replies locked-counts have no other home the way Insights'/
+  // Competitors' own already do (their own screens already show "{N}
+  // more ... stored" inline), so a free-tier viewer still needs this
+  // tab to see those two specifically.
+  const navSections = (data.navigation ?? []).filter((item) => isFree || item.id !== "results");
   const activeNavItem = navSections.find((item) => item.id === activeSection);
   const sectionSubtitles: Record<NavigationSectionId, string> = {
     dashboard: "The strongest market signals from this scan.",
@@ -3305,7 +3316,6 @@ export function ProductDashboard({
     billing: "Your plan and how to change it.",
   };
   const goToSection = (id: NavigationSectionId) => () => setActiveSection(id);
-  const isFree = accessLevel === "free";
 
   const topCarouselItems = carouselItems.slice(0, 3);
   // Lead with the value the scan actually produced. "Qualified opportunity"
@@ -3943,7 +3953,7 @@ export function ProductDashboard({
             </div>
           )}
 
-          {activeSection === "results" && (
+          {activeSection === "results" && isFree && (
             <div className={styles.lightSection}>
               {data.lockedCounts ? (() => {
                 // These are counts of ADDITIONAL, currently-hidden findings

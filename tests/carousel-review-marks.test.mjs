@@ -154,7 +154,7 @@ test("the position indicator (e.g. 'Reviewed -> 1 of 14') reflects the filtered 
 
 test("an empty filter shows a simple 'No <filter> conversations yet' message instead of the carousel silently rendering nothing", () => {
   const carouselStart = dashboard.indexOf("function OpportunityCarousel");
-  const carouselBody = dashboard.slice(carouselStart, carouselStart + 4000);
+  const carouselBody = dashboard.slice(carouselStart, carouselStart + 5000);
   assert.match(carouselBody, /No \{emptyLabel\} conversations yet\./);
   assert.equal(carouselBody.includes("if (!item) return null;"), false);
 });

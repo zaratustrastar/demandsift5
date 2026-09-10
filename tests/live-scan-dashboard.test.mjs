@@ -33,7 +33,7 @@ test("reply state is public but safe, and edited live drafts survive final repor
   assert.match(presenter, /replyStates: Object\.values\(store\.replies\)/);
   assert.match(presenter, /safeErrorCode/);
   assert.match(experience, /preserveLiveReplyEdits\(complete, liveReplyEdits\)/);
-  assert.match(experience, /Reply being prepared/);
+  assert.match(experience, /No reply yet/);
   assert.match(experience, /Reply needs another attempt/);
 });
 

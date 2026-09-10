@@ -2638,21 +2638,32 @@ function RelevanceBadge({ score }: { score: number }) {
  */
 function CarouselOpportunityCard({
   opportunity,
+  currentDraft,
   isRevealed,
   onToggleReply,
+  isCreatingReply,
+  onCreateReply,
   reviewStatus,
   onSetReviewStatus,
   reliability,
 }: {
   opportunity: RedditOpportunity;
+  /** drafts[opportunity.id] from the parent if a reply has already been
+   * generated on demand this session, else undefined -- opportunity.reply.draft
+   * itself starts empty for every opportunity now (see scan-workflow.ts:
+   * reply generation is on-demand only, never automatic during a scan). */
+  currentDraft: string | undefined;
   isRevealed: boolean;
   onToggleReply: () => void;
+  isCreatingReply: boolean;
+  onCreateReply: () => void;
   reviewStatus: "reviewed" | "declined" | "replied" | null;
   onSetReviewStatus: (status: "reviewed" | "declined" | "replied") => void;
   reliability: number;
 }) {
   const tags = reliabilitySignalTags(opportunity);
   const whyItMatters = opportunity.matchReasons[0] ?? opportunity.classification.customerProblem;
+  const hasReply = Boolean((currentDraft ?? opportunity.reply.draft)?.trim());
 
   return (
     <article className={styles.opportunityCard}>
@@ -2687,10 +2698,22 @@ function CarouselOpportunityCard({
       )}
 
       <div className={styles.carouselActions}>
-        <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
-          <Icon name="refresh" size={14} />
-          {isRevealed ? "Hide reply" : "Generate reply"}
-        </button>
+        {hasReply ? (
+          <button className={styles.primaryButton} type="button" onClick={onToggleReply}>
+            <Icon name="refresh" size={14} />
+            {isRevealed ? "Hide reply" : "Suggested reply ready"}
+          </button>
+        ) : (
+          <button
+            className={styles.primaryButton}
+            type="button"
+            disabled={isCreatingReply}
+            onClick={onCreateReply}
+          >
+            <Icon name="refresh" size={14} />
+            {isCreatingReply ? "Generating reply…" : "Generate reply"}
+          </button>
+        )}
         {opportunity.permalink && !opportunity.isMock && (
           <a
             className={styles.secondaryButton}
@@ -2839,7 +2862,7 @@ function OpportunityCarousel({
   publishedOpportunityIds: string[];
   onDraftChange: (opportunityId: string, value: string) => void;
   onToggleEdit: (opportunityId: string) => void;
-  onRegenerate: (opportunity: RedditOpportunity) => void;
+  onRegenerate: (opportunity: RedditOpportunity) => Promise<void>;
   onCopy: (opportunityId: string) => void;
   onPublish: (opportunity: RedditOpportunity) => void;
   redditConnection: RedditConnectionStatus;
@@ -2852,6 +2875,19 @@ function OpportunityCarousel({
 }) {
   const [index, setIndex] = useState(0);
   const [revealedReplyIds, setRevealedReplyIds] = useState<Set<string>>(new Set());
+  // Only one card is ever on screen at a time in this Tinder-style
+  // carousel, so a single id (not a Set) is enough to track which
+  // opportunity's on-demand "Generate reply" call is in flight.
+  const [generatingOpportunityId, setGeneratingOpportunityId] = useState<string | null>(null);
+  const handleCreateOpportunityReply = async (opportunity: RedditOpportunity) => {
+    if (generatingOpportunityId) return;
+    setGeneratingOpportunityId(opportunity.id);
+    try {
+      await onRegenerate(opportunity);
+    } finally {
+      setGeneratingOpportunityId((current) => (current === opportunity.id ? null : current));
+    }
+  };
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("new");
   // Tracks which filter `index` currently applies to, so a filter change
   // can reset the position back to the first matching conversation. Set
@@ -2942,8 +2978,11 @@ function OpportunityCarousel({
       {item.kind === "opportunity" ? (
         <CarouselOpportunityCard
           opportunity={item.opportunity}
+          currentDraft={drafts[item.opportunity.id]}
           isRevealed={isRevealed}
           onToggleReply={() => toggleReply(item.id)}
+          isCreatingReply={generatingOpportunityId === item.opportunity.id}
+          onCreateReply={() => void handleCreateOpportunityReply(item.opportunity)}
           reviewStatus={currentReviewStatus}
           onSetReviewStatus={handleSetReviewStatus}
           reliability={item.reliability}
@@ -3721,7 +3760,7 @@ export function ProductDashboard({
                         onToggleEdit={(opportunityId) =>
                           setEditingReplyId((current) => (current === opportunityId ? null : opportunityId))
                         }
-                        onRegenerate={(opportunity) => void regenerateReply(opportunity)}
+                        onRegenerate={(opportunity) => regenerateReply(opportunity)}
                         onCopy={(opportunityId) => void copyReply(opportunityId)}
                         onPublish={(opportunity) => void publishReply(opportunity)}
                         redditConnection={redditConnection}

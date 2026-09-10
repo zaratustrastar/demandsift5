@@ -130,8 +130,8 @@ const STAGE_META: Record<string, { label: string; detail: string }> = {
     detail: "Qualifying first, then ranking and deduplicating people by Reddit author.",
   },
   replies: {
-    label: "Drafting a reply",
-    detail: "Generating one grounded reply only when the conversation is appropriate to join.",
+    label: "Preparing reply-eligible conversations",
+    detail: "Flagging conversations worth a reply -- generate each one on demand from the carousel.",
   },
 };
 
@@ -1606,7 +1606,7 @@ function UwField({ label, value, values, ready }: { label: string; value?: strin
 function liveReplyLabel(state: "ready" | "pending" | "failed" | undefined): string {
   if (state === "ready") return "Reply ready";
   if (state === "failed") return "Reply needs another attempt";
-  return "Reply being prepared";
+  return "No reply yet";
 }
 
 function LiveScanDashboard({
@@ -1744,7 +1744,7 @@ function LiveScanDashboard({
                             onChange={event => onReplyEdit(reply.id, event.target.value)} />
                         ) : <p>{replyState === "failed" ? "The saved conversation is still usable; reply generation can retry safely."
                           : replyState === "ready" ? "The reply is ready but its text is not included with the current access level."
-                            : "The verified conversation is ready while its grounded draft is generated."}</p>}
+                            : "No reply generated yet -- create one on demand from the carousel."}</p>}
                       </div>
                     </article>
                   );
@@ -1780,7 +1780,7 @@ function LiveScanDashboard({
                               onChange={event => onReplyEdit(reply.id, event.target.value)} />
                           ) : <p>{replyState === "failed" ? "The conversation remains available without a draft."
                             : replyState === "ready" ? "The reply is ready but its text is not included with the current access level."
-                              : "A grounded reply is being prepared independently of lead status."}</p>}
+                              : "No reply generated yet -- create one on demand from the carousel."}</p>}
                         </div>
                       )}
                     </article>

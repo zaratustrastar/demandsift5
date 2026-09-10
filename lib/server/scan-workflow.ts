@@ -229,9 +229,9 @@ const STAGES: ScanStage[] = [
   },
   {
     id: "replies",
-    label: "Drafting a reply",
+    label: "Preparing reply-eligible conversations",
     status: "pending",
-    detail: "Generating one grounded reply only when the conversation is appropriate to join.",
+    detail: "Flagging conversations worth a reply -- generate each one on demand from the carousel.",
   },
 ];
 
@@ -1095,11 +1095,6 @@ function intentForQualification(qualification: DeepQualification): OpportunityRe
 
 function communityRiskForUi(risk: DeepQualification["communityRisk"]): OpportunityRecord["communityRisk"] {
   return risk === "unknown" ? "medium" : risk;
-}
-
-function fallbackReply(profile: ScanBusinessProfile): string {
-  const fact = profile.features[0] ?? profile.problemsSolved[0] ?? profile.summary;
-  return `A practical way to narrow this down is to start with the workflow that is causing the most friction, then compare options against setup effort, day-to-day maintenance, and the specific handoffs your team needs to keep visible.\n\nFull disclosure: I work with ${profile.name}. Our public site describes ${fact}. If that directly matches what you are trying to fix, it may be worth including in the same comparison, but I would test it against those workflow criteria rather than choosing on feature count alone.`;
 }
 
 function buildFallbackInsights(
@@ -2787,19 +2782,24 @@ export async function runScan(
       const sameScan = checkpoint?.inputVersion === inputVersion
         ? existingReplies.get(task.replyId) ?? checkpoint.reply : undefined;
       try {
-        let content = sameScan?.content.trim() ? sameScan.content : task.previousContent ?? "";
-        if (!content && aiProvider) {
-          const generated = await aiProvider.generateReply({ business, opportunity: task.row, models,
-            instructions: task.row.qualification.replyAngle });
-          usage.push(usageRecord(generated, "reply-generation"));
-          content = generated.value.body.trim();
-        } else if (!content && discovery.sourceMode === "mock") content = fallbackReply(profile);
-        if (!content) throw new Error("A reply-eligible conversation did not produce a grounded reply.");
+        // Reply generation is on-demand only now (the carousel's "Create
+        // reply"/"Generate reply" actions, see candidate-reply-service.ts
+        // and reply-service.ts's regenerateReply) -- the scan itself no
+        // longer calls the AI provider or the mock fallback to produce
+        // content here. Reusing an already-computed value (this same scan
+        // run's own checkpoint, or a prior scan's saved content for the
+        // same input) is not new generation, so that reuse is preserved
+        // unchanged: a reply a person already generated is never lost on
+        // a re-scan. An empty result is the new normal starting state for
+        // every reply-eligible item, not a failure -- it no longer throws.
+        const content = sameScan?.content.trim() ? sameScan.content : task.previousContent ?? "";
         const draft: ReplyRecord = sameScan?.content.trim() ? sameScan : { ...placeholder(task), content, createdAt: now, updatedAt: now };
         await repository.saveReply(draft, owner);
         scan.replyCheckpoint![task.replyId] = { inputVersion, reply: draft };
-        if (scan.runConfiguration!.flags.partialResults) publishPartialReply(scan, draft, "ready");
-        runtimeProgress(scan).results.repliesReady = new Set(Object.values(scan.replyCheckpoint!).map(value => value.reply.id)).size;
+        if (scan.runConfiguration!.flags.partialResults) publishPartialReply(scan, draft, content ? "ready" : "pending");
+        runtimeProgress(scan).results.repliesReady = new Set(
+          Object.values(scan.replyCheckpoint!).filter(value => value.reply.content.trim()).map(value => value.reply.id),
+        ).size;
         await persistScan(scan);
         return draft;
       } catch (error) {
@@ -2815,14 +2815,17 @@ export async function runScan(
     const insightSet = await insightPromise;
     if (replyFailure) throw replyFailure;
     const replies = replyDrafts.filter((reply): reply is ReplyRecord => reply !== null);
-    runtimeProgress(scan).results.repliesReady = new Set(replies.map(reply => reply.id)).size;
+    const readyReplies = replies.filter((reply) => reply.content.trim());
+    runtimeProgress(scan).results.repliesReady = new Set(readyReplies.map(reply => reply.id)).size;
     await setStage(
       scan,
       "replies",
       "complete",
-      replies.length > 0
-        ? `${replies.length} complete grounded repl${replies.length === 1 ? "y" : "ies"} prepared for qualified conversations.`
-        : "No conversation was appropriate for reply generation in this scan.",
+      readyReplies.length > 0
+        ? `${readyReplies.length} repl${readyReplies.length === 1 ? "y" : "ies"} reused from a prior scan; the rest generate on demand from the carousel.`
+        : replies.length > 0
+          ? `${replies.length} conversation${replies.length === 1 ? "" : "s"} qualified for a reply -- generate each on demand from the carousel.`
+          : "No conversation was appropriate for reply generation in this scan.",
     );
 
     const generatedReplyIds = new Set(replies.filter((reply) => reply.content.trim()).map((reply) => reply.opportunityId));

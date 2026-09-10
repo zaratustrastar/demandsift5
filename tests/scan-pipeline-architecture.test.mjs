@@ -15,6 +15,15 @@ const scanStatusRoute = await readFile(
   "utf8",
 );
 
+const replyService = await readFile(
+  new URL("../lib/server/reply-service.ts", import.meta.url),
+  "utf8",
+);
+const candidateReplyService = await readFile(
+  new URL("../lib/server/candidate-reply-service.ts", import.meta.url),
+  "utf8",
+);
+
 function position(fragment) {
   const index = source.indexOf(fragment);
   assert.notEqual(index, -1, `Expected active scan source to contain ${fragment}`);
@@ -129,10 +138,14 @@ test("the classified pool is bounded so acquisition volume cannot blow up LLM co
   assert.match(source, /classifiedCandidates: prefilteredSurvivors\.length/);
 });
 
-test("active scan does not use batch reply generation", () => {
+test("reply generation is on-demand only now -- the active scan itself never calls the AI provider to generate reply content (see scan-workflow.ts's reply-generation loop, which now only reuses already-computed content or leaves it empty), and neither on-demand path (regenerateReply, createCandidateReply) uses a batch API", () => {
+  assert.equal(source.includes("aiProvider.generateReply("), false);
   assert.equal(source.includes("generateRepliesWithOpenAi"), false);
   assert.equal(source.includes("generateReplies("), false);
-  assert.ok(source.includes("aiProvider.generateReply("));
+  assert.equal(replyService.includes("generateRepliesWithOpenAi"), false);
+  assert.equal(candidateReplyService.includes("generateRepliesWithOpenAi"), false);
+  assert.ok(replyService.includes("provider.generateReply("));
+  assert.ok(candidateReplyService.includes("provider.generateReply("));
 });
 
 test("deterministic lead invariants are checked before ranking is calculated", () => {

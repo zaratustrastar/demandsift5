@@ -4,12 +4,19 @@ import test from "node:test";
 import ts from "typescript";
 
 /**
- * Reply generation (the "replies" stage in scan-workflow.ts) used to draft
- * one reply at a time, in a plain `for` loop, across two separate passes
- * (reply-eligible opportunities, then relevant-but-non-lead conversations).
- * Both classes now share one priority-ordered queue through the bounded
- * mapConcurrently() helper. Independent workers drain before a required
- * failure is rethrown, allowing completed drafts to survive and be reused.
+ * Reply generation used to draft one reply at a time, in a plain `for`
+ * loop, across two separate passes (reply-eligible opportunities, then
+ * relevant-but-non-lead conversations), automatically during the scan.
+ * Both classes still share one priority-ordered queue through the bounded
+ * mapConcurrently() helper below, but the scan itself no longer calls the
+ * AI provider at all -- reply generation is on-demand only now (the
+ * carousel's "Generate reply"/"Create reply" actions, see
+ * reply-service.ts's regenerateReply and candidate-reply-service.ts's
+ * createCandidateReply). The queue's own concurrency/ordering/failure-
+ * isolation behavior is unchanged and still worth testing directly, since
+ * whatever runs through it (content reuse from a checkpoint or a prior
+ * scan, now that fresh generation itself doesn't happen here) still needs
+ * the same bounded-concurrency, strict-vs-best-effort semantics.
  *
  * mapConcurrently itself is dependency-free (pure Promise/Array logic), so
  * these tests extract and compile just that function from the real source
@@ -147,11 +154,15 @@ test("lead and relevant-conversation replies share one bounded queue", () => {
   assert.equal(scanWorkflowSource.includes("mapConcurrently(relevantReplyEligible"), false);
 });
 
-test("required lead reply failure still fails the scan", () => {
+test("reply generation is on-demand only now -- neither the strict-required nor the best-effort branch attempts AI generation or throws on empty content during the scan itself; only a genuine infrastructure failure (e.g. persistScan) would still hit the strict-vs-best-effort split below", () => {
   const start = scanWorkflowSource.indexOf("try { replyDrafts = await mapConcurrently(replyTasks");
   const end = scanWorkflowSource.indexOf("const insightSet = await insightPromise", start);
   const block = scanWorkflowSource.slice(start, end);
-  assert.match(block, /throw new Error\("A reply-eligible conversation did not produce a grounded reply\."\);/);
+  assert.equal(block.includes("aiProvider.generateReply("), false);
+  assert.equal(block.includes('throw new Error("A reply-eligible conversation did not produce a grounded reply.")'), false);
+  // The strict-vs-best-effort split itself is untouched: a genuine failure
+  // (not "no content yet", which is no longer an error) in saving a
+  // strict/required task's reply still fails the whole scan.
   assert.match(block, /if \(task\.strict\) throw error;/);
 });
 

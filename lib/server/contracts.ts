@@ -126,9 +126,11 @@ export type MarketIntelligenceRecord = {
   replyScore: number;
   /**
    * Present only when this relevant (non-lead) conversation was reply-eligible
-   * and a grounded reply was drafted for it. Never implies leadStatus or
-   * potentialCustomer classification -- it only means a helpful, disclosed
-   * reply is available to review, matched via ReplyRecord.opportunityId.
+   * -- not necessarily that a reply has been generated yet, since generation
+   * is on-demand now (see scan-workflow.ts and candidate-reply-service.ts).
+   * Never implies leadStatus or potentialCustomer classification -- it only
+   * means a helpful, disclosed reply is available to review or generate,
+   * matched via ReplyRecord.opportunityId.
    */
   replyId?: string;
 };

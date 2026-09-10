@@ -1,10 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: Hide the "Results" tab for full-access users -- its
-# whole basis (additionalLockedCounts) is hardcoded to all zeros
-# whenever fullAccess is true (presenter.ts), so it was structurally
-# guaranteed to always be empty for every paid user. Kept intact for
-# free-tier viewers, where Opportunities/Replies locked-counts have no
-# other home (2026-09-10).
+# Release marker: Removed the duplicate Daily Reddit monitoring panel
+# from Overview (RedditMonitoringPanel was the same component, same
+# state/handlers, rendered twice) -- Monitoring config is now the sole
+# canonical surface. Overview's "Worth your time today" now fills the
+# freed full width. No backend changes (2026-09-10).
 
 on:
   push:

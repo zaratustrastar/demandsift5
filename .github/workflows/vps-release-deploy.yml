@@ -1,9 +1,10 @@
 name: DemandSift trusted VPS release
-# Release marker: Top subreddits -- replaced the HTML <table> with a
-# CSS Grid data list sharing one grid-template-columns definition
-# between the header and every row, fixing residual header/value
-# column drift. Real Reddit logo asset (public/logos/reddit-mark.png)
-# replaces the CSS glyph. Visual/structural only (2026-09-09).
+# Release marker: Hide the "Results" tab for full-access users -- its
+# whole basis (additionalLockedCounts) is hardcoded to all zeros
+# whenever fullAccess is true (presenter.ts), so it was structurally
+# guaranteed to always be empty for every paid user. Kept intact for
+# free-tier viewers, where Opportunities/Replies locked-counts have no
+# other home (2026-09-10).
 
 on:
   push:

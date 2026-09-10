@@ -3272,21 +3272,6 @@ export function ProductDashboard({
     );
   }, [rankedOpportunities, relevantConversations, data.scanEvidence]);
 
-  const sessionOnlyDraftedConversations = useMemo(
-    () =>
-      carouselItems
-        .filter((item): item is Extract<CarouselItem, { kind: "relevant" }> => item.kind === "relevant")
-        .map((item) => item.conversation)
-        .filter((conversation) => Boolean(createdReplies[conversation.id]?.trim()))
-        .map((conversation) => ({
-          id: conversation.id,
-          subreddit: conversation.subreddit,
-          title: conversation.title,
-          draftText: createdReplies[conversation.id],
-        })),
-    [carouselItems, createdReplies],
-  );
-
   const hasAnyRelevantContent = carouselItems.length > 0;
 
   const isFree = accessLevel === "free";
@@ -3300,7 +3285,14 @@ export function ProductDashboard({
   // Competitors' own already do (their own screens already show "{N}
   // more ... stored" inline), so a free-tier viewer still needs this
   // tab to see those two specifically.
-  const navSections = (data.navigation ?? []).filter((item) => isFree || item.id !== "results");
+  // "Replies" is hidden unconditionally for everyone -- unlike Results
+  // (still real for free-tier viewers), this one has no access-level
+  // dependency: it's a duplicate, less useful presentation of the same
+  // opportunities the Tinder-style carousel already covers one at a
+  // time with the full generate/edit/publish flow.
+  const navSections = (data.navigation ?? []).filter(
+    (item) => (isFree || item.id !== "results") && item.id !== "replies",
+  );
   const activeNavItem = navSections.find((item) => item.id === activeSection);
   const sectionSubtitles: Record<NavigationSectionId, string> = {
     dashboard: "The strongest market signals from this scan.",
@@ -3869,72 +3861,6 @@ export function ProductDashboard({
                   <span className={styles.emptyFoot}>from this scan</span>
                 </div>
               )}
-            </div>
-          )}
-
-          {activeSection === "replies" && (
-            <div className={styles.lightSection}>
-              <div className={styles.simpleCard}>
-                <span className={styles.simpleCardTitle}>
-                  {publishedOpportunityIds.length} posted &middot;{" "}
-                  {rankedOpportunities.length + sessionOnlyDraftedConversations.length} drafted
-                </span>
-                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
-                  Nothing is ever posted without you reading it first.
-                </p>
-              </div>
-              {sessionOnlyDraftedConversations.map((conversation) => (
-                <div key={conversation.id} className={styles.simpleCard}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                    <span className={styles.simpleCardEyebrow}>{conversation.subreddit}</span>
-                    <span className={styles.todayTag} style={{ background: "#f4f4f5", color: "#52525b" }}>
-                      draft
-                    </span>
-                  </div>
-                  <span className={styles.simpleCardTitle}>{conversation.title}</span>
-                  <p className={styles.simpleCardBody}>{conversation.draftText}</p>
-                  <button
-                    type="button"
-                    className={styles.ghostButton}
-                    onClick={goToSection("opportunities")}
-                    style={{ alignSelf: "flex-start" }}
-                  >
-                    Open in Opportunities
-                  </button>
-                </div>
-              ))}
-              {rankedOpportunities.map((opportunity) => {
-                const isPublished = publishedOpportunityIds.includes(opportunity.id);
-                return (
-                  <div key={opportunity.id} className={styles.simpleCard}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                      <span className={styles.simpleCardEyebrow}>{opportunity.subreddit}</span>
-                      <span
-                        className={styles.todayTag}
-                        style={
-                          isPublished
-                            ? { background: "var(--green-soft)", color: "var(--green-dark)" }
-                            : { background: "#f4f4f5", color: "#52525b" }
-                        }
-                      >
-                        {isPublished ? "posted" : "draft"}
-                      </span>
-                    </div>
-                    <span className={styles.simpleCardTitle}>{opportunity.title}</span>
-                    <p className={styles.simpleCardBody}>
-                      {drafts[opportunity.id] ?? opportunity.reply.draft}
-                    </p>
-                    <button
-                      type="button"
-                      className={styles.ghostButton}
-                      onClick={goToSection("opportunities")}
-                      style={{ alignSelf: "flex-start" }}
-                    >
-                      Open in Opportunities
-                    </button>
-                  </div>
-                );
-              })}
             </div>
           )}
 

@@ -3,19 +3,23 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 /**
- * Two dashboard-honesty bugs, found by walking the product as a first-time
- * user rather than reading the code:
+ * Dashboard-honesty and history notes:
  *
  * 1. The "Results" tab rendered `data.lockedCounts` (additional findings
  *    hidden behind a paywall) under the headline "Everything this scan
  *    found." When nothing was hidden -- full access, or just a small scan --
  *    every count is legitimately zero, so the tab read as "this scan found
  *    nothing," directly contradicting the Overview tab's real totals.
- * 2. The "Replies" tab counted and listed only `data.opportunities` (server-
- *    persisted). A reply generated live via "Create reply" on a relevant-
- *    but-not-yet-an-opportunity conversation is held in local-only
- *    `createdReplies` state and never reached this tab, so a reply you had
- *    just successfully drafted did not appear, and "drafted" undercounted.
+ * 2. The "Replies" tab (which counted and listed drafted/posted replies
+ *    separately from the Opportunities carousel, including a fix for a
+ *    former undercounting bug there) has since been removed entirely --
+ *    it duplicated the same opportunities the Tinder-style carousel
+ *    already covers one at a time with the full generate/edit/publish
+ *    flow. Its own sessionOnlyDraftedConversations derivation was
+ *    removed along with it. The underlying carouselItems invariant that
+ *    fix depended on (built from both relevantConversations AND
+ *    scanEvidence.candidates) is still worth guarding below, since
+ *    carouselItems itself is still very much alive and used elsewhere.
  */
 
 const read = async (path) => readFile(new URL(path, import.meta.url), "utf8");
@@ -46,45 +50,14 @@ test("the Results tab no longer claims 'Everything this scan found' for a locked
   assert.match(results, /More is stored than shown here/);
 });
 
-test("the Replies tab counts and lists replies created this session via 'Create reply'", () => {
-  const replies = sectionSource(
-    'activeSection === "replies"',
-    'activeSection === "results"',
-  );
-  assert.match(replies, /sessionOnlyDraftedConversations/);
-  // The headline count must include session-only drafts, not just
-  // server-persisted opportunities.
-  assert.match(
-    replies,
-    /rankedOpportunities\.length\s*\+\s*sessionOnlyDraftedConversations\.length/,
-  );
-  // The list itself must render those session-only drafts, not just count them.
-  assert.match(replies, /sessionOnlyDraftedConversations\.map/);
+test("the Replies tab and its content block no longer exist -- removed as a duplicate of the Opportunities carousel", () => {
+  assert.equal(/activeSection === "replies"/.test(dashboardSource), false);
+  assert.equal(/sessionOnlyDraftedConversations/.test(dashboardSource), false);
 });
 
-test("session-only drafted conversations are derived from carouselItems, not just relevantConversations", () => {
-  // The first version of this fix filtered only `relevantConversations`,
-  // missing conversations that only exist via the second carousel source
-  // (scanEvidence.candidates, folded in through candidateAsRelevantConversation)
-  // -- so a reply created on one of those never appeared here. Deriving from
-  // carouselItems' own "relevant" items covers both sources by construction.
-  assert.match(
-    dashboardSource,
-    /sessionOnlyDraftedConversations\s*=\s*useMemo\(/,
-  );
-  const memoStart = dashboardSource.indexOf("const sessionOnlyDraftedConversations = useMemo(");
-  const memoEnd = dashboardSource.indexOf("[carouselItems, createdReplies]", memoStart);
-  assert.ok(memoEnd > memoStart, "expected the memo to depend on carouselItems, not relevantConversations directly");
-  const memoSource = dashboardSource.slice(memoStart, memoEnd);
-  assert.match(memoSource, /carouselItems/);
-  assert.match(memoSource, /item\.kind === "relevant"/);
-  assert.match(memoSource, /createdReplies\[conversation\.id\]/);
-
-  // Guard the invariant this fix relies on: carouselItems' "relevant" items
-  // must still be built from both relevantConversations AND
-  // scanEvidence.candidates. If a future change drops either source from
-  // carouselItems, or reintroduces a separate parallel source, this fix's
-  // coverage would silently narrow again the same way it did before.
+test("carouselItems (still used by Opportunities and elsewhere) continues to be built from both relevantConversations AND scanEvidence.candidates -- the invariant the now-removed Replies-tab fix depended on", () => {
+  // Guards against a future change silently narrowing carouselItems back
+  // to a single source, the same regression the old Replies-tab fix caught.
   const carouselStart = dashboardSource.indexOf("const carouselItems = useMemo<CarouselItem[]>(");
   const carouselEnd = dashboardSource.indexOf("hasAnyRelevantContent", carouselStart);
   const carouselSource = dashboardSource.slice(carouselStart, carouselEnd);
@@ -92,3 +65,4 @@ test("session-only drafted conversations are derived from carouselItems, not jus
   assert.match(carouselSource, /data\.scanEvidence\?\.candidates/);
   assert.match(carouselSource, /candidateAsRelevantConversation/);
 });
+

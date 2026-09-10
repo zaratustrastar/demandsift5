@@ -119,7 +119,48 @@ test("recommendedSubreddits flows end to end: fetched in ThreadlineExperience.ts
   assert.match(experience, /recommendedSubreddits=\{recommendedSubreddits\}/);
 });
 
-test("recommendedSubredditNames is threaded through both RedditMonitoringPanel call sites in ProductDashboard.tsx", () => {
-  const matches = dashboard.match(/recommendedSubredditNames=\{recommendedSubreddits\}/g) ?? [];
-  assert.equal(matches.length, 2);
+test("RedditMonitoringPanel now renders from exactly one call site -- Monitoring config -- since the duplicate Overview instance was removed; recommendedSubredditNames is still threaded through that one remaining call", () => {
+  const panelMatches = dashboard.match(/<RedditMonitoringPanel/g) ?? [];
+  assert.equal(panelMatches.length, 1);
+  const propMatches = dashboard.match(/recommendedSubredditNames=\{recommendedSubreddits\}/g) ?? [];
+  assert.equal(propMatches.length, 1);
 });
+
+test("the removed Overview instance's own wrapper classes (.overviewColumns, .overviewSide) no longer exist -- .overviewMain sits directly under .overviewGrid and fills the full width", () => {
+  assert.equal(/styles\.overviewColumns/.test(dashboard), false);
+  assert.equal(/styles\.overviewSide/.test(dashboard), false);
+});
+
+test("the Overview (dashboard) section's structure is now overviewGrid > metricsRow + overviewMain directly, with no intermediate two-column wrapper between them", () => {
+  const overviewSection = dashboard.slice(
+    dashboard.indexOf('activeSection === "dashboard" &&'),
+    dashboard.indexOf('activeSection === "opportunities" &&'),
+  );
+  assert.match(overviewSection, /<div className=\{styles\.overviewGrid\}>/);
+  assert.match(overviewSection, /<div className=\{styles\.metricsRow\}>/);
+  assert.match(overviewSection, /<div className=\{styles\.overviewMain\}>/);
+});
+
+test("the KPI cards (metricsRow/overviewMetrics) and their rendering logic were not touched by this change", () => {
+  const overviewSection = dashboard.slice(
+    dashboard.indexOf('activeSection === "dashboard" &&'),
+    dashboard.indexOf('activeSection === "opportunities" &&'),
+  );
+  assert.match(overviewSection, /overviewMetrics\.map\(\(metric\) => \(/);
+  assert.match(overviewSection, /styles\.scMetricCard/);
+  assert.match(overviewSection, /styles\.scMetricLabel/);
+  assert.match(overviewSection, /styles\.scMetricValue/);
+  assert.match(overviewSection, /styles\.scMetricNote/);
+});
+
+test("Worth your time today and its own carousel logic are unchanged -- only the sibling side panel was removed", () => {
+  const overviewSection = dashboard.slice(
+    dashboard.indexOf('activeSection === "dashboard" &&'),
+    dashboard.indexOf('activeSection === "opportunities" &&'),
+  );
+  assert.match(overviewSection, /Worth your time today/);
+  assert.match(overviewSection, /Ordered by AI reliability, highest first/);
+  assert.match(overviewSection, /topCarouselItems\.length === 0/);
+});
+
+

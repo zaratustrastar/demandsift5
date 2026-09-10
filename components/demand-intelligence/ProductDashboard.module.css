@@ -3838,24 +3838,17 @@
   line-height: 1.4;
 }
 
-.overviewColumns {
-  display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 14px;
-  align-items: start;
-}
-
+/* .overviewColumns and .overviewSide (the right-side Daily Reddit
+ * monitoring panel's own two-column grid) were removed together with
+ * the duplicate RedditMonitoringPanel instance on this screen --
+ * Monitoring config is now the single place that panel renders.
+ * .overviewMain now sits directly under .overviewGrid (a column flex
+ * container) and naturally fills the full available width. */
 .overviewMain {
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-width: 0;
-}
-
-.overviewSide {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
 }
 
 .todayCard {
@@ -4084,10 +4077,6 @@
 
   .metricsRow {
     grid-template-columns: repeat(2, 1fr);
-  }
-
-  .overviewColumns {
-    grid-template-columns: 1fr;
   }
 }
 

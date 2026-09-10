@@ -3643,21 +3643,20 @@ export function ProductDashboard({
                 ))}
               </div>
 
-              <div className={styles.overviewColumns}>
-                <div className={styles.overviewMain}>
-                  <div className={styles.todayCard}>
-                    <div className={styles.todayCardHead}>
-                      <div className={styles.todayCardHeadText}>
-                        <strong>Worth your time today</strong>
-                        <span>Ordered by AI reliability, highest first</span>
-                      </div>
-                      <button
-                        type="button"
-                        className={styles.ghostButton}
-                        onClick={goToSection("opportunities")}
-                      >
-                        See all
-                      </button>
+              <div className={styles.overviewMain}>
+                <div className={styles.todayCard}>
+                  <div className={styles.todayCardHead}>
+                    <div className={styles.todayCardHeadText}>
+                      <strong>Worth your time today</strong>
+                      <span>Ordered by AI reliability, highest first</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.ghostButton}
+                      onClick={goToSection("opportunities")}
+                    >
+                      See all
+                    </button>
                     </div>
                     {topCarouselItems.length === 0 ? (
                       <p className={styles.todayEmpty}>
@@ -3699,21 +3698,7 @@ export function ProductDashboard({
                     )}
                   </div>
                 </div>
-
-                <div className={styles.overviewSide}>
-                  <RedditMonitoringPanel
-                    key={monitoring
-                      ? `${monitoring.enabled}:${monitoring.watchTerms.map((term) => `${term.kind}:${term.active}:${term.value}`).join("|")}`
-                      : "monitoring-unavailable"}
-                    monitoring={monitoring}
-                    onUpdate={onUpdateMonitoring}
-                    runs={monitorRuns}
-                    onViewRun={onViewMonitorRun}
-                    recommendedSubredditNames={recommendedSubreddits}
-                  />
-                </div>
               </div>
-            </div>
           )}
 
           {activeSection === "opportunities" && (

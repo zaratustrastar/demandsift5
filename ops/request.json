@@ -1,5 +1,5 @@
 {
-  "id": "verify-results-tab-hidden-deploy-2026-09-10-0100",
+  "id": "verify-overview-monitoring-panel-removal-deploy-2026-09-10-0200",
   "ops": ["runtime", "logs"],
   "inspectScans": [],
   "startScan": null

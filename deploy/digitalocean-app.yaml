@@ -179,7 +179,7 @@ envs:
     scope: RUN_TIME
     type: GENERAL
   - key: APIFY_REDDIT_TIME_RANGE
-    value: month
+    value: year
     scope: RUN_TIME
     type: GENERAL
   - key: APIFY_TOKEN

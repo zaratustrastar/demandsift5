@@ -21,19 +21,18 @@ async function render(path = "/") {
   );
 }
 
-test("server-renders the Threadline acquisition experience", async () => {
+test("server-renders the Scooptr acquisition experience", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /Threadline — Reddit demand intelligence/i);
-  assert.match(html, /Find the threads where your next customers are/);
-  assert.match(html, /Run free scan/);
-  assert.match(html, /Provider data clearly labeled/);
-  assert.match(html, /\$12/);
-  assert.match(html, /\$30\/mo/);
-  assert.doesNotMatch(html, /94% fit|3 related conversations|r\/smallbusiness/i);
+  assert.match(html, /Scooptr — find the Reddit threads where your next customers already are/i);
+  assert.match(html, /Find people[\s\S]{0,100}already asking[\s\S]{0,100}for[\s\S]{0,20}you sell/);
+  assert.match(html, /Scan my business/);
+  assert.match(html, /\$0/);
+  assert.match(html, /\$30/);
+  assert.doesNotMatch(html, /94% fit|3 related conversations/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/);
 });
 
@@ -49,7 +48,17 @@ test("returns a structured authorization error without crashing the production b
 });
 
 test("keeps claims, access, and provider boundaries explicit", async () => {
-  const [fixture, mockProvider, crawler, stripe, repository, presenter, packageJson] = await Promise.all([
+  const [
+    fixture,
+    mockProvider,
+    crawler,
+    stripe,
+    repository,
+    presenter,
+    packageJson,
+    dashboard,
+    fromScan,
+  ] = await Promise.all([
     readFile(new URL("../components/demand-intelligence/demo-data.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/providers/mock-reddit.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/security/website-crawler.ts", import.meta.url), "utf8"),
@@ -57,6 +66,8 @@ test("keeps claims, access, and provider boundaries explicit", async () => {
     readFile(new URL("../lib/server/repository.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/server/presenter.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../components/demand-intelligence/ProductDashboard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/demand-intelligence/from-scan.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(fixture, /every Reddit conversation shown here are fictional demo fixtures/i);
@@ -71,4 +82,24 @@ test("keeps claims, access, and provider boundaries explicit", async () => {
   assert.match(presenter, /additionalLockedCounts/);
   assert.match(packageJson, /"postgres"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
+  assert.match(dashboard, /opportunity\.disclosureRequired/);
+  assert.match(dashboard, /Keeps the product out unless it helps/);
+  assert.doesNotMatch(dashboard, /verifiedClaims\.length.*claims source-checked/);
+  assert.match(fromScan, /disclosureRequired: opportunity\.disclosureRequired/);
+  assert.match(presenter, /mentionProduct: opportunity\.mentionProduct === true/);
+  assert.match(presenter, /disclosureRequired: opportunity\.disclosureRequired === true/);
+  assert.match(
+    fromScan,
+    /matchReasons: \[opportunity\.customerProblem, opportunity\.whyItMatters\]/,
+  );
+});
+
+test("dashboard evidence labels preserve website and Reddit provenance", async () => {
+  const mapper = await readFile(
+    new URL("../components/demand-intelligence/from-scan.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(mapper, /source\.kind === "website"/);
+  assert.match(mapper, /Verified business website evidence/);
+  assert.match(mapper, /Public Reddit evidence via Apify test source/);
 });

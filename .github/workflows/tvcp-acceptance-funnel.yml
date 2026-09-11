@@ -1,0 +1,182 @@
+name: TVCP acceptance funnel diagnostics
+
+# Runs one real 7-day scan against production and reports the complete funnel
+# plus sampled conversations. Results are posted back as a PR comment because
+# Actions job logs are only retrievable through blob storage.
+
+# Triggered by pushing this file, matching the one-shot pattern used by the
+# other workflows here: workflow_dispatch requires the file on the default
+# branch, which this feature branch is not.
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/tvcp-acceptance-funnel.yml
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  acceptance-funnel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+      WEBSITE: https://tvcp.app
+      PR_NUMBER: "1"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Run one real 7-day scan and collect the funnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          jar="$(mktemp)"; created="$(mktemp)"; latest="$(mktemp)"; report="$(mktemp)"
+          echo "report_path=$report" >> "$GITHUB_ENV"
+
+          curl --fail-with-body -sS --cookie-jar "$jar" \
+            -H 'content-type: application/json' -X POST \
+            --data "{\"websiteUrl\":\"$WEBSITE\",\"defer\":true}" \
+            "$APP_URL/api/scans" > "$created"
+
+          scan_id="$(python3 -c "import json,sys;print((json.load(open('$created')).get('scan') or {}).get('id') or '')")"
+          test -n "$scan_id"
+          echo "scan_id=$scan_id" >> "$GITHUB_ENV"
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body -sS --cookie "$jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest" || true
+            status="$(python3 -c "import json;print((json.load(open('$latest')).get('scan') or {}).get('status') or '')" 2>/dev/null || echo '')"
+            echo "poll $attempt: $status"
+            case "$status" in
+              complete|failed) break ;;
+            esac
+            sleep 10
+          done
+
+          curl --fail-with-body -sS --cookie "$jar" "$APP_URL/api/scans/$scan_id" > "$report"
+          cp "$report" /tmp/report.json
+          # The app already exposes a sanitized end-to-end funnel; prefer it
+          # over reconstructing counts from the presented report.
+          curl -sS --cookie "$jar" "$APP_URL/acceptance-diagnostics" > /tmp/diag.json || echo '{}' > /tmp/diag.json
+          echo "final status: $status"
+
+      - name: Build the funnel report
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY' > /tmp/comment.md
+          import json, os
+
+          payload = json.load(open("/tmp/report.json"))
+          scan = payload.get("scan") or {}
+          report = payload.get("report") or {}
+          try:
+              agg = json.load(open("/tmp/diag.json"))
+          except Exception:
+              agg = {}
+          evidence = report.get("scanEvidence") or {}
+          diag = evidence.get("diagnostics") or report.get("diagnostics") or {}
+          coverage = report.get("qualificationCoverage") or {}
+          candidates = evidence.get("candidates") or []
+          plan = evidence.get("searchPlan") or []
+
+          def n(*keys):
+              for k in keys:
+                  if k in diag and diag[k] is not None:
+                      return diag[k]
+              return "—"
+
+          print(f"## Real 7-day acceptance scan — `{os.environ.get('WEBSITE','')}`\n")
+          print(f"scan `{scan.get('id')}` · status **{scan.get('status')}**")
+          if scan.get("error"):
+              print(f"\n> error: {scan['error']}")
+          print("\n### Funnel\n")
+          print("| stage | count |")
+          print("|---|---|")
+          rows = [
+            ("retrieved", n("providerRecords", "rawCandidates", "retrievedCandidates", "apifyRecords")),
+            ("deterministic survivors", n("deterministicSurvivors")),
+            ("embedding scored", n("embeddingScored")),
+            ("embedding dropped (below floor)", n("embeddingDroppedBelowFloor")),
+            ("embedding dropped (over budget)", n("embeddingDroppedOverBudget")),
+            ("LLM classified", n("classifiedCandidates")),
+            ("genuinely relevant", len(report.get("relevantConversations") or []) or n("relevantConversations")),
+            ("enriched", n("enrichedSuccessfully", "enrichedConversations")),
+            ("potential customers", (report.get("potentialCustomers") or {}).get("total", "—")),
+            ("reply opportunities", len(report.get("replies") or [])),
+            ("competitor signals", n("competitorSignals")),
+            ("themes", len(report.get("conversationThemes") or [])),
+            ("insights", len(report.get("insights") or [])),
+          ]
+          for label, value in rows:
+              print(f"| {label} | {value} |")
+
+          print("\n### End-to-end funnel (/acceptance-diagnostics)\n")
+          print("```json")
+          print(json.dumps({
+              "scan": agg.get("scan"),
+              "output": agg.get("output"),
+              "diagnostics": agg.get("diagnostics"),
+              "retrieval": agg.get("retrieval"),
+              "decisionBreakdown": agg.get("decisionBreakdown"),
+              "presentation_ok": (agg.get("presentation") or {}).get("ok"),
+          }, indent=1)[:6000])
+          print("```")
+
+          print("\n### Search plan\n")
+          for q in plan[:14]:
+              print(f"- `{q.get('query') if isinstance(q, dict) else q}`")
+
+          print(f"\n### Candidates that reached triage ({len(candidates)})\n")
+          for c in candidates[:20]:
+              d = c.get("decision") or c.get("triageDecision") or ""
+              print(f"- [{d}] **{(c.get('title') or '')[:95]}** r/{c.get('subreddit')} — {c.get('permalink')}")
+
+          print(f"\ncoverage: {json.dumps(coverage)}\n")
+          print("\n<details><summary>Raw diagnostics</summary>\n")
+          print("```json")
+          print(json.dumps(diag, indent=1)[:4000])
+          print("```\n</details>\n")
+
+          def sample(title, items, fn, limit=8):
+              print(f"\n### {title} ({len(items)})\n")
+              for item in items[:limit]:
+                  print(fn(item))
+
+          sample("Potential customers", report.get("opportunities") or [],
+                 lambda o: f"- **{(o.get('title') or '')[:110]}** · r/{o.get('subreddit')} · lead={o.get('leadScore')} reply={o.get('replyScore')}\n  - why: {(o.get('whyItMatters') or '')[:220]}\n  - {o.get('permalink')}")
+
+          sample("Relevant conversations (non-lead)", report.get("relevantConversations") or [],
+                 lambda c: f"- **{(c.get('title') or '')[:110]}** · r/{c.get('subreddit')} · tags={','.join(c.get('tags') or [])}\n  - {(c.get('summary') or '')[:200]}\n  - {c.get('permalink')}")
+
+          themes = report.get("conversationThemes") or []
+          print(f"\n### Themes ({len(themes)})\n")
+          for t in themes:
+              print(f"- [{t.get('kind')}] **{t.get('label')}** — {t.get('conversationCount')} conversations")
+
+          replies = report.get("replies") or []
+          print(f"\n### Generated replies ({len(replies)})\n")
+          for r in replies[:6]:
+              print(f"<details><summary>{(r.get('id') or '')[:20]}</summary>\n\n```\n{(r.get('body') or '')[:1200]}\n```\n</details>")
+          PY
+
+          head -c 60000 /tmp/comment.md > /tmp/comment.trimmed.md
+
+      - name: Post the report back to the PR
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY' > /tmp/body.json
+          import json
+          print(json.dumps({"body": open("/tmp/comment.trimmed.md").read()}))
+          PY
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --data @/tmp/body.json > /dev/null
+          echo "posted to PR #${PR_NUMBER}"

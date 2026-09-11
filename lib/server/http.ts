@@ -69,7 +69,7 @@ export function apiErrorResponse(error: unknown): Response {
   );
 }
 
-function parseCookies(request: Request): Map<string, string> {
+export function parseCookies(request: Request): Map<string, string> {
   const values = new Map<string, string>();
   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
     const separator = part.indexOf("=");
@@ -81,7 +81,16 @@ function parseCookies(request: Request): Map<string, string> {
   return values;
 }
 
-export type WorkspaceActor = { workspaceId: string; token: string };
+export type WorkspaceActor = {
+  workspaceId: string;
+  token: string;
+  /** True when this actor was resolved from a signed-in session rather
+   * than the anonymous rd_workspace cookie -- see requireWorkspace and
+   * workspaceCookie's matching comments. */
+  viaSession?: boolean;
+};
+
+export type SessionActor = { userId: string };
 
 async function hashToken(token: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
@@ -101,7 +110,24 @@ export async function createWorkspace(): Promise<WorkspaceActor> {
 }
 
 export async function requireWorkspace(request: Request): Promise<WorkspaceActor> {
-  const cookie = parseCookies(request).get("rd_workspace") ?? "";
+  const cookies = parseCookies(request);
+
+  // A signed-in session takes priority over the anonymous workspace
+  // cookie: it survives even after that cookie is cleared or expires, and
+  // resolves to whichever workspace the user claimed at Google sign-in
+  // (see google-oauth.ts's completeGoogleSignIn). Every existing caller of
+  // requireWorkspace keeps working unmodified either way -- this only
+  // changes which workspaceId comes back, not the shape of the actor.
+  const sessionToken = cookies.get("rd_session") ?? "";
+  if (sessionToken) {
+    const session = await getStateRepository().verifyAuthSession(sessionToken);
+    if (session) {
+      const workspaceId = await getStateRepository().getPrimaryWorkspaceIdForUser(session.userId);
+      if (workspaceId) return { workspaceId, token: "", viaSession: true };
+    }
+  }
+
+  const cookie = cookies.get("rd_workspace") ?? "";
   const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   const credential = cookie || bearer;
   const separator = credential.indexOf(".");
@@ -114,9 +140,41 @@ export async function requireWorkspace(request: Request): Promise<WorkspaceActor
   return { workspaceId, token };
 }
 
-export function workspaceCookie(actor: WorkspaceActor): string {
+export function workspaceCookie(actor: WorkspaceActor): string | undefined {
+  // A session-resolved actor has no real anonymous-workspace token to put
+  // in this cookie (see requireWorkspace) and doesn't need one: rd_session
+  // is the durable credential from here on. Returning undefined lets
+  // callers that unconditionally re-emit this cookie on scan creation
+  // (see app/api/scans/route.ts) skip the header instead of writing a
+  // cookie that would just fail its own verifyWorkspaceToken check later.
+  if (actor.viaSession) return undefined;
   const secure = isProductionRuntime() ? "; Secure" : "";
   return `rd_workspace=${encodeURIComponent(`${actor.workspaceId}.${actor.token}`)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`;
+}
+
+export function sessionCookie(token: string, expiresAt: string): string {
+  const secure = isProductionRuntime() ? "; Secure" : "";
+  const maxAgeSeconds = Math.max(0, Math.floor((Date.parse(expiresAt) - Date.now()) / 1_000));
+  return `rd_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+export function clearSessionCookie(): string {
+  const secure = isProductionRuntime() ? "; Secure" : "";
+  return `rd_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
+}
+
+/** Optional session lookup for endpoints that behave differently when
+ * signed in but don't require it (e.g. GET /api/auth/session). */
+export async function getSessionActor(request: Request): Promise<SessionActor | null> {
+  const token = parseCookies(request).get("rd_session") ?? "";
+  if (!token) return null;
+  return getStateRepository().verifyAuthSession(token);
+}
+
+export async function requireSession(request: Request): Promise<SessionActor> {
+  const actor = await getSessionActor(request);
+  if (!actor) throw new ApiError("You are not signed in.", 401, "unauthorized");
+  return actor;
 }
 
 export function getRequestOrigin(request: Request): string {

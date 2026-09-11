@@ -1,0 +1,22 @@
+.git
+.gitignore
+.DS_Store
+
+node_modules
+dist
+.next
+.vinext
+.wrangler
+coverage
+outputs
+work
+*.tsbuildinfo
+
+# Never copy local or production secrets into an image layer.
+.env*
+deploy/vps.env
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

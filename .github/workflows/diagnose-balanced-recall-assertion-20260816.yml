@@ -1,0 +1,34 @@
+name: Diagnose balanced recall assertion
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/diagnose-balanced-recall-assertion-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - run: python3 scripts/apply-balanced-recall-fix.py
+      - run: npm ci
+      - name: Run complete Reddit provider suite with concise failure
+        shell: bash
+        run: |
+          set +e
+          node --test tests/apify-reddit-provider.test.mjs 2>&1 | tee /tmp/provider-test.log
+          status=${PIPESTATUS[0]}
+          echo '--- failure context ---'
+          tail -n 160 /tmp/provider-test.log
+          exit $status

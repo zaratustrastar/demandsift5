@@ -1,0 +1,39 @@
+name: Deploy tested Reddit search quality fix
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/vps-release-search-quality-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 1
+
+      - name: Build exact feature tip with privileged release wrapper
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          echo "release_sha=$release_sha"
+          sudo -n /usr/local/sbin/demandsift-release build "$release_sha"
+
+          remote_sha="$(git ls-remote https://github.com/zaratustrastar/demandsift5.git refs/heads/feature/reddit-intelligence-pipeline | awk '{print $1}')"
+          test "$remote_sha" = "$release_sha"
+
+      - name: Deploy and inspect
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n /usr/local/sbin/demandsift-release deploy
+          sudo -n /usr/local/sbin/demandsift-release inspect

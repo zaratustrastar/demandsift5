@@ -15,6 +15,30 @@ type WorkspaceRecord = {
   tokenHash: string;
   expiresAt: string;
   createdAt: string;
+  /** Set once a signed-in user claims this workspace. See UserRecord. */
+  userId?: string | null;
+};
+
+/** Mirrors the `users` table (see db/postgres/schema.ts) -- unused until
+ * Google sign-in (lib/server/google-oauth.ts) started reading/writing it. */
+type UserRecord = {
+  id: string;
+  email: string;
+  name: string | null;
+  emailVerifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Mirrors `auth_sessions`. tokenHash is sha256(session token), matching
+ * how runtime_workspaces hashes its own token -- see requireWorkspace. */
+type AuthSessionRecord = {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  lastSeenAt: string;
+  createdAt: string;
 };
 
 type DemoStore = {
@@ -29,6 +53,11 @@ type DemoStore = {
   redditConnections: Map<string, RedditConnectionRecord>;
   redditPublications: Map<string, RedditPublicationRecord>;
   funnelEvents: Map<string, FunnelEventRecord>;
+  users: Map<string, UserRecord>;
+  /** Keyed by `${provider}:${providerSubject}` -> userId. */
+  authAccountsByProviderSubject: Map<string, string>;
+  /** Keyed by tokenHash. */
+  authSessions: Map<string, AuthSessionRecord>;
 };
 
 const STORE_KEY = Symbol.for("signal-scout.demo-store");
@@ -48,6 +77,9 @@ function createStore(): DemoStore {
     redditConnections: new Map(),
     redditPublications: new Map(),
     funnelEvents: new Map(),
+    users: new Map(),
+    authAccountsByProviderSubject: new Map(),
+    authSessions: new Map(),
   };
 }
 
@@ -74,6 +106,9 @@ export function getStore(): DemoStore {
   existing.redditConnections ??= new Map();
   existing.redditPublications ??= new Map();
   existing.funnelEvents ??= new Map();
+  existing.users ??= new Map();
+  existing.authAccountsByProviderSubject ??= new Map();
+  existing.authSessions ??= new Map();
 
   return existing;
 }

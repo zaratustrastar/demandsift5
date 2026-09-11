@@ -1,0 +1,81 @@
+name: Apply MVP transparency and enrichment recovery
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/apply-mvp-transparency-recovery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor == 'zaratustrastar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Fix verifier runtime ordering
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("lib/server/scan-workflow.ts")
+          text = path.read_text()
+          late = "    const deepRows = [...deepById.values()];\n    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>\n      conversation.sourceMode !== \"apify-test\" || conversation.provenance.metadata?.enriched === true;\n"
+          if late not in text:
+              raise SystemExit("late verifier fragment not found")
+          text = text.replace(late, "    const deepRows = [...deepById.values()];\n", 1)
+          anchor = "    const requiredFullContextReviews = Math.min(\n      minimumFullContextReviews(lookbackDays),\n      cleaned.survivors.length,\n      enrichmentBudget(),\n    );\n\n"
+          replacement = "    const requiredFullContextReviews = Math.min(\n      minimumFullContextReviews(lookbackDays),\n      cleaned.survivors.length,\n      enrichmentBudget(),\n    );\n    const hasVerifiedThreadContext = (conversation: EnrichedRedditConversation): boolean =>\n      conversation.sourceMode !== \"apify-test\" || conversation.provenance.metadata?.enriched === true;\n\n"
+          if anchor not in text:
+              raise SystemExit("coverage anchor not found")
+          text = text.replace(anchor, replacement, 1)
+          path.write_text(text)
+
+          test_path = Path("tests/scan-pipeline-architecture.test.mjs")
+          tests = test_path.read_text()
+          if "thread context verifier is initialized before enrichment recovery uses it" not in tests:
+              tests += "\n\ntest(\"thread context verifier is initialized before enrichment recovery uses it\", () => {\n  const verifier = position(\"const hasVerifiedThreadContext =\");\n  const initialEnrichment = position(\"const initialEnrichment = await redditProvider.enrich(\");\n  const absorb = position(\"const absorbEnrichment =\");\n  assert.ok(verifier < initialEnrichment);\n  assert.ok(verifier < absorb);\n});\n"
+              test_path.write_text(tests)
+          PY
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Commit runtime fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "zaratustrastar"
+          git config user.email "114620206+zaratustrastar@users.noreply.github.com"
+          git add lib/server/scan-workflow.ts tests/scan-pipeline-architecture.test.mjs
+          if git diff --cached --quiet; then
+            echo "No runtime changes to commit."
+            exit 0
+          fi
+          git commit -m "Fix enrichment recovery runtime ordering"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

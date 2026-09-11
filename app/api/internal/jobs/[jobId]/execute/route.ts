@@ -1,9 +1,23 @@
 import { apiErrorResponse, ApiError, readJson } from "@/lib/server/http";
-import { getStateRepository } from "@/lib/server/repository";
+import { scanPipelineErrorCode } from "@/lib/server/job-retry-classification";
+import { getStateRepository, type StateRepository } from "@/lib/server/repository";
 import { runScan } from "@/lib/server/scan-workflow";
+import { runRedditMonitorScan } from "@/lib/server/reddit-monitor-workflow";
+import {
+  getClaimedRedditMonitorJob,
+  getRedditMonitorRun,
+} from "@/lib/server/reddit-monitor-repository";
+import { runAiVisibilityScan } from "@/lib/server/ai-visibility-workflow";
+import {
+  getAiVisibilityScan,
+  getClaimedAiVisibilityJob,
+} from "@/lib/server/ai-visibility-repository";
+import type { ScanRecord } from "@/lib/server/contracts";
+import type { ScanJobType } from "@/lib/server/scan-lifecycle";
 
 type RouteContext = { params: Promise<{ jobId: string }> | { jobId: string } };
-type ExecuteBody = { workerId?: unknown };
+type ExecuteBody = { workerId?: unknown; attempt?: unknown };
+type ClaimedJob = NonNullable<Awaited<ReturnType<StateRepository["getJob"]>>>;
 
 function safeEqual(left: string, right: string): boolean {
   const length = Math.max(left.length, right.length);
@@ -29,6 +43,209 @@ function requireWorker(request: Request) {
   }
 }
 
+async function requireClaimedScan(
+  jobId: string,
+  workerId: string,
+  attempt: unknown,
+): Promise<{ job: ClaimedJob; scan: ScanRecord }> {
+  const repository = getStateRepository();
+  if (repository.kind !== "postgres") {
+    throw new ApiError("Persistent jobs require PostgreSQL.", 503, "worker_unavailable");
+  }
+  const job = await repository.getJob(jobId);
+  if (!job || (job.type !== "scan.run" && job.type !== "scan.analyze")) {
+    throw new ApiError("Job was not found.", 404, "job_not_found");
+  }
+  if (job.status !== "running" || job.lockedBy !== workerId || job.attempts !== attempt) {
+    throw new ApiError("Job is not claimed by this worker.", 409, "job_not_claimed");
+  }
+  const scan = await repository.getScan(job.payload.scanId);
+  if (!scan || scan.workspaceId !== job.payload.workspaceId) {
+    throw new ApiError("Job scan was not found.", 404, "scan_not_found");
+  }
+  return { job, scan };
+}
+
+function terminalScanFailure(scan: ScanRecord) {
+  const message = scan.error?.trim() || "The scan failed unexpectedly.";
+  // Prefer the structured code runScan already classified the error into;
+  // only fall back to regexing the message for scan records written before
+  // errorCode existed.
+  const code =
+    scan.errorCode ??
+    scanPipelineErrorCode({ message }) ??
+    "scan_execution_failed";
+  return {
+    ok: false,
+    executorStatus: 502,
+    error: { code, message },
+  };
+}
+
+const activeScanExecutions = new Map<string, Promise<void>>();
+const activeMonitorExecutions = new Map<string, Promise<void>>();
+
+async function executeClaimedScan(
+  scanId: string,
+  resumeRunning = false,
+  jobAttempts?: number,
+  jobMaxAttempts?: number,
+  jobId?: string,
+  jobWorkerId?: string,
+  jobType: ScanJobType = "scan.run",
+): Promise<void> {
+  try {
+    await runScan(scanId, { resumeRunning, jobAttempts, jobMaxAttempts, jobId, jobWorkerId, stopAfterUnderstanding: jobType === "scan.analyze" });
+  } catch (error) {
+    if (scanPipelineErrorCode(error) === "openai_structured_output_failed") {
+      console.error("Background scan exhausted structured AI recovery.");
+      return;
+    }
+    console.error("Background scan execution failed.", error);
+  }
+}
+
+function ensureClaimedScanExecution(
+  scanId: string,
+  resumeRunning = false,
+  jobAttempts?: number,
+  jobMaxAttempts?: number,
+  jobId?: string,
+  jobWorkerId?: string,
+  jobType: ScanJobType = "scan.run",
+): Promise<void> {
+  const key = `${scanId}:${jobId}:${jobAttempts}:${jobWorkerId}`;
+  const existing = activeScanExecutions.get(key);
+  if (existing) return existing;
+  const execution = executeClaimedScan(scanId, resumeRunning, jobAttempts, jobMaxAttempts, jobId, jobWorkerId, jobType);
+  activeScanExecutions.set(key, execution);
+  void execution.finally(() => {
+    if (activeScanExecutions.get(key) === execution) activeScanExecutions.delete(key);
+  });
+  return execution;
+}
+
+function executionSnapshot(job: ClaimedJob, scan: ScanRecord) {
+  // Analysis can already be finished while the user-approved scan is queued
+  // or running. Never restart its old job or mistake later scan failure for it.
+  if (job.type === "scan.analyze" && scan.analysisCompletedAt) {
+    return { ok: true, jobId: job.id, scanId: scan.id, status: scan.status, complete: true };
+  }
+  // "retrying" is not done executing from the job's point of view either --
+  // this attempt still ended without a result, so the worker still needs to
+  // see a failure response to run its own retry/backoff bookkeeping. The
+  // difference already happened where it matters: the scan record itself
+  // never sat at a terminal-looking "failed" while a retry was scheduled.
+  if (scan.status === "failed" || scan.status === "retrying") return terminalScanFailure(scan);
+  return {
+    ok: true,
+    jobId: job.id,
+    scanId: scan.id,
+    status: scan.status,
+    complete: job.type === "scan.run" && scan.status === "complete",
+  };
+}
+
+function monitorExecutionSnapshot(jobId: string, run: NonNullable<Awaited<ReturnType<typeof getRedditMonitorRun>>>) {
+  if (run.status === "failed") {
+    return {
+      ok: false,
+      executorStatus: 502,
+      error: { code: "reddit_monitor_failed", message: run.error || "Reddit monitoring failed." },
+    };
+  }
+  return {
+    ok: true,
+    jobId,
+    monitorRunId: run.id,
+    scanId: run.scanId,
+    status: run.status,
+    complete: run.status === "succeeded",
+  };
+}
+
+function ensureMonitorExecution(runId: string): Promise<void> {
+  const existing = activeMonitorExecutions.get(runId);
+  if (existing) return existing;
+  const execution = runRedditMonitorScan(runId).then(() => undefined).catch((error) => {
+    console.error("Background Reddit monitor execution failed.", error);
+  });
+  activeMonitorExecutions.set(runId, execution);
+  void execution.finally(() => {
+    if (activeMonitorExecutions.get(runId) === execution) activeMonitorExecutions.delete(runId);
+  });
+  return execution;
+}
+
+async function claimedMonitorSnapshot(jobId: string, workerId: string, start: boolean) {
+  const job = await getClaimedRedditMonitorJob(jobId, workerId);
+  if (!job) return null;
+  const run = await getRedditMonitorRun(job.monitorRunId);
+  if (!run || run.workspaceId !== job.workspaceId) {
+    throw new ApiError("Reddit monitor run was not found.", 404, "monitor_run_not_found");
+  }
+  if (start && run.status !== "succeeded" && run.status !== "failed") {
+    void ensureMonitorExecution(run.id);
+  }
+  const snapshot = monitorExecutionSnapshot(job.id, run);
+  return Response.json(snapshot, {
+    status: snapshot.ok && !snapshot.complete ? 202 : 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
+const activeVisibilityExecutions = new Map<string, Promise<void>>();
+
+function visibilityExecutionSnapshot(
+  jobId: string,
+  scan: NonNullable<Awaited<ReturnType<typeof getAiVisibilityScan>>>,
+) {
+  if (scan.status === "failed") {
+    return {
+      ok: false,
+      executorStatus: 502,
+      error: { code: "ai_visibility_scan_failed", message: scan.error || "AI visibility tracking failed." },
+    };
+  }
+  return {
+    ok: true,
+    jobId,
+    visibilityScanId: scan.id,
+    status: scan.status,
+    complete: scan.status === "succeeded",
+  };
+}
+
+function ensureVisibilityExecution(visibilityScanId: string): Promise<void> {
+  const existing = activeVisibilityExecutions.get(visibilityScanId);
+  if (existing) return existing;
+  const execution = runAiVisibilityScan(visibilityScanId).then(() => undefined).catch((error) => {
+    console.error("Background AI visibility scan execution failed.", error);
+  });
+  activeVisibilityExecutions.set(visibilityScanId, execution);
+  void execution.finally(() => {
+    if (activeVisibilityExecutions.get(visibilityScanId) === execution) activeVisibilityExecutions.delete(visibilityScanId);
+  });
+  return execution;
+}
+
+async function claimedVisibilitySnapshot(jobId: string, workerId: string, start: boolean) {
+  const job = await getClaimedAiVisibilityJob(jobId, workerId);
+  if (!job) return null;
+  const scan = await getAiVisibilityScan(job.visibilityScanId);
+  if (!scan || scan.workspaceId !== job.workspaceId) {
+    throw new ApiError("AI visibility scan was not found.", 404, "ai_visibility_scan_not_found");
+  }
+  if (start && scan.status !== "succeeded" && scan.status !== "failed") {
+    void ensureVisibilityExecution(scan.id);
+  }
+  const snapshot = visibilityExecutionSnapshot(job.id, scan);
+  return Response.json(snapshot, {
+    status: snapshot.ok && !snapshot.complete ? 202 : 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
 export async function POST(request: Request, context: RouteContext) {
   try {
     requireWorker(request);
@@ -37,37 +254,59 @@ export async function POST(request: Request, context: RouteContext) {
       throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
     const { jobId } = await context.params;
-    const repository = getStateRepository();
-    if (repository.kind !== "postgres") {
-      throw new ApiError("Persistent jobs require PostgreSQL.", 503, "worker_unavailable");
+    const monitorResponse = await claimedMonitorSnapshot(jobId, body.workerId, true);
+    if (monitorResponse) return monitorResponse;
+    const visibilityResponse = await claimedVisibilitySnapshot(jobId, body.workerId, true);
+    if (visibilityResponse) return visibilityResponse;
+    const { job, scan } = await requireClaimedScan(jobId, body.workerId, body.attempt);
+    if (scan.status === "complete" || scan.status === "failed" || (job.type === "scan.analyze" && scan.analysisCompletedAt)) {
+    return Response.json(executionSnapshot(job, scan), {
+      status: 200,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+  if (scan.status === "running") {
+    // If this web process restarted, no execution is registered for the
+    // persisted running scan. Resume it instead of blocking the queue.
+    void ensureClaimedScanExecution(scan.id, true, job.attempts, job.maxAttempts, job.id, body.workerId, job.type);
+    return Response.json(executionSnapshot(job, scan), {
+      status: 202,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+
+  // The VPS is a persistent Node process, not a request-scoped serverless
+    // function. Start the durable scan and release the HTTP request immediately.
+    // Worker and browser status checks are then independent short requests, so
+    // no proxy/server timeout can terminate a long-running scan. This also
+    // covers a scan left at "retrying" by a prior attempt's failure: this
+    // POST only happens once the worker has freshly reclaimed the job, so
+    // it starts a brand-new attempt rather than resuming a stale one.
+    void ensureClaimedScanExecution(scan.id, false, job.attempts, job.maxAttempts, job.id, body.workerId, job.type);
+    return Response.json(
+      { ok: true, jobId: job.id, scanId: scan.id, status: "starting", complete: false },
+      { status: 202, headers: { "cache-control": "no-store" } },
+    );
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    requireWorker(request);
+    const workerId = new URL(request.url).searchParams.get("workerId") ?? "";
+    if (workerId.length < 3 || workerId.length > 160) {
+      throw new ApiError("workerId is invalid.", 400, "invalid_worker_id");
     }
-    const job = await repository.getJob(jobId);
-    if (!job || job.type !== "scan.run") {
-      throw new ApiError("Job was not found.", 404, "job_not_found");
-    }
-    if (job.status !== "running" || job.lockedBy !== body.workerId) {
-      throw new ApiError("Job is not claimed by this worker.", 409, "job_not_claimed");
-    }
-    const scan = await repository.getScan(job.payload.scanId);
-    if (!scan || scan.workspaceId !== job.payload.workspaceId) {
-      throw new ApiError("Job scan was not found.", 404, "scan_not_found");
-    }
-    if (scan.status === "complete") {
-      return Response.json({ jobId: job.id, scanId: scan.id, status: "complete", duplicate: true });
-    }
-    const completed = await runScan(scan.id);
-    if (completed.status === "running") {
-      throw new ApiError(
-        "The scan is currently running in another request.",
-        409,
-        "scan_already_running",
-      );
-    }
-    return Response.json({
-      jobId: job.id,
-      scanId: completed.id,
-      status: completed.status,
-      duplicate: false,
+    const { jobId } = await context.params;
+    const monitorResponse = await claimedMonitorSnapshot(jobId, workerId, false);
+    if (monitorResponse) return monitorResponse;
+    const visibilityResponse = await claimedVisibilitySnapshot(jobId, workerId, false);
+    if (visibilityResponse) return visibilityResponse;
+    const { job, scan } = await requireClaimedScan(jobId, workerId, Number(new URL(request.url).searchParams.get("attempt")));
+    return Response.json(executionSnapshot(job, scan), {
+      headers: { "cache-control": "no-store" },
     });
   } catch (error) {
     return apiErrorResponse(error);

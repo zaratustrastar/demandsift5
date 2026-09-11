@@ -1,0 +1,39 @@
+name: Diagnose telos full suite
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/diagnose-telos-full-suite-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - name: Apply migration
+        run: |
+          python3 scripts/apply-telos-harshmaur.py
+          python3 scripts/fix-harshmaur-test-realm.py
+      - run: npm ci
+      - name: Run full tests and print concise failure context
+        shell: bash
+        run: |
+          set +e
+          npm test > /tmp/full-test.log 2>&1
+          status=$?
+          echo '--- failure markers ---'
+          grep -nE '(^|[[:space:]])(not ok|FAIL|AssertionError|Error:|ERR_|failed|failure)' /tmp/full-test.log | tail -n 120 || true
+          echo '--- final 220 lines ---'
+          tail -n 220 /tmp/full-test.log
+          exit $status

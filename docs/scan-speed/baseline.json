@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "recordedOn": "2026-08-31",
+  "sourceRevision": "cb24c44d5b707dd4d31b9c6c52b9f1eb1a9d6e9a",
+  "sourceBranch": "feature/reddit-intelligence-pipeline",
+  "baselineTag": "baseline/deployed-2026-08-31",
+  "developmentBranch": "codex/scan-speed-phase-1",
+  "runtimeUsedForLocalTests": "Node v24.19.0",
+  "packageLockChanged": false,
+  "lastPublicDeploymentEvidence": {
+    "url": "https://github.com/zaratustrastar/demandsift5/pull/1#issuecomment-5469731167",
+    "recordedAt": "2026-08-30T15:58:27Z",
+    "webRevision": "cb24c44d5b707dd4d31b9c6c52b9f1eb1a9d6e9a",
+    "workerRevision": "cb24c44d5b707dd4d31b9c6c52b9f1eb1a9d6e9a",
+    "APIFY_REDDIT_ENRICHMENT_LIMIT": 0,
+    "APIFY_REDDIT_ENRICHMENT_COMMENTS": 6,
+    "APIFY_REDDIT_MAX_RESULTS": 40,
+    "APIFY_REDDIT_TIME_RANGE": "month"
+  },
+  "readOnlyChecksOnRecordedDate": { "remoteBranchStillMatches": true, "publicRootHttpStatus": 200 },
+  "unverifiedProductionSettings": ["current container revisions beyond the public release record", "actor build", "provider base URL and route", "model overrides", "provider quotas", "timeout overrides", "explicit REDDIT_ENRICHMENT_BUDGET", "HARSHMAUR-specific overrides"],
+  "sourceDefaultsNotProductionMeasurements": {
+    "websiteMaxPages": 4,
+    "lookbackDays": 365,
+    "triageCandidateBudget": 400,
+    "triageBatchSize": 25,
+    "triageConcurrency": 4,
+    "replyConcurrency": 4,
+    "harshmaurActor": "harshmaur/reddit-scraper",
+    "harshmaurFactoryMaxQueries": 9,
+    "harshmaurQueriesPerRun": 1,
+    "harshmaurPostsPerQuery": 50,
+    "harshmaurConcurrentRuns": 9,
+    "harshmaurFactoryTimeoutMs": 600000,
+    "analysisModel": "gpt-5.6-sol",
+    "economyModel": "gpt-5.6-luna",
+    "embeddingModel": "text-embedding-3-small"
+  },
+  "knownDefects": ["thread-fetch limit can collapse deep review to one", "some unrecoverable AI batches become synthetic negative judgments", "website crawl is repeated after profile approval", "all-failed resumed query chunks return the old checkpoint without new failure diagnostics; a single failed remaining chunk throws instead", "rendered HTML regression test expects old landing-page copy"],
+  "livePerformanceClaim": null
+}

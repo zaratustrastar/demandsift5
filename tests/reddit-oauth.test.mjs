@@ -65,8 +65,12 @@ test("signs workspace-bound OAuth state and rejects tampering", async () => {
   const payload = await reddit.verifyRedditOAuthState(state, configuration);
   assert.equal(payload.workspaceId, "ws_workspace123");
   assert.equal(payload.scanId, "scan_scan123");
+  const [encoded, signature] = state.split(".");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const canonicalLastIndex = alphabet.indexOf(signature.at(-1));
+  const nonCanonicalSignature = `${signature.slice(0, -1)}${alphabet[canonicalLastIndex + 1]}`;
   await assert.rejects(
-    reddit.verifyRedditOAuthState(`${state.slice(0, -1)}x`, configuration),
+    reddit.verifyRedditOAuthState(`${encoded}.${nonCanonicalSignature}`, configuration),
     /invalid/,
   );
 });

@@ -1,0 +1,122 @@
+name: Fix Reddit recent recall
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/fix-reddit-recent-recall-20260815.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Patch recent post and comment discovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('lib/providers/reddit.server.ts')
+          source = path.read_text()
+
+          source, n = re.subn(
+              r'  sort: "relevance";\n  time: "day" \| "week" \| "month" \| "year" \| "all";\n  includeNSFW: false;',
+              '  sort: "relevance" | "new";\n  time: "day" | "week" | "month" | "year" | "all";\n  postDateLimit?: string;\n  commentDateLimit?: string;\n  includeNSFW: false;',
+              source,
+              count=1,
+          )
+          if n != 1 and 'commentDateLimit?: string;' not in source:
+              raise SystemExit('Apify search input type anchor not found')
+
+          budget_pattern = re.compile(
+              r'    const maxItems = Math\.min\(\n'
+              r'      this\.maximumItems,\n'
+              r'      Math\.max\(30, Math\.min\(36, request\.limit \* 2\)\),\n'
+              r'    \);\n'
+          )
+          budget_replacement = '''    // maxItems is the global dataset cap across every search source. Keep\n    // enough headroom for all bounded demand lanes instead of letting one\n    // noisy source consume a 30-36 row dataset.\n    const maxItems = Math.min(\n      this.maximumItems,\n      Math.max(40, Math.min(50, request.limit * 2)),\n    );\n    // Trudax treats maxPostCount/maxComments as source-page limits. A small\n    // per-search quota preserves lane diversity while maxItems bounds cost.\n    // maxComments must be positive when comment search is enabled.\n    const perSearchBudget = Math.max(5, Math.ceil(maxItems / Math.max(1, searches.length)));\n    const sinceMs = request.since && Number.isFinite(Date.parse(request.since))\n      ? Date.parse(request.since)\n      : null;\n    const dateLimit = sinceMs === null\n      ? undefined\n      : new Date(sinceMs).toISOString().slice(0, 10);\n'''
+          source, n = budget_pattern.subn(budget_replacement, source, count=1)
+          if n != 1 and 'const perSearchBudget' not in source:
+              raise SystemExit('Discovery budget anchor not found')
+
+          input_pattern = re.compile(
+              r'      sort: "relevance",\n'
+              r'      time: boundedSearchTime\(this\.timeRange, request\.since\),\n'
+              r'      includeNSFW: false,\n'
+              r'      maxItems,\n'
+              r'      // Trudax applies maxPostCount across the whole Actor run, not once per\n'
+              r'      // search phrase\. Dividing this by the query count silently starves a\n'
+              r'      // nine-lane scan to only a handful of posts before AI triage can run\.\n'
+              r'      // Keep it aligned with the already-bounded global item budget\.\n'
+              r'      maxPostCount: maxItems,\n'
+              r'      maxComments: 0,\n'
+          )
+          input_replacement = '''      // Prioritize recent demand and enforce the same requested lower bound\n      // for both post and comment results. The Actor's generic `time` filter\n      // does not constrain comment timestamps.\n      sort: "new",\n      time: boundedSearchTime(this.timeRange, request.since),\n      ...(dateLimit ? { postDateLimit: dateLimit, commentDateLimit: dateLimit } : {}),\n      includeNSFW: false,\n      maxItems,\n      maxPostCount: perSearchBudget,\n      maxComments: perSearchBudget,\n'''
+          source, n = input_pattern.subn(input_replacement, source, count=1)
+          if n != 1 and 'postDateLimit: dateLimit' not in source:
+              raise SystemExit('Discovery input anchor not found')
+
+          path.write_text(source)
+
+          test_path = Path('tests/apify-reddit-provider.test.mjs')
+          test = test_path.read_text()
+          assertion_pattern = re.compile(
+              r'  assert\.equal\(discovery\.maxComments, 0\);\n'
+              r'  assert\.equal\(discovery\.maxItems, 36\);\n'
+              r'  assert\.equal\(discovery\.maxPostCount, 36\);\n'
+              r'  assert\.equal\(\n'
+              r'    discovery\.maxPostCount,\n'
+              r'    discovery\.maxItems,\n'
+              r'    "the Actor-wide post cap must not be divided by the number of searches",\n'
+              r'  \);\n'
+              r'  assert\.equal\(startCall\.url\.searchParams\.get\("maxItems"\), "36"\);\n'
+              r'  assert\.equal\(startCall\.url\.searchParams\.get\("timeout"\), "570"\);\n'
+              r'  assert\.equal\(discovery\.time, "week"\);\n'
+              r'  assert\.equal\(Object\.hasOwn\(discovery, "postDateLimit"\), false\);\n'
+              r'  assert\.equal\(Object\.hasOwn\(discovery, "commentDateLimit"\), false\);'
+          )
+          assertion_replacement = '''  assert.equal(discovery.sort, "new");\n  assert.equal(discovery.maxItems, 40);\n  assert.equal(discovery.maxPostCount, 5);\n  assert.equal(discovery.maxComments, 5);\n  assert.ok(discovery.maxPostCount < discovery.maxItems, "one search source must not consume the global dataset cap");\n  assert.ok(discovery.maxComments > 0, "comment search must have a positive result budget");\n  assert.equal(startCall.url.searchParams.get("maxItems"), "40");\n  assert.equal(startCall.url.searchParams.get("timeout"), "570");\n  assert.equal(discovery.time, "week");\n  assert.match(discovery.postDateLimit, /^\\d{4}-\\d{2}-\\d{2}$/);\n  assert.equal(discovery.commentDateLimit, discovery.postDateLimit);'''
+          test, n = assertion_pattern.subn(assertion_replacement, test, count=1)
+          if n != 1 and 'comment search must have a positive result budget' not in test:
+              raise SystemExit('Discovery assertions anchor not found')
+          test_path.write_text(test)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run provider and concept regression tests
+        run: node --test tests/apify-reddit-provider.test.mjs tests/concept-gate-market-evidence.test.mjs tests/demand-intelligence-trust.test.mjs
+
+      - name: Build
+        run: npm run build:node
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Commit validated fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/providers/reddit.server.ts tests/apify-reddit-provider.test.mjs
+          if git diff --cached --quiet; then
+            echo "Recent Reddit recall repair already present."
+            exit 0
+          fi
+          git commit -m "Improve recent Reddit post and comment recall"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

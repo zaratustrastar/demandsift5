@@ -1,0 +1,268 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import ts from "typescript";
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import { createRequire } from "node:module";
+
+const root = process.cwd();
+const moduleCache = new Map();
+
+function loadTs(relativePath) {
+  const absolutePath = path.resolve(root, relativePath);
+  if (moduleCache.has(absolutePath)) return moduleCache.get(absolutePath).exports;
+  const source = fs.readFileSync(absolutePath, "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true,
+    },
+    fileName: absolutePath,
+  }).outputText;
+  const module = { exports: {} };
+  moduleCache.set(absolutePath, module);
+  const requireFromHere = createRequire(absolutePath);
+  const localRequire = (specifier) => {
+    if (specifier === "@/lib/intelligence/opportunity-ranking") {
+      return loadTs("lib/intelligence/opportunity-ranking.ts");
+    }
+    if (specifier.startsWith("@/")) return loadTs(`${specifier.slice(2)}.ts`);
+    return requireFromHere(specifier);
+  };
+  vm.runInNewContext(
+    `(function(require,module,exports,__filename,__dirname){${compiled}\n})`,
+    { console, URL, AbortController, TextEncoder, Response, Request, Headers, setTimeout, clearTimeout },
+    { filename: absolutePath },
+  )(localRequire, module, module.exports, absolutePath, path.dirname(absolutePath));
+  return module.exports;
+}
+
+const reddit = loadTs("lib/providers/harshmaur-reddit.server.ts");
+
+function request(since = new Date(Date.now() - 6 * 86_400_000).toISOString()) {
+  return {
+    queries: {
+      productTerms: ["TVCP", "Android TV parental control app"],
+      brandTerms: ["TVCP"],
+      productCategories: ["Android TV parental control app"],
+      customerProblems: [
+        "too much TV time",
+        "kids watching TV late",
+        "block YouTube on TV",
+        "set TV screen time",
+      ],
+      jobsToBeDone: ["restrict apps on TV"],
+      workarounds: [],
+      triggerEvents: ["child starts opening unwanted TV apps"],
+      buyerIntent: ["recommendations"],
+      competitors: [],
+      excludedTerms: [],
+      ambiguityRisks: ["Android phones"],
+    },
+    limit: 250,
+    since,
+  };
+}
+
+test("TVCP plan uses short human-style recall queries instead of synthetic intent templates", () => {
+  const plan = reddit.buildHarshmaurRedditSearchPlan(request());
+  const queries = plan.map((entry) => entry.query);
+  assert.ok(queries.includes("tv control for children"), JSON.stringify(queries));
+  assert.ok(queries.includes("tv parental control"), JSON.stringify(queries));
+  assert.ok(queries.includes("screen time tv"), JSON.stringify(queries));
+  assert.ok(queries.includes("android tv parental control"), JSON.stringify(queries));
+  assert.ok(queries.every((query) => !/^looking for\b/i.test(query)), JSON.stringify(queries));
+  assert.ok(queries.every((query) => !/^need help\b/i.test(query)), JSON.stringify(queries));
+  assert.equal(new Set(queries).size, queries.length);
+  assert.ok(plan.length >= 8 && plan.length <= 12);
+});
+
+test("discovery maps Harshmaur post/comment fields and preserves exact searchTerm attribution", async () => {
+  const calls = [];
+  const now = new Date().toISOString();
+  const payload = [
+    {
+      dataType: "post",
+      title: "Need app to restrict kids watching TV all day",
+      body: "My kids keep watching the TV all day and I need parental controls.",
+      authorName: "parent_one",
+      communityName: "r/AndroidTV",
+      parsedCommunityName: "AndroidTV",
+      upVotes: 4,
+      commentsCount: 20,
+      postUrl: "https://www.reddit.com/r/AndroidTV/comments/abc123/need_app/",
+      createdAt: now,
+      searchTerm: "tv control for children",
+      id: "t3_abc123",
+      parsedId: "abc123",
+      over18: false,
+    },
+    {
+      dataType: "comment",
+      body: "I wish I could limit the TV from my phone because the kids keep reopening YouTube.",
+      authorName: "parent_two",
+      subredditName: "Parenting",
+      score: 3,
+      url: "https://www.reddit.com/r/Parenting/comments/def456/thread/ghi789/",
+      commentCreatedAt: now,
+      searchTerm: "screen time tv",
+      id: "ghi789",
+      postId: "t3_def456",
+      parentId: "t3_def456",
+      postTitle: "How are you handling screen time?",
+    },
+  ];
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    if (init.method === "POST") {
+      return new Response(JSON.stringify({ data: { id: "run1", status: "SUCCEEDED", defaultDatasetId: "ds1" } }), { status: 201 });
+    }
+    if (String(url).includes("/datasets/ds1/items")) {
+      return new Response(JSON.stringify(payload), { status: 200 });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const provider = new reddit.HarshmaurRedditProvider({
+    token: "token",
+    maximumItems: 250,
+    fetchImpl,
+  });
+  const result = await provider.discover(request());
+
+  const start = calls.find((call) => call.init.method === "POST");
+  const actorInput = JSON.parse(start.init.body);
+  assert.equal(actorInput.searchSort, "new");
+  assert.equal(actorInput.searchTime, "week");
+  assert.equal(actorInput.searchPosts, true);
+  assert.equal(actorInput.searchComments, true);
+  assert.equal(actorInput.searchCommunities, false);
+  assert.equal(actorInput.crawlCommentsPerPost, false);
+  assert.equal(Object.hasOwn(actorInput, "startUrls"), false);
+  assert.ok(actorInput.searchTerms.includes("tv control for children"));
+  assert.ok(actorInput.maxPostsCount >= 3);
+  assert.equal(actorInput.maxPostsCount, actorInput.maxCommentsCount);
+
+  assert.equal(result.candidates.length, 2);
+  assert.equal(result.candidates[0].author, "parent_one");
+  assert.equal(result.candidates[0].subreddit, "AndroidTV");
+  assert.equal(result.candidates[0].matchedQuery, "tv control for children");
+  assert.deepEqual(result.candidates[0].discoveryLanes, ["problem_pain"]);
+  assert.equal(result.candidates[1].kind, "comment");
+  assert.equal(result.candidates[1].author, "parent_two");
+  assert.equal(result.candidates[1].subreddit, "Parenting");
+  assert.equal(result.candidates[1].matchedQuery, "screen time tv");
+});
+
+test("discovery rejects records outside the requested seven-day window", async () => {
+  const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const old = new Date(Date.now() - 20 * 86_400_000).toISOString();
+  const fetchImpl = async (url, init = {}) => {
+    if (init.method === "POST") {
+      return new Response(JSON.stringify({ data: { id: "run2", status: "SUCCEEDED", defaultDatasetId: "ds2" } }), { status: 201 });
+    }
+    return new Response(JSON.stringify([{
+      dataType: "post",
+      title: "Old parental controls thread",
+      body: "Need TV parental controls",
+      authorName: "parent",
+      communityName: "r/AndroidTV",
+      parsedCommunityName: "AndroidTV",
+      postUrl: "https://www.reddit.com/r/AndroidTV/comments/old123/old/",
+      createdAt: old,
+      searchTerm: "tv parental control",
+      id: "t3_old123",
+      parsedId: "old123",
+      over18: false,
+    }]), { status: 200 });
+  };
+  const provider = new reddit.HarshmaurRedditProvider({ token: "token", fetchImpl });
+  const result = await provider.discover(request(since));
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.diagnostics.rejectedByReason.outside_window, 1);
+});
+
+test("enrichment opens selected thread URLs and collects bounded full-thread context", async () => {
+  const now = new Date().toISOString();
+  const discoveryPayload = [{
+    dataType: "comment",
+    body: "How can I stop my kids reopening YouTube on our TV?",
+    authorName: "parent_two",
+    subredditName: "Parenting",
+    score: 2,
+    url: "https://www.reddit.com/r/Parenting/comments/def456/screen_time/ghi789/",
+    commentCreatedAt: now,
+    searchTerm: "tv control for children",
+    id: "ghi789",
+    postId: "t3_def456",
+    parentId: "t3_def456",
+    postTitle: "TV screen time",
+  }];
+  const enrichmentPayload = [
+    {
+      dataType: "post",
+      id: "t3_def456",
+      parsedId: "def456",
+      title: "TV screen time",
+      body: "Parents, how do you set limits on the family TV?",
+      authorName: "op",
+      communityName: "r/Parenting",
+      parsedCommunityName: "Parenting",
+      postUrl: "https://www.reddit.com/r/Parenting/comments/def456/screen_time/",
+      createdAt: now,
+    },
+    {
+      dataType: "comment",
+      id: "ghi789",
+      postId: "t3_def456",
+      parentId: "t3_def456",
+      authorName: "parent_two",
+      subredditName: "Parenting",
+      body: discoveryPayload[0].body,
+      commentCreatedAt: now,
+      url: discoveryPayload[0].url,
+    },
+    {
+      dataType: "comment",
+      id: "reply1",
+      postId: "t3_def456",
+      parentId: "t1_ghi789",
+      authorName: "helper",
+      subredditName: "Parenting",
+      body: "A schedule plus app lock worked for us.",
+      commentCreatedAt: now,
+      url: "https://www.reddit.com/r/Parenting/comments/def456/screen_time/reply1/",
+    },
+  ];
+  let run = 0;
+  const postedInputs = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (init.method === "POST") {
+      run += 1;
+      postedInputs.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({
+        data: { id: `run${run}`, status: "SUCCEEDED", defaultDatasetId: `ds${run}` },
+      }), { status: 201 });
+    }
+    if (String(url).includes("/datasets/ds1/items")) return new Response(JSON.stringify(discoveryPayload), { status: 200 });
+    if (String(url).includes("/datasets/ds2/items")) return new Response(JSON.stringify(enrichmentPayload), { status: 200 });
+    throw new Error(`Unexpected URL ${url}`);
+  };
+
+  const provider = new reddit.HarshmaurRedditProvider({ token: "token", fetchImpl });
+  const discovered = await provider.discover({ ...request(), limit: 25 });
+  const enriched = await provider.enrich({ candidates: discovered.candidates, maxComments: 12 });
+
+  assert.equal(postedInputs.length, 2);
+  const input = postedInputs[1];
+  assert.equal(input.crawlCommentsPerPost, true);
+  assert.equal(input.startUrls.length, 1);
+  assert.match(input.startUrls[0].url, /\/comments\/def456\/screen_time\/$/);
+  assert.equal(input.maxCommentsPerPost, 12);
+  assert.equal(enriched.diagnostics.enriched, 1);
+  assert.equal(enriched.diagnostics.fallbackUsed, 0);
+  assert.equal(enriched.conversations[0].structuredContext.originalPost.body, "Parents, how do you set limits on the family TV?");
+  assert.equal(enriched.conversations[0].structuredContext.replies.length, 1);
+});

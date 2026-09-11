@@ -1,0 +1,73 @@
+name: Diagnose DemandSift stabilization
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/diagnose-mvp-stabilization.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Reproduce stabilization patch in workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/apply-mvp-stabilization.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(source) if line.strip() == '- name: Apply bounded MVP fixes')
+          run_line = next(i for i in range(start, len(source)) if source[i].strip() == 'run: |')
+          end = next(i for i in range(run_line + 1, len(source)) if source[i].strip() == '- name: Install dependencies')
+          body = []
+          for line in source[run_line + 1:end]:
+              body.append(line[10:] if line.startswith('          ') else line)
+          Path('/tmp/apply-stabilization.sh').write_text('\n'.join(body) + '\n')
+          PY
+          bash /tmp/apply-stabilization.sh
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused tests and capture exact failure
+        id: focused
+        shell: bash
+        run: |
+          set +e
+          node --test tests/apify-reddit-provider.test.mjs tests/latest-scan-restoration.test.mjs tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs 2>&1 | tee /tmp/focused-tests.log
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload exact focused-test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: focused-test-output
+          path: /tmp/focused-tests.log
+          retention-days: 1
+
+      - name: Record concise failure in summary
+        if: always()
+        shell: bash
+        run: |
+          echo '### Focused regression output (tail)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 180 /tmp/focused-tests.log >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve failing conclusion
+        if: steps.focused.outputs.status != '0'
+        run: exit 1

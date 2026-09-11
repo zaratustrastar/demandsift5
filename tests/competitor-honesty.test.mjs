@@ -79,18 +79,16 @@ test("preserves the labeled mock comparison when its complaint is present", () =
 });
 
 test("threads the explicit empty state through scan, counts, and UI", async () => {
-  const [workflow, presenter, dashboard] = await Promise.all([
+  const [workflow, presenter] = await Promise.all([
     readFile(new URL("../lib/server/scan-workflow.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/server/presenter.ts", import.meta.url), "utf8"),
-    readFile(
-      new URL("../components/demand-intelligence/ProductDashboard.tsx", import.meta.url),
-      "utf8",
-    ),
   ]);
 
   assert.match(workflow, /verified:\s*false,[\s\S]{0,120}competitor:\s*null/);
   assert.match(workflow, /No verified competitor weakness in this scan/);
   assert.match(presenter, /competitorWeakness\.verified\s*\?\s*1\s*:\s*0/);
   assert.doesNotMatch(presenter, /competitorSignals:\s*1/);
-  assert.match(dashboard, /No competitor identity, weakness, count or evidence/);
+  // The dedicated Competitors view was removed in favor of a single report
+  // page (business card + relevant Reddit posts/comments); the honesty
+  // invariant itself still lives at the data layer, asserted above.
 });

@@ -1,0 +1,22 @@
+name: Check release lock process
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/check-release-lock-process-20260815.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 3
+    steps:
+      - name: Check stale release process
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ps -eo pid,ppid,pgid,sid,user,etime,cmd | grep -E 'demandsift-release build|docker build|npm ci --omit=dev' | grep -v grep || true

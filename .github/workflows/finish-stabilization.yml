@@ -1,0 +1,71 @@
+name: Finish DemandSift MVP stabilization
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/finish-stabilization.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-verify-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/reddit-intelligence-pipeline
+          fetch-depth: 0
+
+      - name: Reuse the already-validated bounded patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          wrapper = Path('.github/workflows/vps-readonly-diagnostic.yml').read_text()
+          marker = "python3 <<'PY'\n"
+          if marker not in wrapper:
+              raise SystemExit('stabilization patch body not found')
+          body = wrapper.split(marker, 1)[1].split('\n          PY', 1)[0]
+          exec(compile(textwrap.dedent(body), '<stabilization-patch>', 'exec'), {'__name__': '__main__'})
+          PY
+
+          # The first run proved the patch passes focused tests, build and lint;
+          # it stopped only because one generated TypeScript line had trailing
+          # whitespace. Normalize that line before the repository whitespace gate.
+          sed -i 's/[[:space:]]\+$//' lib/providers/reddit.server.ts
+
+          rm -f app/acceptance-ai-diagnostics/route.ts app/acceptance-diagnostics/route.ts
+          git rm -f .github/workflows/vps-readonly-diagnostic.yml
+          git rm -f .github/workflows/finish-stabilization.yml
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused regression tests
+        run: |
+          node --test tests/apify-reddit-provider.test.mjs tests/latest-scan-restoration.test.mjs tests/reddit-intelligence-pipeline.test.mjs tests/scan-pipeline-architecture.test.mjs
+
+      - name: Verify build, lint and whitespace
+        run: |
+          npm run build
+          npm run lint
+          git diff --check
+
+      - name: Publish verified patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Stabilize Reddit retrieval and latest scan restoration"
+          git push origin HEAD:feature/reddit-intelligence-pipeline

@@ -2,12 +2,17 @@ import type { AiOperation, TokenUsage } from "@/lib/ai/usage";
 import type {
   BusinessUnderstanding,
   CompetitorSignal,
+  ConversationTriage,
+  DeepQualification,
   DemandInsight,
+  EnrichedRedditConversation,
   EntityId,
   ModelConfiguration,
   OpportunityClassification,
   QualifiedOpportunity,
   RedditConversation,
+  RedditDiscoveryCandidate,
+  RedditSearchLane,
 } from "@/lib/domain/types";
 
 export interface WebsiteEvidencePage {
@@ -18,7 +23,19 @@ export interface WebsiteEvidencePage {
   text: string;
   contentHash: string;
   retrievedAt: string;
+  /** Populated by website-crawler.ts's extractPage; optional and unused
+   * by analyzeBusiness's own pages mapping (which lists its fields
+   * explicitly), so this adds no new data to that prompt. Currently only
+   * lib/server/competitor-url-resolution.ts reads it, for identity-match
+   * diagnostics. */
+  identity?: { title: string; description?: string; ogTitle?: string; ogSiteName?: string; applicationName?: string };
 }
+
+export type RedditActorEvent = {
+  phase: "start" | "end"; requestIndex: number; actorRunId?: string;
+  outcome?: "succeeded" | "failed"; candidates?: number; queries: number;
+};
+export type RedditActorCheckpoint = { actorId: string; actorRunId: string; inputHash: string; datasetId: string; startedAt: string };
 
 export interface AiProviderResult<T> {
   value: T;
@@ -36,8 +53,90 @@ export interface AnalyzeBusinessRequest {
   canonicalDomain: string;
   pages: WebsiteEvidencePage[];
   models: ModelConfiguration;
+  /** Benchmarking-only: overrides the hardcoded "medium" reasoning effort.
+   * Omitted in every production call site, which keeps today's behavior
+   * unchanged -- see lib/providers/openai.server.ts's analyzeBusiness. */
+  reasoningEffortOverride?: "low" | "medium";
 }
 
+/**
+ * Input for building a `BusinessUnderstanding` from a user's own freeform
+ * description instead of crawled website pages -- the "Describe your market
+ * / idea" onboarding path. `sourceId` is the id of the `user_supplied`
+ * Provenance record the caller (scan-workflow.ts) already created for this
+ * text, so every cited field can point back to it exactly like a crawled
+ * page's sourceId would.
+ */
+export interface AnalyzeBusinessFromContextRequest {
+  workspaceId: EntityId;
+  businessId: EntityId;
+  contextText: string;
+  sourceId: EntityId;
+  models: ModelConfiguration;
+}
+
+export interface TriageConversationsRequest {
+  /** Stops queued requests, active transport, and retry backoff on lost ownership. */
+  signal?: AbortSignal;
+  business: BusinessUnderstanding;
+  candidates: RedditDiscoveryCandidate[];
+  models: ModelConfiguration;
+  /**
+   * Keeps every decision/evidence field but asks the model to make the two
+   * explanatory strings concise. Omitted/false preserves the legacy prompt.
+   */
+  compactOutput?: boolean;
+  coverageRetries?: number;
+  /** Only validated judgments are reusable; legacy synthetic failures are invalidated. */
+  resumeFrom?: ReadonlyMap<string, ConversationTriage>;
+  resumeProcessing?: ReadonlyMap<string, TriageProcessingOutcome>;
+  onProcessingUpdated?: (items: readonly TriageProcessingOutcome[]) => void | Promise<void>;
+  /** Called only with validated judgments, never unresolved work. */
+  onBatchSucceeded?: (items: readonly TriagedConversation[]) => void | Promise<void>;
+  /**
+   * Finish independent batches after exhausted structured-output failures.
+   * Returns only real judgments, with incomplete coverage and separate
+   * unresolved outcomes. The caller MUST NOT call that an exhaustive scan.
+   * Off by default: strict callers still receive an error.
+   */
+  tolerateUnrecoverableBatches?: boolean;
+}
+
+export type TriageProcessingOutcome = {
+  externalId: string;
+  /** Logical submissions, including fallback/bisection, not HTTP attempts. */
+  attempts: number;
+} & (
+  | { status: "succeeded" | "pending" }
+  | { status: "unresolved"; code: "ai_structured_output" | "ai_refused" | "ai_transport" | "ai_provider_failure" | "ai_coverage_incomplete";
+      recoverable: boolean }
+);
+
+export type TriageCoverage = { expected: number; succeeded: number; unresolved: number; pending: number; complete: boolean };
+export interface TriageConversationsResult extends AiProviderResult<TriagedConversation[]> {
+  processing?: TriageProcessingOutcome[];
+  coverage?: TriageCoverage;
+}
+
+export interface TriagedConversation {
+  externalId: string;
+  triage: ConversationTriage;
+}
+
+export interface QualifyConversationsRequest {
+  business: BusinessUnderstanding;
+  conversations: EnrichedRedditConversation[];
+  models: ModelConfiguration;
+  coverageRetries?: number;
+}
+
+export interface DeepQualifiedConversation {
+  externalId: string;
+  conversation: EnrichedRedditConversation;
+  qualification: DeepQualification;
+}
+
+/** Legacy request retained for older callers; the active scan uses triage/qualify. */
 export interface ClassifyConversationsRequest {
   business: BusinessUnderstanding;
   conversations: RedditConversation[];
@@ -52,6 +151,7 @@ export interface ClassifiedConversation {
 export interface GenerateInsightsRequest {
   business: BusinessUnderstanding;
   opportunities: QualifiedOpportunity[];
+  evidenceConversations?: DeepQualifiedConversation[];
   models: ModelConfiguration;
 }
 
@@ -80,11 +180,81 @@ export interface EmbeddingRequest {
   businessId?: EntityId;
 }
 
+/**
+ * Input for generating the 3 fixed buyer-intent questions AI Visibility
+ * Tracking asks every engine. Deliberately narrow -- only the handful of
+ * BusinessUnderstanding fields and competitor names actually needed to
+ * write natural buyer questions, not the whole business/competitor record.
+ */
+export interface GenerateVisibilityQuestionsRequest {
+  productCategory: string;
+  brandName: string;
+  customerProblemLanguage: string[];
+  competitorNames: string[];
+  workspaceId: EntityId;
+  businessId: EntityId;
+  models: ModelConfiguration;
+}
+
+export interface GeneratedVisibilityQuestions {
+  /** Always exactly 3: category/use-case, alternatives, and problem-solving. */
+  questions: string[];
+}
+
+/** One raw AI-search answer to classify for AnalyzeVisibilityMentionsRequest. */
+export interface VisibilityAnswerToAnalyze {
+  index: number;
+  question: string;
+  answerText: string;
+}
+
+export interface AnalyzeVisibilityMentionsRequest {
+  brandName: string;
+  answers: VisibilityAnswerToAnalyze[];
+  models: ModelConfiguration;
+  workspaceId: EntityId;
+  businessId: EntityId;
+}
+
+/**
+ * The one genuinely semantic field AI Visibility Tracking needs: whether
+ * the brand is actually being recommended as a solution, as opposed to
+ * merely named, mentioned neutrally, or mentioned negatively. Everything
+ * else about an answer (whether the brand/competitors/Reddit are mentioned
+ * at all) is deterministic string/URL matching -- see
+ * lib/server/ai-visibility-analysis.ts.
+ */
+export interface VisibilityMentionAnalysis {
+  index: number;
+  brandRecommended: boolean;
+  reasoning: string;
+}
+
 export interface AiProvider {
   readonly name: string;
   analyzeBusiness(
     request: AnalyzeBusinessRequest,
   ): Promise<AiProviderResult<BusinessUnderstanding>>;
+  /**
+   * The context-mode counterpart to `analyzeBusiness`: builds the same
+   * `BusinessUnderstanding` shape from a user's freeform description rather
+   * than crawled pages. There is no "fast" tier for this path -- a single
+   * short text has no multi-page latency to hide behind, so this is always
+   * the complete analysis. Competitors the user explicitly names are tagged
+   * `verification: "user_claim"`; other plausible competitors the model
+   * suggests, only when reasonably confident, are tagged
+   * `"unverified_hypothesis"` -- see lib/domain/types.ts's CompetitorReference.
+   */
+  analyzeBusinessFromContext(
+    request: AnalyzeBusinessFromContextRequest,
+  ): Promise<AiProviderResult<BusinessUnderstanding>>;
+  triageConversations(
+    request: TriageConversationsRequest,
+  ): Promise<TriageConversationsResult>;
+  qualifyConversations(
+    request: QualifyConversationsRequest,
+  ): Promise<AiProviderResult<DeepQualifiedConversation[]>>;
+  /** Deprecated compatibility method. */
   classifyConversations(
     request: ClassifyConversationsRequest,
   ): Promise<AiProviderResult<ClassifiedConversation[]>>;
@@ -94,17 +264,77 @@ export interface AiProvider {
   generateReply(
     request: GenerateReplyRequest,
   ): Promise<AiProviderResult<GeneratedReplyDraft>>;
+  /** Available for future high-volume retrieval, not used by the MVP scan. */
   embed(request: EmbeddingRequest): Promise<AiProviderResult<number[][]>>;
+  /** AI Visibility Tracking: generate the 3 fixed buyer-intent questions. */
+  generateVisibilityQuestions(
+    request: GenerateVisibilityQuestionsRequest,
+  ): Promise<AiProviderResult<GeneratedVisibilityQuestions>>;
+  /** AI Visibility Tracking: batched semantic recommendation classification. */
+  analyzeVisibilityMentions(
+    request: AnalyzeVisibilityMentionsRequest,
+  ): Promise<AiProviderResult<VisibilityMentionAnalysis[]>>;
+  /**
+   * Proposes up to 3 direct competitors -- name and likely official
+   * homepage URL together, in one request -- directly from compact
+   * crawled evidence (title/description/text excerpt per page), not
+   * from BusinessUnderstanding.competitors and not from a completed
+   * business profile. That field's evidence-based semantics (name a
+   * competitor only when the website itself explicitly identifies it)
+   * are deliberately left untouched -- most businesses' own marketing
+   * sites never name a rival, so that field is usually empty, which is
+   * why this exists as a separate, more speculative path specifically
+   * for CompetitorsSetup.tsx's suggestions. Reading crawl evidence
+   * directly (rather than waiting for a completed business profile)
+   * means this can run concurrently with analyzeBusiness right after
+   * the crawl finishes -- see scan-workflow.ts's
+   * runFullWebsiteUnderstanding. The caller
+   * (lib/server/competitor-url-resolution.ts) still independently
+   * verifies every returned URL before ever auto-filling it; this
+   * method's job is only to propose candidates.
+   */
+  suggestCompetitorsFromCrawl(
+    request: SuggestCompetitorsFromCrawlRequest,
+  ): Promise<AiProviderResult<SuggestedCompetitor[]>>;
+}
+
+export interface SuggestCompetitorsFromCrawlRequest {
+  workspaceId: EntityId;
+  websiteUrl: string;
+  canonicalDomain: string;
+  pages: Array<{ url: string; title: string; description?: string; textExcerpt: string }>;
+  /** Resolved by the caller via competitorSuggestionModelFromEnv, not
+   * derived from models.economyModel here -- kept independently
+   * configurable/rollback-able from analyzeBusiness()'s own model
+   * setting. See that function's doc comment in openai.server.ts for
+   * why this changed from gpt-5.6-luna (deepseek-v4-flash) to
+   * gpt-5.6-sol. */
+  model: string;
+  models: ModelConfiguration;
+}
+
+export interface SuggestedCompetitor {
+  name: string;
+  /** Null when the model isn't reasonably confident of a URL -- never a low-confidence guess. */
+  url: string | null;
 }
 
 export interface RedditSearchQueries {
   productTerms: string[];
+  brandTerms?: string[];
   /** Short generic categories buyers use, such as "project management software". */
   productCategories?: string[];
   customerProblems: string[];
+  /** Source-grounded functional jobs that can seed demand-language searches. */
+  jobsToBeDone?: string[];
+  /** Source-grounded workaround hypotheses such as email, spreadsheets or manual steps. */
+  workarounds?: string[];
+  /** Source-grounded events that may create present-tense buying urgency. */
+  triggerEvents?: string[];
   buyerIntent: string[];
   competitors: string[];
   excludedTerms: string[];
+  ambiguityRisks?: string[];
 }
 
 export interface RedditSearchRequest {
@@ -115,6 +345,93 @@ export interface RedditSearchRequest {
   since?: string;
 }
 
+/**
+ * Concept evidence a candidate must show for a plan entry to match.
+ *
+ * Token counting cannot distinguish a market from its neighbour: "android tv
+ * parental control app" overlaps an Android *phone* thread on most of its
+ * tokens, and the one token that separates the two markets carries no more
+ * weight than the rest. Concepts express the requirement directly - market
+ * evidence AND problem evidence - and each concept accepts synonyms, so a
+ * thread saying "television" or "screen time" still matches.
+ */
+export interface RedditSearchConcepts {
+  /** Market/category variants. At least one must appear in the candidate. */
+  market: string[];
+  /** Problem or use-case variants. At least one must appear. */
+  problem: string[];
+  /** Buying-intent variants. Never required; contributes to score only. */
+  intent?: string[];
+}
+
+export interface RedditSearchPlanEntry {
+  lane: RedditSearchLane;
+  query: string;
+  seed?: string;
+  concepts?: RedditSearchConcepts;
+}
+
+export type ProviderRejectionReason =
+  | "invalid_record"
+  | "invalid_url"
+  | "query_mismatch"
+  | "bot_author"
+  | "deleted"
+  | "nsfw"
+  | "missing_timestamp"
+  | "outside_window";
+
+export interface RedditDiscoveryDiagnostics {
+  queryCount: number;
+  fetchedCandidates: number;
+  normalizedCandidates: number;
+  verifiedRecentCandidates: number;
+  rejectedByReason: Record<ProviderRejectionReason, number>;
+  laneQueryCounts: Partial<Record<RedditSearchLane, number>>;
+  /**
+   * True when discovery lost coverage it could not recover even after
+   * retries -- e.g. one or more query batches exhausted every retry, or a
+   * timed-out run retained zero usable records. `candidates` may still be
+   * non-empty (other batches can succeed); this flag is what lets a caller
+   * distinguish "genuinely searched and found nothing" from "the search
+   * itself was incomplete", which a bare empty `candidates` array cannot.
+   */
+  degraded?: boolean;
+  /** How many of the planned queries never returned usable results, after retries. */
+  queriesFailed?: number;
+  /** How many of the planned queries succeeded (possibly after a retry). */
+  queriesSucceeded?: number;
+  /** Total retry attempts spent across all query batches. */
+  retryAttempts?: number;
+}
+
+export interface RedditDiscoveryResponse {
+  candidates: RedditDiscoveryCandidate[];
+  searchPlan: RedditSearchPlanEntry[];
+  nextCursor?: string;
+  sourceMode: RedditConversation["sourceMode"];
+  diagnostics: RedditDiscoveryDiagnostics;
+}
+
+export interface RedditEnrichmentRequest {
+  candidates: RedditDiscoveryCandidate[];
+  maxComments?: number;
+}
+
+export interface RedditEnrichmentResponse {
+  conversations: EnrichedRedditConversation[];
+  sourceMode: RedditConversation["sourceMode"];
+  diagnostics: {
+    requested: number;
+    enriched: number;
+    failed: number;
+    fallbackUsed: number;
+    /** Sanitized provider/mapping reason; never contains credentials or raw Reddit content. */
+    failureReason?: string;
+  };
+}
+
+/** Legacy response retained for compatibility with older provider callers. */
 export interface RedditSearchResponse {
   conversations: RedditConversation[];
   nextCursor?: string;
@@ -137,10 +454,47 @@ export interface RedditSearchResponse {
  * Production implementations must use an approved API. The `apify-test` mode
  * is an explicitly guarded MVP test adapter and is never treated as approved.
  */
+/** Reported once per retry attempt so a caller can surface live progress. */
+export interface RedditDiscoveryRetryNotice {
+  reason: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
+export interface RedditDiscoverOptions {
+  /** Unique-query states, not request/attempt counts. Contains no query text. */
+  onProgress?: (progress: { planned: number; succeeded: number; active: number; retrying: number; failed: number; pending: number }) => void | Promise<void>;
+  onRetry?: (notice: RedditDiscoveryRetryNotice) => void | Promise<void>;
+  /**
+   * A prior, possibly-incomplete discovery attempt for this same scan (see
+   * the discovery-checkpointing comment in scan-workflow.ts). When
+   * supplied, discover() skips re-querying any search-plan query already
+   * present in `resumeFrom.searchPlan` and merges its own new results into
+   * it before returning -- so a scan resumed after an interruption only
+   * pays for and waits on whatever never actually completed, instead of
+   * re-running every query from scratch.
+   */
+  resumeFrom?: RedditDiscoveryResponse;
+  /**
+   * Fired after each independently-run query chunk succeeds (never on
+   * failure -- a failed chunk has nothing new worth checkpointing). The
+   * value is the full running result so far (resumeFrom plus every chunk
+   * that has succeeded up to and including this one). A caller can persist
+   * this so a scan interrupted mid-discovery resumes from here on its next
+   * attempt rather than re-querying everything already covered.
+   */
+  onChunkSucceeded?: (partial: RedditDiscoveryResponse) => void | Promise<void>;
+}
+
 export interface RedditProvider {
+  configurationForDiagnostics?(): Record<string, string | number | boolean>;
   readonly name: string;
   readonly sourceMode: RedditConversation["sourceMode"];
-  search(request: RedditSearchRequest): Promise<RedditSearchResponse>;
+  discover(request: RedditSearchRequest, options?: RedditDiscoverOptions): Promise<RedditDiscoveryResponse>;
+  enrich(request: RedditEnrichmentRequest): Promise<RedditEnrichmentResponse>;
+  /** Deprecated compatibility path. The active scan never calls it. */
+  search?(request: RedditSearchRequest): Promise<RedditSearchResponse>;
 }
 
 export interface EmailMessage {

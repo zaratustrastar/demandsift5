@@ -4,13 +4,16 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { Readable } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 import type { WebsiteEvidencePage } from "@/lib/providers/contracts";
+import type { Browser } from "puppeteer-core";
 
 const DEFAULT_MAX_PAGES = 6;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_MAX_TOTAL_BYTES = 4_000_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_RENDER_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 4;
 
 const BLOCKED_HOST_SUFFIXES = [
@@ -44,6 +47,14 @@ export interface ValidatedWebsiteTarget {
 export interface CrawlFailure {
   url: string;
   reason: string;
+  /** True when this specific page failed with a PermanentWebsiteFetchError
+   * (401/403/404/410/451) rather than a plain (potentially transient)
+   * Error -- lets the final all-pages-failed throw below preserve that
+   * distinction instead of collapsing every failure into one generic
+   * Error, which is what silently defeated retry classification for a
+   * persistent 403 in a real production incident. */
+  permanent: boolean;
+  status?: number;
 }
 
 export interface WebsiteCrawlResult {
@@ -55,15 +66,40 @@ export interface WebsiteCrawlResult {
   totalBytes: number;
 }
 
+/**
+ * One page's full timing/diagnostic breakdown, emitted as each page
+ * finishes (success or failure) so a caller can attribute a slow crawl to
+ * a specific cause instead of only seeing one lump total. Deliberately a
+ * plain callback rather than requiring the scan-observability TraceEvent
+ * shape directly: this module has no dependency on that package, and
+ * analyzeOneCompetitor (lib/server/competitor-analysis.ts) calls
+ * crawlWebsite with no ScanTrace in scope at all.
+ */
+export interface PageCrawlTrace {
+  url: string;
+  staticFetchMs: number;
+  staticChars: number;
+  headlessTriggered: boolean;
+  browserStartupMs?: number;
+  renderMs?: number;
+  completionReason?: "content-ready" | "networkidle2" | "timeout";
+  finalChars: number;
+  totalMs: number;
+  outcome: "succeeded" | "failed";
+}
+
 export interface CrawlWebsiteOptions {
   maxPages?: number;
   maxResponseBytes?: number;
   maxTotalBytes?: number;
   timeoutMs?: number;
+  renderTimeoutMs?: number;
   userAgent?: string;
   fetchImpl?: PinnedWebsiteFetch;
+  renderImpl?: HeadlessRenderFn;
   resolver?: HostResolver;
   signal?: AbortSignal;
+  onPageTrace?: (event: PageCrawlTrace) => void;
 }
 
 /**
@@ -81,6 +117,68 @@ export class UnsafeWebsiteUrlError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "UnsafeWebsiteUrlError";
+  }
+}
+
+/**
+ * Thrown for an HTTP status that retrying can never fix: the site
+ * actively refused or doesn't have the page, not a transient network/
+ * server condition. Distinct from a plain Error specifically so callers
+ * (scan-workflow.ts's retry loop, job-retry-classification.ts's queue-
+ * level disposition) can tell "retrying this is pointless" apart from
+ * "retrying this might work" (429, 5xx, timeouts, DNS hiccups -- all of
+ * which stay a plain Error and remain retryable, per the same
+ * distinction this file already draws for SSRF-unsafe URLs).
+ */
+export class PermanentWebsiteFetchError extends Error {
+  readonly status: number;
+  /** Recognized directly by lib/server/job-retry-classification.ts's
+   * scanPipelineErrorCode (which checks error.code before falling back
+   * to message-pattern matching) so this reaches
+   * JOB_LEVEL_TERMINAL_ERROR_CODES without needing a fragile regex
+   * against this error's message text. */
+  readonly code = "website_permanently_unreachable";
+  constructor(status: number) {
+    super(`Website returned HTTP ${status}.`);
+    this.name = "PermanentWebsiteFetchError";
+    this.status = status;
+  }
+}
+
+/** 401/403: the site is actively refusing the crawler (auth wall, bot
+ * block). 404/410: the page doesn't exist. 451: blocked for legal
+ * reasons. None of these change on retry -- the site's answer is the
+ * site's answer. Everything else (429, 5xx, and anything not in this
+ * set) stays retryable, since those can genuinely be transient. */
+const PERMANENT_HTTP_STATUS_CODES = new Set([401, 403, 404, 410, 451]);
+
+/**
+ * A non-2xx status that isn't in PERMANENT_HTTP_STATUS_CODES above --
+ * still assumed retryable on its own, but carries the status (unlike a
+ * plain Error) so a caller that sees the *same* status recur across
+ * consecutive attempts can tell that apart from an ordinary one-off
+ * blip. That distinction matters chiefly for 503: real production case,
+ * amazon.com answers every single request with HTTP 503 rather than
+ * 403 -- functionally the same permanent bot-block, just spelled with a
+ * status this file cannot treat as unconditionally permanent, since a
+ * 503 from a site having one genuinely bad moment is common and should
+ * still get its normal retries. See scan-workflow.ts's
+ * runFullWebsiteUnderstanding, which promotes a repeated status from
+ * this class to PermanentWebsiteFetchError.
+ */
+export class WebsiteFetchStatusError extends Error {
+  readonly status: number;
+  /** message defaults to the same bare "Website returned HTTP NNN."
+   * text a single page's fetch failure already used (still what
+   * populates failures[].reason above) -- callers that need the fuller
+   * "Website analysis could not read the site: ..." wrapper (see
+   * crawlWebsite's final aggregation below) pass it explicitly so this
+   * class's introduction doesn't change any user-facing message text,
+   * only which errors carry a structured status. */
+  constructor(status: number, message?: string) {
+    super(message ?? `Website returned HTTP ${status}.`);
+    this.name = "WebsiteFetchStatusError";
+    this.status = status;
   }
 }
 
@@ -348,7 +446,7 @@ function responseHeaders(headers: Record<string, string | string[] | undefined>)
  * pins SNI/certificate verification to that hostname while lookup supplies the
  * validated network address.
  */
-async function fetchPinnedWebsiteTarget(
+export async function fetchPinnedWebsiteTarget(
   input: URL,
   init: RequestInit,
   target: ValidatedWebsiteTarget,
@@ -405,13 +503,52 @@ async function fetchPinnedWebsiteTarget(
 
       const bodyForbidden = status === 204 || status === 205 || status === 304;
       if (bodyForbidden) incoming.resume();
+      // Node's raw http/https client (used here, not the global fetch(),
+      // so the already-validated pinned IP can be used without a second
+      // DNS lookup -- see this function's doc comment) does not
+      // auto-decompress a response the way a browser or fetch() does.
+      // Real production case: amazon.es's servers gzip-compress their
+      // response regardless of this crawler never sending an
+      // Accept-Encoding header, so the raw compressed bytes (starting
+      // with the gzip magic number) were being read as UTF-8 "text" --
+      // garbage binary that, once it reached a NUL byte, failed the next
+      // Postgres JSONB write with an opaque, unclassified database error
+      // (code 22P05) instead of ever reaching any of this crawler's own
+      // error handling, so the scan retried indefinitely with no visible
+      // failure at all. Decompress here, based on whatever
+      // Content-Encoding the server actually used, before any of that.
+      const contentEncoding = Array.isArray(incoming.headers["content-encoding"])
+        ? incoming.headers["content-encoding"][0]
+        : incoming.headers["content-encoding"];
+      const encoding = (contentEncoding ?? "").trim().toLowerCase();
+      let decoded: Readable = incoming;
+      if (!bodyForbidden && (encoding === "gzip" || encoding === "x-gzip")) {
+        decoded = incoming.pipe(createGunzip());
+      } else if (!bodyForbidden && encoding === "deflate") {
+        decoded = incoming.pipe(createInflate());
+      } else if (!bodyForbidden && encoding === "br") {
+        decoded = incoming.pipe(createBrotliDecompress());
+      }
+      // .pipe() does not forward source errors to the destination --
+      // without this, a connection drop mid-response would silently
+      // truncate the decompressed stream instead of surfacing as a
+      // fetch failure the same way it already does in the uncompressed
+      // case.
+      if (decoded !== incoming) incoming.once("error", (error) => decoded.destroy(error));
       const body = bodyForbidden
         ? null
-        : Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
+        : Readable.toWeb(decoded) as ReadableStream<Uint8Array>;
+      const headers = responseHeaders(incoming.headers);
+      // The body reaching consumers below is now decompressed (or was
+      // never compressed) either way -- a passthrough content-encoding
+      // header would incorrectly claim otherwise, matching how a real
+      // fetch()/browser client already hides this header once it has
+      // handled the encoding transparently.
+      headers.delete("content-encoding");
       try {
         resolvePromise(
           new Response(body, {
-            headers: responseHeaders(incoming.headers),
+            headers,
             status,
             statusText: incoming.statusMessage,
           }),
@@ -478,11 +615,11 @@ async function fetchWithValidatedRedirects(
 }
 
 async function readLimitedText(response: Response, byteLimit: number): Promise<{ text: string; bytes: number }> {
-  const declaredLength = Number.parseInt(response.headers.get("content-length") ?? "0", 10);
-  if (Number.isFinite(declaredLength) && declaredLength > byteLimit) {
-    await response.body?.cancel("Response exceeded crawler byte limit.");
-    throw new Error(`Page exceeds the ${byteLimit}-byte response limit.`);
-  }
+  // Large marketing pages often include several megabytes of hydration data,
+  // images encoded in markup, or localization payloads after the useful public
+  // copy. Read only a bounded prefix instead of rejecting the whole page from
+  // Content-Length. The byte limit remains a hard memory/network boundary: the
+  // stream is cancelled as soon as the prefix is full.
   if (!response.body) return { text: "", bytes: 0 };
 
   const reader = response.body.getReader();
@@ -491,11 +628,16 @@ async function readLimitedText(response: Response, byteLimit: number): Promise<{
   while (true) {
     const result = await reader.read();
     if (result.done) break;
-    bytes += result.value.byteLength;
-    if (bytes > byteLimit) {
+    const remaining = byteLimit - bytes;
+    if (result.value.byteLength >= remaining) {
+      if (remaining > 0) {
+        chunks.push(result.value.slice(0, remaining));
+        bytes += remaining;
+      }
       await reader.cancel("Response exceeded crawler byte limit.");
-      throw new Error(`Page exceeds the ${byteLimit}-byte response limit.`);
+      break;
     }
+    bytes += result.value.byteLength;
     chunks.push(result.value);
   }
   const body = new Uint8Array(bytes);
@@ -584,15 +726,37 @@ function extractJsonLdEvidence(html: string): string[] {
   return evidence;
 }
 
-function extractPage(html: string): { title: string; description?: string; text: string } {
+/** Identity signals kept separate from the combined `text` blob
+ * specifically for callers (currently only
+ * lib/server/competitor-url-resolution.ts) that need to inspect og:title/
+ * og:site_name/application-name individually -- e.g. to diagnose why an
+ * identity check did or didn't match, rather than only having the single
+ * concatenated string every other consumer of extractPage already used. */
+export interface PageIdentitySignals {
+  title: string;
+  description?: string;
+  ogTitle?: string;
+  ogSiteName?: string;
+  applicationName?: string;
+}
+
+function extractPage(html: string): { title: string; description?: string; text: string; identity: PageIdentitySignals } {
   const title = capture(html, /<title\b[^>]*>([\s\S]*?)<\/title>/i) ?? "Untitled page";
   const description =
     metaContent(html, ["description", "og:description", "twitter:description"]);
-  const metadata = [
-    metaContent(html, ["og:site_name", "application-name"]),
-    metaContent(html, ["og:title", "twitter:title"]),
-    ...extractJsonLdEvidence(html),
-  ];
+  const ogSiteName = metaContent(html, ["og:site_name"]);
+  const applicationName = metaContent(html, ["application-name"]);
+  const ogTitle = metaContent(html, ["og:title", "twitter:title"]);
+  const metadata = [ogSiteName ?? applicationName, ogTitle, ...extractJsonLdEvidence(html)];
+  // <noscript> fallback text is genuine human-readable content -- often
+  // written deliberately for SEO/no-JS visitors -- unlike script/style/
+  // template/svg, which are never text. Extracted separately (its own
+  // nested tags stripped) before the generic pass below removes the
+  // wrapping element from bodyText, so this content is no longer
+  // silently discarded along with the actual non-text elements.
+  const noscriptText = Array.from(html.matchAll(/<noscript\b[^>]*>([\s\S]*?)<\/noscript>/gi))
+    .map((match) => decodeHtmlEntities(match[1].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim())
+    .filter((text) => text.length > 0);
   const bodyText = decodeHtmlEntities(
     html
       .replace(/<!--[\s\S]*?-->/g, " ")
@@ -601,12 +765,12 @@ function extractPage(html: string): { title: string; description?: string; text:
   )
     .replace(/\s+/g, " ")
     .trim();
-  const text = [...new Set([title, description, ...metadata, bodyText].filter(Boolean))]
+  const text = [...new Set([title, description, ...metadata, ...noscriptText, bodyText].filter(Boolean))]
     .join(". ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120_000);
-  return { title, description, text };
+  return { title, description, text, identity: { title, description, ogTitle, ogSiteName, applicationName } };
 }
 
 function extractInternalLinks(html: string, pageUrl: URL, allowedHostname: string): URL[] {
@@ -642,6 +806,155 @@ function sha256(value: string): string {
 }
 
 /**
+ * A testable rendering boundary, mirroring `PinnedWebsiteFetch`. Production
+ * uses `renderWithHeadlessBrowser` below; custom implementations must not
+ * perform their own DNS resolution and must return the fully rendered HTML.
+ */
+/**
+ * Return type kept as a union (a bare string still works) specifically so
+ * existing test doubles that return `Promise<string>` (see
+ * tests/website-crawler-security.test.mjs) keep working unchanged --
+ * only the real implementation below needs to report the richer
+ * diagnostics, and it opts in by returning the object form instead.
+ */
+export type HeadlessRenderOutcome =
+  | string
+  | {
+      html: string;
+      completionReason: "content-ready" | "networkidle2" | "timeout";
+      renderMs: number;
+      browserStartupMs: number;
+    };
+export type HeadlessRenderFn = (
+  url: URL,
+  target: ValidatedWebsiteTarget,
+  options: { timeoutMs: number; userAgent: string; getBrowser: () => Promise<Browser> },
+) => Promise<HeadlessRenderOutcome>;
+
+/**
+ * Renders a page with a real (headless) browser so JavaScript-only sites --
+ * whose initial HTML has no readable text until a script fills it in -- can
+ * still be analyzed. This only ever runs as a fallback after the fast static
+ * fetch above already produced too little text, so ordinary server-rendered
+ * pages never pay for it.
+ *
+ * The same SSRF posture as the static fetch path is preserved here: Chromium's
+ * own DNS resolver is overridden with `--host-resolver-rules` so the already
+ * validated (pinned) address is the only one it can ever connect to for this
+ * hostname, and request interception aborts every request to any other host
+ * before Chromium can resolve or connect to it. A JS-only page cannot use this
+ * fallback to make the browser fetch anything the static crawler above
+ * couldn't already fetch itself.
+ */
+async function renderWithHeadlessBrowser(
+  url: URL,
+  target: ValidatedWebsiteTarget,
+  options: { timeoutMs: number; userAgent: string; getBrowser: () => Promise<Browser> },
+): Promise<HeadlessRenderOutcome> {
+  const renderStarted = performance.now();
+  const browserWaitStarted = renderStarted;
+  const browser = await options.getBrowser();
+  // Near-zero for every page after the first in a crawl, since the shared
+  // browser (see crawlWebsite's ensureBrowser) is already resolved by
+  // then -- only whichever page actually triggers the lazy launch pays
+  // (and reports) real startup time here.
+  const browserStartupMs = performance.now() - browserWaitStarted;
+  const bareHostname = canonicalHostname(target.url.hostname);
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent(options.userAgent);
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      let requestUrl: URL;
+      try {
+        requestUrl = new URL(request.url());
+      } catch {
+        void request.abort();
+        return;
+      }
+      const sameHost =
+        (requestUrl.protocol === "http:" || requestUrl.protocol === "https:") &&
+        equivalentWebsiteHost(requestUrl.hostname, bareHostname);
+      if (!sameHost) {
+        void request.abort();
+        return;
+      }
+      // image/font/media never contribute a single character to the text
+      // this crawl exists to extract -- blocking them (even same-host, where
+      // they were previously allowed through unfiltered) cuts real network
+      // work and, as a side effect, gives networkidle2 fewer in-flight
+      // connections to wait out. Stylesheets are deliberately left alone:
+      // unlike the other three, CSS can affect which DOM text a framework
+      // treats as visible, and that hasn't been established safe to ignore.
+      const resourceType = request.resourceType();
+      if (resourceType === "image" || resourceType === "font" || resourceType === "media") {
+        void request.abort();
+        return;
+      }
+      void request.continue();
+    });
+
+    const deadlineAt = renderStarted + options.timeoutMs;
+    try {
+      await page.goto(url.toString(), {
+        waitUntil: "domcontentloaded",
+        timeout: Math.max(1_000, deadlineAt - performance.now()),
+      });
+    } catch {
+      // Even an incomplete navigation usually leaves a body element in
+      // place -- fall through to the readiness race below rather than
+      // failing outright, matching the previous networkidle2-timeout
+      // fallback's own tolerance for an imperfect navigation.
+    }
+
+    const remainingMs = () => Math.max(0, deadlineAt - performance.now());
+    const CONTENT_READY_CHAR_THRESHOLD = 80; // matches the static-extraction threshold
+    const POLL_INTERVAL_MS = 250;
+
+    async function raceToLabel(work: Promise<boolean>, label: "content-ready" | "networkidle2") {
+      const ready = await work.catch(() => false);
+      return ready ? label : ("timeout" as const);
+    }
+
+    const contentReady = (async () => {
+      let previousLength = -1;
+      let sawStableRepeat = false;
+      while (performance.now() < deadlineAt) {
+        const length = await page
+          .evaluate(() => document.body?.innerText?.length ?? 0)
+          .catch(() => 0);
+        if (length >= CONTENT_READY_CHAR_THRESHOLD && length === previousLength) {
+          if (sawStableRepeat) return true;
+          sawStableRepeat = true;
+        } else {
+          sawStableRepeat = false;
+        }
+        previousLength = length;
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      }
+      return false;
+    })();
+
+    const budget = remainingMs();
+    const networkIdle = budget > 0
+      ? page.waitForNetworkIdle({ idleTime: 500, timeout: budget }).then(() => true).catch(() => false)
+      : Promise.resolve(false);
+
+    const completionReason = budget <= 0
+      ? ("timeout" as const)
+      : await Promise.race([
+          raceToLabel(contentReady, "content-ready"),
+          raceToLabel(networkIdle, "networkidle2"),
+        ]);
+
+    const html = await page.content();
+    return { html, completionReason, renderMs: performance.now() - renderStarted, browserStartupMs };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+/**
  * Crawls a small set of public HTML pages on the submitted host (plus its www
  * counterpart). Redirects and every DNS answer are revalidated for each fetch,
  * then the socket is pinned to those answers so DNS rebinding cannot change the
@@ -663,7 +976,12 @@ export async function crawlWebsite(
     Math.min(options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES, 10_000_000),
   );
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, 20_000));
+  const renderTimeoutMs = Math.max(
+    3_000,
+    Math.min(options.renderTimeoutMs ?? DEFAULT_RENDER_TIMEOUT_MS, 25_000),
+  );
   const fetchImpl = options.fetchImpl ?? fetchPinnedWebsiteTarget;
+  const renderImpl = options.renderImpl ?? renderWithHeadlessBrowser;
   const userAgent = options.userAgent ?? "DemandSignalBot/1.0 (website analysis; public pages only)";
   const queue: URL[] = [target.url];
   const queued = new Set([target.url.toString().replace(/\/$/, "")]);
@@ -672,10 +990,70 @@ export async function crawlWebsite(
   let totalBytes = 0;
   let canonicalUrl = target.url.toString();
 
-  while (queue.length > 0 && pages.length < maxPages && totalBytes < maxTotalBytes) {
-    const next = queue.shift();
-    if (!next) break;
+  // Lazily launched on the first page that actually needs the render
+  // fallback, then reused for every subsequent page in this same crawl --
+  // a fresh Chromium process per rendered page was the single largest
+  // fixed cost in a multi-page render-heavy crawl. Every page in one
+  // crawlWebsite call shares the same target host, so the host-resolver
+  // pinning below is valid for all of them, not just whichever page
+  // triggered the launch. Not started at all if no page ever needs it, or
+  // if a test-injected renderImpl never calls getBrowser().
+  let sharedBrowserPromise: Promise<Browser> | undefined;
+  function ensureBrowser(): Promise<Browser> {
+    if (!sharedBrowserPromise) {
+      sharedBrowserPromise = (async () => {
+        const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
+        if (!executablePath) {
+          throw new Error("Headless rendering is not configured on this server.");
+        }
+        const puppeteer = (await import("puppeteer-core")).default;
+        const bareHostname = canonicalHostname(target.url.hostname);
+        const pinnedAddress =
+          target.resolvedAddresses.find((entry) => entry.family === 4)?.address ??
+          target.resolvedAddresses[0]?.address;
+        if (!pinnedAddress) {
+          throw new Error("No validated address is available for rendering.");
+        }
+        const hostResolverRules = [
+          `MAP ${bareHostname} ${pinnedAddress}`,
+          `MAP www.${bareHostname} ${pinnedAddress}`,
+        ].join(",");
+        return puppeteer.launch({
+          executablePath,
+          headless: true,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            `--host-resolver-rules=${hostResolverRules}`,
+          ],
+        });
+      })();
+    }
+    return sharedBrowserPromise;
+  }
+
+  /**
+   * Fetches and processes exactly one queued URL, mutating the shared
+   * pages/failures/totalBytes/queue/queued state above. A failure here
+   * never throws out of crawlWebsite itself -- it is recorded in
+   * `failures` and the crawl continues, exactly as before this function
+   * was pulled out of an inline loop body. Callers are responsible for
+   * respecting maxPages/maxTotalBytes before invoking this (see below);
+   * this function does not re-check them itself.
+   */
+  async function fetchOnePage(next: URL): Promise<void> {
+    const pageStarted = performance.now();
+    let staticFetchMs = 0;
+    let staticChars = 0;
+    let headlessTriggered = false;
+    let browserStartupMs: number | undefined;
+    let renderMs: number | undefined;
+    let completionReason: PageCrawlTrace["completionReason"];
+    let finalChars = 0;
     try {
+      const fetchStarted = performance.now();
       const { response, finalUrl } = await fetchWithValidatedRedirects(next, {
         allowedHostname: target.url.hostname,
         timeoutMs,
@@ -686,18 +1064,72 @@ export async function crawlWebsite(
       });
       if (!response.ok) {
         await response.body?.cancel("Non-success response is not crawled.");
-        throw new Error(`Website returned HTTP ${response.status}.`);
+        if (PERMANENT_HTTP_STATUS_CODES.has(response.status)) throw new PermanentWebsiteFetchError(response.status);
+        throw new WebsiteFetchStatusError(response.status);
       }
       const contentType = response.headers.get("content-type")?.toLocaleLowerCase("en-US") ?? "";
       if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
         await response.body?.cancel("Non-HTML response is not crawled.");
         throw new Error("Skipped a non-HTML page.");
       }
+      // Best-effort, not an exact global lock: with concurrent fetches (see
+      // the worker pool below), several pages can each read this snapshot
+      // of the remaining budget before any of them has actually updated
+      // totalBytes, so the true total can overshoot maxTotalBytes by up to
+      // (concurrency - 1) page-reads in the worst case. Concurrency is kept
+      // small (3) specifically to bound that overshoot; maxPages -- the
+      // more consequential budget for downstream AI cost -- is still
+      // enforced exactly (see the `reserved` counter below).
       const remainingBytes = Math.min(maxResponseBytes, maxTotalBytes - totalBytes);
       const loaded = await readLimitedText(response, remainingBytes);
+      staticFetchMs = performance.now() - fetchStarted;
       totalBytes += loaded.bytes;
-      const extracted = extractPage(loaded.text);
-      if (extracted.text.length < 80) throw new Error("Page did not contain enough readable public text.");
+      let pageHtml = loaded.text;
+      let extracted = extractPage(pageHtml);
+      staticChars = extracted.text.length;
+      let renderDiagnostic: string | undefined;
+      if (extracted.text.length < 80) {
+        // Static HTML alone was too thin -- likely a JavaScript-only page.
+        // Try rendering it with a headless browser before giving up. Any
+        // failure here (unconfigured server, blocked navigation, browser
+        // crash) leaves the too-thin static result in place below, but the
+        // reason is kept so the eventual error is diagnosable instead of
+        // always reading identically to "no fallback was even attempted."
+        headlessTriggered = true;
+        try {
+          const renderTarget = await validatePublicWebsiteUrl(finalUrl, resolver);
+          const renderOutcome = await renderImpl(finalUrl, renderTarget, {
+            timeoutMs: renderTimeoutMs,
+            userAgent,
+            getBrowser: ensureBrowser,
+          });
+          const renderedHtml = typeof renderOutcome === "string" ? renderOutcome : renderOutcome.html;
+          if (typeof renderOutcome !== "string") {
+            completionReason = renderOutcome.completionReason;
+            renderMs = renderOutcome.renderMs;
+            browserStartupMs = renderOutcome.browserStartupMs;
+          }
+          const rendered = extractPage(renderedHtml);
+          if (rendered.text.length >= 80) {
+            extracted = rendered;
+            pageHtml = renderedHtml;
+          } else {
+            renderDiagnostic = `headless render produced only ${rendered.text.length} readable characters`;
+          }
+        } catch (renderError) {
+          renderDiagnostic = `headless render failed: ${
+            renderError instanceof Error ? renderError.message : "unknown error"
+          }`;
+        }
+      }
+      finalChars = extracted.text.length;
+      if (extracted.text.length < 80) {
+        throw new Error(
+          renderDiagnostic
+            ? `Page did not contain enough readable public text (${renderDiagnostic}).`
+            : "Page did not contain enough readable public text.",
+        );
+      }
       const retrievedAt = new Date().toISOString();
       pages.push({
         url: finalUrl.toString(),
@@ -706,26 +1138,128 @@ export async function crawlWebsite(
         text: extracted.text,
         contentHash: sha256(extracted.text),
         retrievedAt,
+        identity: extracted.identity,
       });
-      if (pages.length === 1) canonicalUrl = finalUrl.toString();
 
-      for (const link of extractInternalLinks(loaded.text, finalUrl, target.url.hostname)) {
+      for (const link of extractInternalLinks(pageHtml, finalUrl, target.url.hostname)) {
         const key = link.toString().replace(/\/$/, "");
         if (!queued.has(key) && queued.size < maxPages * 8) {
           queued.add(key);
           queue.push(link);
         }
       }
+      options.onPageTrace?.({
+        url: next.toString(),
+        staticFetchMs,
+        staticChars,
+        headlessTriggered,
+        browserStartupMs,
+        renderMs,
+        completionReason,
+        finalChars,
+        totalMs: performance.now() - pageStarted,
+        outcome: "succeeded",
+      });
     } catch (error) {
       failures.push({
         url: next.toString(),
         reason: error instanceof Error ? error.message : "Unknown crawl error",
+        permanent: error instanceof PermanentWebsiteFetchError,
+        status:
+          error instanceof PermanentWebsiteFetchError || error instanceof WebsiteFetchStatusError
+            ? error.status
+            : undefined,
+      });
+      options.onPageTrace?.({
+        url: next.toString(),
+        staticFetchMs,
+        staticChars,
+        headlessTriggered,
+        browserStartupMs,
+        renderMs,
+        completionReason,
+        finalChars,
+        totalMs: performance.now() - pageStarted,
+        outcome: "failed",
       });
     }
   }
 
+  // The submitted URL is always fetched alone first, both because
+  // canonicalUrl must reflect it specifically (not whichever page a
+  // concurrent worker happens to finish first) and because every other
+  // page is only discovered by reading this one's links -- there is
+  // nothing to parallelize until it completes.
+  const first = queue.shift();
+  if (first) {
+    const beforePages = pages.length;
+    await fetchOnePage(first);
+    if (pages.length > beforePages) canonicalUrl = pages[0].url;
+  }
+
+  // Pages 2+ have no such ordering constraint -- once queued, several can
+  // be fetched at once instead of one at a time, which is where most of a
+  // multi-page crawl's wall-clock time previously went (this is the same
+  // crawlWebsite used for both a competitor's site and the primary
+  // business's own, at maxPages: 4). `reserved` tracks fetches currently
+  // in flight so pages.length can never exceed maxPages even though
+  // several workers may be racing to add to it -- a worker only dequeues
+  // a URL once it has "reserved" a slot within the budget.
+  const concurrency = Math.min(3, maxPages);
+  let reserved = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      if (pages.length + reserved >= maxPages || totalBytes >= maxTotalBytes) return;
+      const next = queue.shift();
+      if (!next) {
+        if (reserved === 0) return;
+        // Nothing queued right now, but another worker is still fetching
+        // and may discover new links shortly -- wait briefly rather than
+        // exiting early. Network fetches take orders of magnitude longer
+        // than this poll, so the added latency here is negligible.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+      reserved += 1;
+      try {
+        await fetchOnePage(next);
+      } finally {
+        reserved -= 1;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  // Only actually closes anything if some page triggered ensureBrowser()
+  // above; awaiting an undefined sharedBrowserPromise here would be a
+  // no-op anyway, but the explicit check keeps a crawl that never needed
+  // rendering from touching this at all.
+  if (sharedBrowserPromise) {
+    await sharedBrowserPromise.then((browser) => browser.close()).catch(() => {});
+  }
+
   if (pages.length === 0) {
-    const detail = failures[0]?.reason ?? "No readable public HTML pages were found.";
+    const firstFailure = failures[0];
+    const detail = firstFailure?.reason ?? "No readable public HTML pages were found.";
+    // Preserve the permanent/transient distinction through to the final
+    // throw -- collapsing every failure into a generic Error here is what
+    // silently defeated retry classification for a persistent 403 in a
+    // real production incident (the site's own status code never reached
+    // the job queue's disposition logic, so it looked identical to an
+    // ordinary transient failure and kept retrying indefinitely).
+    if (firstFailure?.permanent && typeof firstFailure.status === "number") {
+      throw new PermanentWebsiteFetchError(firstFailure.status);
+    }
+    // Preserve the status here too (not just the permanent branch above)
+    // so a non-auto-permanent status like 503 still reaches
+    // runFullWebsiteUnderstanding's retry loop as a typed
+    // WebsiteFetchStatusError instead of a bare Error -- that loop needs
+    // the numeric status to detect the same code recurring across
+    // consecutive attempts. The user-facing message is unchanged either
+    // way; only the thrown error's type/shape differs.
+    if (typeof firstFailure?.status === "number") {
+      throw new WebsiteFetchStatusError(firstFailure.status, `Website analysis could not read the site: ${detail}`);
+    }
     throw new Error(`Website analysis could not read the site: ${detail}`);
   }
 

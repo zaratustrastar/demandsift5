@@ -1,5 +1,5 @@
 import { apiErrorResponse, requireWorkspace } from "@/lib/server/http";
-import { presentReply, requireAccessibleReply } from "@/lib/server/presenter";
+import { applyBusinessSummaryOverride, presentReply, requireAccessibleReply } from "@/lib/server/presenter";
 import { assertRateLimit } from "@/lib/server/rate-limit";
 import { regenerateReply } from "@/lib/server/reply-service";
 
@@ -12,7 +12,8 @@ export async function POST(request: Request, context: RouteContext) {
     const { replyId } = await context.params;
     const { scan, reply, opportunity } = await requireAccessibleReply(actor.workspaceId, replyId);
     if (!scan.result) throw new Error("Scan result is unavailable");
-    const updated = await regenerateReply({ reply, opportunity, profile: scan.result.profile });
+    const profile = applyBusinessSummaryOverride(scan, scan.result.profile);
+    const updated = await regenerateReply({ reply, opportunity, profile });
     return Response.json({ reply: presentReply(updated) });
   } catch (error) {
     return apiErrorResponse(error);

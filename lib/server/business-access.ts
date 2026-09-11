@@ -15,7 +15,28 @@ export function normalizedBusinessHostname(websiteUrl: string | null | undefined
   }
 }
 
-export function entitlementCoversWebsite(
+/**
+ * TEMPORARY FULL ACCESS OVERRIDE (2026-08-24) -- explicit request: "give
+ * just full access, do not concentrate on provisional access", while the
+ * real free tier gets rebuilt/reconsidered later ("i will recreate the free
+ * pass later on"). Every caller of this function now sees every website as
+ * covered, regardless of whether any real purchase exists.
+ *
+ * The real, hostname-scoped, purchase-verified logic is untouched below as
+ * `realEntitlementCoversWebsite` -- still fully covered by
+ * business-access-scope.test.mjs. To revert this override, make this
+ * function call `realEntitlementCoversWebsite` again instead of returning
+ * `true` directly.
+ */
+// Signature kept identical to realEntitlementCoversWebsite below so every
+// call site (and its TypeScript arity checking) keeps working unchanged
+// while this override is in effect.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function entitlementCoversWebsite(entitlement: EntitlementRecord, websiteUrl: string): boolean {
+  return true;
+}
+
+export function realEntitlementCoversWebsite(
   entitlement: EntitlementRecord,
   websiteUrl: string,
 ): boolean {
@@ -40,6 +61,10 @@ export function paidCheckoutBlockReason(
   if (entitlement.status !== "active") return null;
   if (entitlement.plan === "core") return "core_already_active";
   if (entitlement.plan !== "pass") return null;
-  if (!entitlementCoversWebsite(entitlement, websiteUrl)) return "different_business";
+  // Deliberately the real check, not the temporarily-overridden
+  // entitlementCoversWebsite above -- billing/duplicate-purchase protection
+  // is a different concern from the feature-access override and stays
+  // correct regardless of it.
+  if (!realEntitlementCoversWebsite(entitlement, websiteUrl)) return "different_business";
   return requestedPlan === "pass" ? "pass_already_active" : null;
 }

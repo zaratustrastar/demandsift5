@@ -1,0 +1,115 @@
+name: Diagnose TVCP production recall
+
+on:
+  push:
+    branches:
+      - feature/reddit-intelligence-pipeline
+    paths:
+      - .github/workflows/diagnose-tvcp-recall-20260816.yml
+
+permissions:
+  contents: read
+
+jobs:
+  tvcp-production-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      APP_URL: https://demandsift.143-244-154-139.sslip.io
+    steps:
+      - name: Run TVCP scan and print sanitized funnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cookie_jar="$(mktemp)"
+          created_json="$(mktemp)"
+          latest_json="$(mktemp)"
+          diagnostics_json="$(mktemp)"
+          report_json="$(mktemp)"
+          trap 'rm -f "$cookie_jar" "$created_json" "$latest_json" "$diagnostics_json" "$report_json"' EXIT
+
+          curl --fail-with-body --silent --show-error \
+            --cookie-jar "$cookie_jar" \
+            -H 'content-type: application/json' \
+            -X POST \
+            --data '{"websiteUrl":"https://tvcp.app","defer":true}' \
+            "$APP_URL/api/scans" > "$created_json"
+
+          scan_id="$(python3 - "$created_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("id") or "")
+          PY
+          )"
+          test -n "$scan_id"
+          echo "tvcp_scan_id=$scan_id"
+
+          for attempt in $(seq 1 180); do
+            curl --fail-with-body --silent --show-error \
+              --cookie "$cookie_jar" \
+              "$APP_URL/api/scans/$scan_id?statusOnly=1" > "$latest_json"
+            status="$(python3 - "$latest_json" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          print((payload.get("scan") or {}).get("status") or "")
+          PY
+          )"
+            echo "tvcp_poll=$attempt status=$status"
+
+            if [ "$status" = "complete" ]; then
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/acceptance-diagnostics" > "$diagnostics_json"
+              curl --fail-with-body --silent --show-error \
+                --cookie "$cookie_jar" \
+                "$APP_URL/api/scans/$scan_id" > "$report_json"
+              python3 - "$diagnostics_json" "$report_json" <<'PY'
+          import json, sys
+          aggregate = json.load(open(sys.argv[1]))
+          payload = json.load(open(sys.argv[2]))
+          diagnostics = aggregate.get("diagnostics") or {}
+          retrieval = aggregate.get("retrieval") or {}
+          output = aggregate.get("output") or {}
+          report = payload.get("report") or {}
+          print("tvcp_result=complete")
+          print("tvcp_funnel=" + json.dumps({
+              "retrieved": diagnostics.get("retrieved", 0),
+              "normalized": diagnostics.get("normalized", 0),
+              "deterministicSurvivors": diagnostics.get("deterministicSurvivors", 0),
+              "submittedForTriage": diagnostics.get("submittedForTriage", 0),
+              "triageReturned": diagnostics.get("triageReturned", 0),
+              "worthEnriching": diagnostics.get("worthEnriching", 0),
+              "requestedForEnrichment": diagnostics.get("requestedForEnrichment", 0),
+              "enrichedSuccessfully": diagnostics.get("enrichedSuccessfully", 0),
+              "enrichmentFailures": diagnostics.get("enrichmentFailures", 0),
+              "submittedForDeepQualification": diagnostics.get("submittedForDeepQualification", 0),
+              "deepQualificationsReturned": diagnostics.get("deepQualificationsReturned", 0),
+              "potentialCustomerConversations": diagnostics.get("potentialCustomerConversations", 0),
+              "uniquePotentialCustomers": diagnostics.get("uniquePotentialCustomers", 0),
+              "repliesGenerated": diagnostics.get("repliesGenerated", 0),
+              "queryCount": retrieval.get("queryCount", 0),
+              "queryCountsByLane": retrieval.get("queryCountsByLane", {}),
+              "matchedCandidatesByLane": retrieval.get("matchedCandidatesByLane", {}),
+          }, separators=(",", ":"), sort_keys=True))
+          print("tvcp_output=" + json.dumps(output, separators=(",", ":"), sort_keys=True))
+          opportunities = report.get("opportunities") or []
+          print("tvcp_visible_opportunities=" + str(len(opportunities)))
+          for index, row in enumerate(opportunities[:10], start=1):
+              url = row.get("canonicalPermalink") or row.get("permalink") or row.get("url") or ""
+              kind = row.get("kind") or row.get("type") or ""
+              print(f"tvcp_opportunity_{index}_kind={kind}")
+              if url:
+                  print(f"tvcp_opportunity_{index}_url={url}")
+          PY
+              exit 0
+            fi
+
+            if [ "$status" = "failed" ]; then
+              cat "$latest_json"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "tvcp_result=timeout" >&2
+          exit 1

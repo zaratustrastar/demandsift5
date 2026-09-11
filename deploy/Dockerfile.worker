@@ -5,7 +5,13 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_FETCH_RETRIES=2 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=1000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=10000 \
+    NPM_CONFIG_FETCH_TIMEOUT=60000
 
 # The worker image also backs the pre-deploy migration job. Keep psql in this
 # image so DATABASE_URL never needs to be decomposed into individual secrets.
@@ -14,8 +20,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev \
-    && npm cache clean --force
+# A registry/network stall must not hold the privileged release lock forever.
+# Production dependencies are pure JS, so lifecycle scripts are unnecessary.
+# Retry once after a bounded timeout, then fail closed so the release wrapper
+# can release its flock and leave production untouched.
+RUN set -eux; \
+    timeout --kill-after=15s 300s npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    || { \
+      npm cache clean --force; \
+      timeout --kill-after=15s 300s npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
+    }; \
+    npm cache clean --force
 
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node db/migrations ./db/migrations

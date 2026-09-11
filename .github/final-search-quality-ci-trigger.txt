@@ -1,0 +1,1 @@
+Trigger PR CI for the fully tested Reddit concept-gate + qualifier-preservation source.

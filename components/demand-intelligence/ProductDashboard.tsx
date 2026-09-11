@@ -3977,12 +3977,11 @@ export function ProductDashboard({
               />
 
               <div className={styles.simpleCard}>
-                <span className={styles.simpleCardTitle}>Reddit account</span>
-                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
-                  {redditConnection.connected
-                    ? `Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`
-                    : "Connect it to post replies from here. Without it you copy and paste \u2014 the drafts work either way."}
-                </p>
+                {redditConnection.connected && (
+                  <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                    {`Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`}
+                  </p>
+                )}
                 {redditConnection.connected ? (
                   <button
                     type="button"
@@ -4029,12 +4028,11 @@ export function ProductDashboard({
               <BusinessProfilePanel profile={data.business} />
 
               <div className={styles.simpleCard}>
-                <span className={styles.simpleCardTitle}>Reddit account</span>
-                <p className={styles.simpleCardBody} style={{ margin: 0 }}>
-                  {redditConnection.connected
-                    ? `Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`
-                    : "Connect it to post replies from here. Without it you copy and paste \u2014 the drafts work either way."}
-                </p>
+                {redditConnection.connected && (
+                  <p className={styles.simpleCardBody} style={{ margin: 0 }}>
+                    {`Connected as u/${redditConnection.username}. Replies can be posted straight from Opportunities.`}
+                  </p>
+                )}
                 {redditConnection.connected ? (
                   <button
                     type="button"

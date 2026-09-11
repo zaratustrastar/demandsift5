@@ -1,12 +1,9 @@
 name: DemandSift trusted VPS release
-# Release marker: Reply generation is now on-demand only. Removed
-# automatic scan-time generation for both lead opportunities and
-# relevant conversations; the carousel's "Generate reply"/"Create
-# reply" buttons are the only way to produce reply content now. Fixed
-# repliesReady/stage-message honesty and stale "reply being
-# generated" copy across scan-workflow.ts, reddit-monitor-workflow.ts,
-# and ThreadlineExperience.tsx. Also removed the duplicate "Replies"
-# tab (2026-09-10).
+# Release marker: Removed the "Reddit account" title and not-connected
+# explanatory copy from the Monitoring config and Settings tabs' Reddit
+# connection cards (both occurrences of the same duplicated text).
+# Connect/Disconnect buttons and the connected-state message are
+# unchanged (2026-09-10).
 
 on:
   push:
